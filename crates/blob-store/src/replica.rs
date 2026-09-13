@@ -1,11 +1,12 @@
-//! The per-node `BlobReplica` actor and the [`BlobTransport`] seam (spec §6).
+//! The per-node `BlobReplica` actor and its messages (spec §6).
 //!
 //! The `Clustered` tier reuses the actor framework's transport, with no new wire
 //! protocol (actor §7.1). A per-node [`BlobReplica`] actor owns this node's
-//! on-disk [`LocalBlobStore`] and accepts four messages: [`StoreBlob`],
-//! [`FetchBlob`], [`HasBlob`], and [`DeleteNamespace`]. It is registered in the
-//! receptionist under one well-known key ([`blob_replica_key`]) so peers discover
-//! it, and [`ActorBlobTransport`] reaches a peer's replica by an ordinary `ask`.
+//! on-disk [`LocalBlobStore`] and accepts five messages: [`StoreBlob`],
+//! [`FetchBlob`], [`HasBlob`], [`DeleteNamespace`], and [`SyncTombstones`]. It is
+//! registered in the receptionist under one well-known key ([`blob_replica_key`])
+//! so peers discover it, and the tier reaches a peer's replica by an ordinary
+//! `ask`.
 //!
 //! Unlike entity's `StoreRecord`, [`StoreBlob`] carries **no shard, no `after`,
 //! no term, and no `repair` flag** (spec §6): nothing needs fencing and nothing
@@ -14,18 +15,12 @@
 
 use std::marker::PhantomData;
 use std::ops::Range;
-use std::time::Duration;
-
 use actor_core::Actor;
-use actor_core::ActorRef;
-use actor_core::BoxFuture;
-use actor_core::CallError;
 use actor_core::Ctx;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
 use actor_core::Manifest;
 use actor_core::Message;
-use actor_core::NodeId;
 use actor_core::receptionist::Key;
 use serde::Deserialize;
 use serde::Serialize;
@@ -40,8 +35,8 @@ use crate::tombstone::Tombstone;
 use crate::tombstone::TombstoneSet;
 
 /// The receptionist key every node's [`BlobReplica`] registers under: one
-/// well-known key, one entry per node (spec §6). The transport looks a peer's
-/// replica up here, then `ask`s it.
+/// well-known key, one entry per node (spec §6). The tier looks a peer's replica
+/// up here, then `ask`s it.
 pub fn blob_replica_key<S: BlobSystem>() -> Key<BlobReplica<S>> {
     Key::new("blob.replica")
 }
@@ -78,8 +73,8 @@ pub struct FetchBlob {
 
 impl Message for FetchBlob {
     /// `ByteBuf` for the same reason [`StoreBlob::bytes`] is tagged: this is the read
-    /// half of the same payload. The transport's signature keeps `Vec<u8>`,
-    /// unwrapping the newtype is a move, not a copy.
+    /// half of the same payload. The tier unwraps it to `Vec<u8>`, a move, not a
+    /// copy.
     type Reply = Option<serde_bytes::ByteBuf>;
     const MANIFEST: Manifest = Manifest::new("blob.FetchBlob");
 }
@@ -246,180 +241,10 @@ impl<S: BlobSystem> Handler<SyncTombstones> for BlobReplica<S> {
     }
 }
 
-/// The boxed result of a [`BlobTransport::store_blob`]: the future the
-/// `Clustered` tier collects for its `W`-of-`R` quorum (spec §5.2).
-pub type StoreAckFuture = BoxFuture<'static, Result<StoreAck, CallError>>;
-
-/// How the `Clustered` tier reaches a node's [`BlobReplica`] (spec §6). Object-safe
-/// (the analogue of entity's `ReplicaTransport`), so the tier and the reconcile
-/// loop stay free of the system's `Clock`/`Entropy`/`Spawner`/`Transport` type
-/// parameters, and a simulation can substitute its own (spec §8).
-pub trait BlobTransport: Send + Sync + 'static {
-    /// `StoreBlob` to `node`'s replica (spec §5.2). A `Stored` ack counts toward
-    /// the `W` durability target; a `Deleted` ack surfaces the tombstone.
-    fn store_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        bytes: Vec<u8>,
-        within: Duration,
-    ) -> StoreAckFuture;
-
-    /// `FetchBlob` from `node`'s replica (spec §5.2): the whole raw bytes, or
-    /// `None`. The caller verifies (B1).
-    fn fetch_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        range: Option<Range<u64>>,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>>;
-
-    /// `HasBlob` on `node`'s replica (spec §7): gates a reconcile copy.
-    fn has_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<bool, CallError>>;
-
-    /// `DeleteNamespace` on `node`'s replica (spec §5.3): record the tombstone and
-    /// sweep. Fanned out to every serving node, not only a blob's owners.
-    fn delete_namespace(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        deleted_at: u64,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<DeleteAck, CallError>>;
-
-    /// `SyncTombstones` on `node`'s replica (spec §5.3, **B7**): pull its awareness
-    /// set so a rejoining or lagging node learns the deletes it missed.
-    fn sync_tombstones(
-        &self,
-        node: NodeId,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<Vec<Tombstone>, CallError>>;
-
-    /// Launch a detached background task (spec §5.2, §7): the reconcile loop, and
-    /// the straggler drain of a `put` that already reached `W`.
-    fn launch(&self, task: BoxFuture<'static, ()>);
-}
-
-/// The actor-messaging [`BlobTransport`] (spec §6: no new transport): it resolves a
-/// node's [`BlobReplica`] in the receptionist and `ask`s it. A replica on this node
-/// resolves to the local actor, so an owner's store to itself is a local call with
-/// no serialization (spec §5.2). Resolution is a local receptionist read on every
-/// call, so it is never stale across a peer restart.
-pub struct ActorBlobTransport<S: BlobSystem> {
-    system: S,
-}
-
-impl<S: BlobSystem> ActorBlobTransport<S> {
-    /// Build the transport over `system`'s receptionist and spawner.
-    pub fn new(system: S) -> ActorBlobTransport<S> {
-        ActorBlobTransport { system }
-    }
-
-    /// The replica registered on `node`, if discovered (spec §6).
-    fn resolve(&self, node: NodeId) -> Option<ActorRef<BlobReplica<S>>> {
-        self.system
-            .receptionist()
-            .lookup(blob_replica_key::<S>())
-            .into_vec()
-            .into_iter()
-            .find(|replica| replica.id().node() == node)
-    }
-}
-
-impl<S: BlobSystem> BlobTransport for ActorBlobTransport<S> {
-    fn store_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        bytes: Vec<u8>,
-        within: Duration,
-    ) -> StoreAckFuture {
-        let replica = self.resolve(node);
-        Box::pin(async move {
-            let replica = replica.ok_or(CallError::Unreachable)?;
-            replica
-                .ask_timeout(StoreBlob { ns, id, bytes }, within)
-                .await
-        })
-    }
-
-    fn fetch_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        range: Option<Range<u64>>,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>> {
-        let replica = self.resolve(node);
-        Box::pin(async move {
-            let replica = replica.ok_or(CallError::Unreachable)?;
-            replica
-                .ask_timeout(FetchBlob { ns, id, range }, within)
-                .await
-                .map(|found| found.map(serde_bytes::ByteBuf::into_vec))
-        })
-    }
-
-    fn has_blob(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        id: BlobId,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<bool, CallError>> {
-        let replica = self.resolve(node);
-        Box::pin(async move {
-            let replica = replica.ok_or(CallError::Unreachable)?;
-            replica.ask_timeout(HasBlob { ns, id }, within).await
-        })
-    }
-
-    fn delete_namespace(
-        &self,
-        node: NodeId,
-        ns: Namespace,
-        deleted_at: u64,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<DeleteAck, CallError>> {
-        let replica = self.resolve(node);
-        Box::pin(async move {
-            let replica = replica.ok_or(CallError::Unreachable)?;
-            replica
-                .ask_timeout(DeleteNamespace { ns, deleted_at }, within)
-                .await
-        })
-    }
-
-    fn sync_tombstones(
-        &self,
-        node: NodeId,
-        within: Duration,
-    ) -> BoxFuture<'static, Result<Vec<Tombstone>, CallError>> {
-        let replica = self.resolve(node);
-        Box::pin(async move {
-            let replica = replica.ok_or(CallError::Unreachable)?;
-            replica.ask_timeout(SyncTombstones, within).await
-        })
-    }
-
-    fn launch(&self, task: BoxFuture<'static, ()>) {
-        self.system.launch(task);
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use actor_core::ActorSystem;
     use actor_core::LocalSystemBuilder;
@@ -579,54 +404,6 @@ mod tests {
                     )
                     .await,
                 Ok(StoreAck::Deleted),
-            );
-        });
-    }
-
-    #[test]
-    fn the_actor_transport_resolves_and_reaches_a_replica() {
-        let sim = Simulation::new(2);
-        let system: Sim =
-            LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let local = LocalBlobStore::open(dir.path()).expect("open");
-
-        sim.block_on(async move {
-            let replica = system.spawn(BlobReplica::<Sim>::new(local, TombstoneSet::new()));
-            system
-                .receptionist()
-                .register(blob_replica_key::<Sim>(), &replica);
-
-            let node = system.node();
-            let transport = ActorBlobTransport::new(system.clone());
-            let within = Duration::from_secs(5);
-
-            let ns = Namespace::new(b"ws".to_vec());
-            let bytes = b"via the transport seam".to_vec();
-            let id = BlobId::of(&bytes);
-
-            assert_eq!(
-                transport
-                    .store_blob(node, ns.clone(), id, bytes.clone(), within)
-                    .await,
-                Ok(StoreAck::Stored),
-            );
-            assert_eq!(
-                transport
-                    .fetch_blob(node, ns.clone(), id, None, within)
-                    .await,
-                Ok(Some(bytes)),
-            );
-            assert_eq!(
-                transport.has_blob(node, ns.clone(), id, within).await,
-                Ok(true)
-            );
-
-            // A node with no registered replica is Unreachable, not a panic.
-            let absent = NodeId::new(999);
-            assert_eq!(
-                transport.has_blob(absent, ns, id, within).await,
-                Err(CallError::Unreachable),
             );
         });
     }

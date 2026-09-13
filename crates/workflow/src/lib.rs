@@ -83,7 +83,6 @@ use entity::EntityName;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub use backoff::Backoff;
 pub use backoff::BackoffPolicy;
 pub use binding::Binding;
 pub use binding::BindingState;

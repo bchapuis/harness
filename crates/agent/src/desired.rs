@@ -24,13 +24,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use workflow::OnOrphan;
 use workflow::Pending;
 
-use crate::agent::StepKey;
-use crate::agent::delegate_spec;
-use crate::client::HarnessConfig;
+use crate::config::HarnessConfig;
 use crate::kind::Kind;
 use crate::model::ModelRequest;
 use crate::model::ToolSpec;
@@ -45,15 +45,47 @@ use crate::tool::DELEGATE;
 use crate::tool::DelegateInput;
 use crate::tool::ToolError;
 
+/// One launched effect of a run (§3.1): the agent runtime's
+/// [`Workflow::Key`]. A model call is keyed by the step it answers (`own_steps`
+/// at issue, §3.1 step 2); a tool call or delegation by its `CallId` (§3.1 step
+/// 4).
+///
+/// The engine claims a key at launch and drops the claim when the key leaves the
+/// desired set, which is the moment its outcome commits: a committed response
+/// advances `own_steps`, and a committed `ToolOutcome` takes the call out of the
+/// pending set. A straggler therefore has nothing to "unlock" into a duplicate
+/// launch (§9.1 item 4, §9.2 item 4).
+///
+/// **Both variants carry the turn**, which neither half of the key supplies on
+/// its own: `own_steps` restarts at zero with every run, and a synthesized
+/// `call-{step}-{i}` id repeats across runs the same way. A key must be unique
+/// over the whole journal, not merely within one desired set (workflow §3.1),
+/// because the straggler filter's only test is presence in that set: a key that
+/// left and later re-entered would let an outcome launched under the first
+/// occurrence be settled as the second's.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum StepKey {
+    /// The model call answering step `own_steps` of `turn` (§3.1 step 2).
+    Model(TurnId, u32),
+    /// The tool call (or delegation) `CallId` names, within `turn` (§3.1 step 4).
+    Call(TurnId, CallId),
+    /// The cancel owed to the child the delegation `(turn, call)` started
+    /// (§9.2). A variant of its own rather than the `Call` key again: that key
+    /// left the set when the run ended, and a key must never re-enter (workflow
+    /// §3.1).
+    Cancel(TurnId, CallId),
+}
+
 /// One unit of work a session's committed state calls for: the agent runtime's
 /// [`Workflow::Effect`](workflow::Workflow::Effect).
 ///
 /// Opaque to the workflow and never journaled (workflow §3.1), so it carries
 /// exactly what the launch needs and nothing that would have to be kept
-/// consistent with the journal. The four variants are the loop's two external
+/// consistent with the journal. The five variants are the loop's two external
 /// operations (agent §3.1 steps 2 and 4), the delegation that executes in the
-/// loop rather than the sandbox (§8.1), and the outcome the fold can synthesize
-/// without executing anything (§5.4).
+/// loop rather than the sandbox (§8.1), the cancel a cancelled run owes each
+/// child it started (§9.2), and the outcome the fold can synthesize without
+/// executing anything (§5.4).
 pub enum Effect {
     /// The model call answering step `step` (§3.1 step 2).
     Model { step: u32, request: ModelRequest },
@@ -75,6 +107,11 @@ pub enum Effect {
     },
     /// A call the fold answers on its own: nothing is executed (§5.4).
     Fail { call: CallId, error: ToolError },
+    /// The `Cancel` still owed to `child` (§9.2 item 2): fold state
+    /// (`cancels_owed`) until the child's ack journals `CancelDelivered`. Which
+    /// delegation owes it is the key's to say ([`StepKey::Cancel`]), so the effect
+    /// carries only what the launch needs.
+    Cancel { child: ChildRef },
 }
 
 /// The effects `state` calls for (workflow §3.1).
@@ -86,9 +123,12 @@ pub enum Effect {
 /// resumed activation agree with the one it replaced about what is outstanding
 /// (W1).
 ///
-/// - No live run ⇒ **empty**. A queued turn is not an outstanding effect: the
-///   run has not started, and starting it is a record the tick decides (§3.1),
-///   not work performed outside the entity.
+/// - Every cancel the fold still owes (§9.2 item 2), whatever the run state: a
+///   cancelled run's recorded children are a debt that outlives the run, and
+///   the next run may start while it is still being paid.
+/// - No live run ⇒ nothing more. A queued turn is not an outstanding effect:
+///   the run has not started, and starting it is a record the tick decides
+///   (§3.1), not work performed outside the entity.
 /// - A live run with no pending calls ⇒ the **model call** for the run's current
 ///   step, unless the budget forbids one, in which case the set is empty and the
 ///   run has ended by arithmetic (§3.1 step 2). A completion request is
@@ -101,33 +141,47 @@ pub fn desired(
     config: &HarnessConfig,
     state: &SessionState,
 ) -> Vec<Pending<StepKey, Effect>> {
+    // A cancel is idempotent on the child's side (§9.2 item 1), so a repeat
+    // after a lost ack re-executes.
+    let mut set: Vec<Pending<StepKey, Effect>> = state
+        .cancels_owed
+        .iter()
+        .flat_map(|(turn, owed)| {
+            owed.iter().map(|(call, child)| {
+                Pending::reexecute(
+                    StepKey::Cancel(turn.clone(), call.clone()),
+                    Effect::Cancel {
+                        child: child.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
     let Some(live) = state.live.as_ref() else {
-        return Vec::new();
+        return set;
     };
     if live.pending.is_empty() {
         // The budget gate is fold state (`spend` and `budget` are both folded),
         // so it belongs here: a run past its budget calls for no further model
         // call, and the tick ends it instead of launching one.
-        if !live.spend.allows_call(&live.budget, config.budget_floor) {
-            return Vec::new();
+        if live.spend.allows_call(&live.budget, config.budget_floor) {
+            let step = live.spend.own_steps;
+            set.push(Pending::reexecute(
+                StepKey::Model(live.turn.clone(), step),
+                Effect::Model {
+                    step,
+                    request: build_request(kind, state, live),
+                },
+            ));
         }
-        let step = live.spend.own_steps;
-        return vec![Pending::reexecute(
-            StepKey::Model(live.turn.clone(), step),
-            Effect::Model {
-                step,
-                request: build_request(kind, state, live),
-            },
-        )];
+        return set;
     }
     // The lineage root a delegation carries (§8.1). `SessionCreated` is journaled
     // with the very first turn, so a live run always has one; a delegation
     // without it is unreachable rather than defaulted, and drops out of the set
     // the way any unlaunchable member does.
     let root = state.created.as_ref().map(|c| c.root.clone());
-    live.pending
-        .iter()
-        .filter_map(|(call, pending)| {
+    set.extend(live.pending.iter().filter_map(|(call, pending)| {
             let effect = if pending.name == DELEGATE {
                 // Not yet launchable: the `ChildRun` intent this call needs is
                 // still to be journaled (§8.1 step 1), so the set omits it.
@@ -176,8 +230,8 @@ pub fn desired(
                 effect,
                 on_orphan: orphan_policy(kind, &pending.name),
             })
-        })
-        .collect()
+        }));
+    set
 }
 
 /// The tier a desired call needs, or `None` for one that runs in the loop or
@@ -186,7 +240,10 @@ pub fn desired(
 pub(crate) fn tier_of(effect: &Effect) -> Option<Tier> {
     match effect {
         Effect::Tool { tier, .. } => Some(*tier),
-        Effect::Model { .. } | Effect::Delegate { .. } | Effect::Fail { .. } => None,
+        Effect::Model { .. }
+        | Effect::Delegate { .. }
+        | Effect::Cancel { .. }
+        | Effect::Fail { .. } => None,
     }
 }
 
@@ -209,6 +266,20 @@ fn build_request(kind: &Kind, state: &SessionState, live: &LiveRun) -> ModelRequ
         tools,
         transcript: Arc::clone(&state.transcript),
         max_tokens,
+    }
+}
+
+/// The interface of the built-in `delegate` tool (§8.1), synthesized so the
+/// model can call it like any declared tool.
+fn delegate_spec(kind: &Kind) -> ToolSpec {
+    let kinds: Vec<&str> = kind.delegates.iter().map(|k| k.as_str()).collect();
+    ToolSpec {
+        name: DELEGATE.to_string(),
+        description: format!(
+            "Delegate a task to a sub-agent. Allowed kinds: {}.",
+            kinds.join(", ")
+        ),
+        input_schema: DelegateInput::input_schema(&kinds),
     }
 }
 

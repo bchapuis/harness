@@ -66,7 +66,7 @@ use entity::facet::BlobId;
 use entity::facet::Disk;
 use entity::facet::DiskCaptureStats;
 use entity::facet::DiskError;
-use entity::store::EntityBlobStore;
+use entity::store::EntityStore;
 use entity::store::FileEntityStore;
 use entity::store::MemoryEntityStore;
 use serde::Deserialize;
@@ -181,7 +181,7 @@ fn write(bencher: Bencher) {
 /// Both are setup rather than the store's work: a 1 MiB allocation and fill would
 /// swamp the memory store, and leaving the hash in would make every store look like
 /// it costs at least one BLAKE3, which is layer 1's subject.
-fn put_cold(bencher: Bencher, store: impl EntityBlobStore) {
+fn put_cold(bencher: Bencher, store: impl EntityStore) {
     let entity = name();
     let mut stamp = 0u64;
     bencher

@@ -284,8 +284,7 @@ impl FileRaftWAL {
 
         // The log: the shared WAL recovers the valid prefix and truncates a torn tail.
         let (mut log, records) =
-            Wal::<(u64, RaftEntry)>::open(dir.join("log"), MAX_RECORD, &LOG_RECORDS)
-                .map_err(|e| e.into_io())?;
+            Wal::<(u64, RaftEntry)>::open(dir.join("log"), MAX_RECORD, &LOG_RECORDS)?;
 
         // Discard records the snapshot subsumes (absolute index `≤ snapshot_index`):
         // the self-heal for a crash between persisting a snapshot and rewriting the

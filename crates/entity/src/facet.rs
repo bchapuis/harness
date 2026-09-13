@@ -91,7 +91,7 @@ use crate::facet_blobs::RootSet;
 /// The record tag of facet 0: the entity's own event fold (spec §7.12).
 pub(crate) const EVENT_TAG: u8 = 0;
 
-/// The record envelope's revisions, and the one this build writes (spec §7.12,
+/// The record envelope's revisions, and the one this build writes (spec §9,
 /// compatibility spec §3).
 ///
 /// Revision 1 is `[tag][payload]` with `tag <= MAX_TAG`, so the window costs **no
@@ -165,7 +165,7 @@ pub(crate) fn split_record(bytes: &[u8]) -> Result<(u8, &[u8]), FacetError> {
         .split_first()
         .ok_or_else(|| FacetError("empty record (missing facet tag)".into()))?;
     if lead > MAX_TAG {
-        // The high bit escapes into a later envelope revision (§7.12), which
+        // The high bit escapes into a later envelope revision (§9), which
         // revision 1 never sets, so these bytes come from a newer build. Refuse
         // by name: "unrecognized facet tag 129" would send an operator hunting for
         // a missing facet, when the fault is a version skew at the other end.
@@ -195,7 +195,7 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
     postcard::from_bytes(bytes).map_err(|e| FacetError(format!("{what}: {e}")))
 }
 
-/// The composite snapshot's stamp (spec §7.12, compatibility spec §3).
+/// The composite snapshot's stamp (spec §9, compatibility spec §3).
 ///
 /// A snapshot gets a full magic and revision rather than the record envelope's
 /// reserved bit (`RECORD`): `postcard` gives its leading bytes no structure a

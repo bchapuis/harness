@@ -116,6 +116,11 @@ pub const EXEMPT: &[Exempt] = &[
     e("Eq", Why::Elsewhere, "std, a derive"),
     e("Hash", Why::Elsewhere, "std, a derive"),
     e("Send", Why::Elsewhere, "std, an auto trait"),
+    e(
+        "InvalidData",
+        Why::Elsewhere,
+        "std, the `io::ErrorKind` a `wal` open refusal rides",
+    ),
     e("Serialize", Why::Elsewhere, "serde, a derive"),
     e("Deserialize", Why::Elsewhere, "serde, a derive"),
     e(

@@ -26,7 +26,6 @@ use std::collections::BTreeSet;
 use entity::EntityName;
 use entity::Seq;
 use entity::facet::BlobId;
-use entity::store::EntityBlobStore;
 use entity::store::EntityStore;
 use entity::store::FileEntityStore;
 use entity::store::MemoryEntityStore;
@@ -133,7 +132,6 @@ enum Op {
         from: u64,
     },
     Unseal,
-    RemoveEntity,
     RemoveRange {
         from: u64,
     },
@@ -198,8 +196,7 @@ fn draw(rng: &mut Rng, head: Seq, base: Seq) -> Op {
         86..=87 => Op::DeleteBlobs,
         88..=91 => Op::SealRange { from: rng.next() },
         92..=93 => Op::Unseal,
-        94..=96 => Op::RemoveEntity,
-        97..=98 => Op::RemoveRange { from: rng.next() },
+        94..=98 => Op::RemoveRange { from: rng.next() },
         _ => Op::DropShard,
     }
 }
@@ -314,10 +311,6 @@ fn apply(
         Op::Unseal => {
             file.unseal(shard);
             mem.unseal(shard);
-        }
-        Op::RemoveEntity => {
-            file.remove_entity(shard, g);
-            mem.remove_entity(shard, g);
         }
         Op::RemoveRange { from } => {
             file.remove_range(shard, *from);
@@ -437,7 +430,7 @@ fn file_store_matches_memory_store_under_a_seeded_op_stream() {
 
 /// Named regression for the first divergence the seeded stream found.
 ///
-/// The manifest is append-only, so `remove_entity` leaves the entity's segment id
+/// The manifest is append-only, so removing an entity leaves its segment id
 /// assigned, and `segment_id` kept answering with it, so opening the segment to
 /// serve a *read* re-created the file that removal had just deleted. Nothing looked
 /// wrong at the read (the reply was still empty), but the entity came back in
@@ -459,7 +452,8 @@ fn a_read_of_a_removed_entity_does_not_resurrect_it() {
         matches!(seeded, StoreAck::Stored(_)),
         "the entity must exist before removal is worth testing"
     );
-    store.remove_entity(0, &g);
+    // The whole shard's hash range: the one removal the substrate defines.
+    store.remove_range(0, 0);
 
     // The read that used to bring it back.
     assert!(store.read(0, &g).slots.is_empty());

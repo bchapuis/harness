@@ -16,9 +16,9 @@ Throughout, `wal` is the crate and namespace name. Sections of this document are
 The crate sits **below** its callers and depends on none of them. It provides:
 
 - **`Wal<T>`**: an append-only log of `postcard`-encoded `T` records (§2, §3).
-- **Sidecar helpers** (`atomic_replace`, `checksum`, `sync_dir`): for durable state that is a single small file rather than a log (§5).
+- **Sidecars** (`Sidecar`, `atomic_replace`, `checksum`, `sync_dir`): for durable state that is a single small file rather than a log (§5).
 
-It is **not** a database, an index, or a replication layer. It does no caching, holds no in-memory copy of the records after `open` returns them, and imposes no schema on `T` beyond `serde::Serialize + serde::de::DeserializeOwned`. Ordering, indexing, snapshotting, replication, and compaction *policy* all belong above the crate; the crate only frames, persists, and recovers the bytes.
+It is **not** a database, an index, or a replication layer. It does no caching, holds no in-memory copy of the records after `open` returns them, and imposes no schema on `T` beyond `serde::Serialize + serde::de::DeserializeOwned`. A sidecar's body (§5 rule 4) is the crate's own, not a `T`: the one record shape every stamped `u64` file in the tree shares. Ordering, indexing, snapshotting, replication, and compaction *policy* all belong above the crate; the crate only frames, persists, and recovers the bytes.
 
 The crate is **synchronous and single-handle**: one `Wal<T>` owns one open append handle to one file. Concurrent access to the same path from two `Wal<T>` instances is outside the contract; a caller serializes access through its own single-writer discipline.
 
@@ -56,7 +56,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
 
-6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. `open` therefore returns `OpenError`, keeping a policy refusal distinct from the I/O failures §6 leaves to the caller.
+6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. A file `open` refuses surfaces as `std::io::ErrorKind::InvalidData`, its message naming the boundary and the revision found, so a caller that logs it says which file and which build disagree.
 
    `append` does **not** update the record-schema field; `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. This is fail-closed: every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
 
@@ -92,7 +92,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 ### 3.5 Accessors
 
-8. `len()`, `is_empty()`, and `path()` MUST reflect the current in-memory record count and the file path. The crate keeps the parallel array of per-record frame offsets that makes `truncate` a single `set_len`; it does **not** retain the record payloads after `open` (the caller holds those).
+8. `len()` and `is_empty()` MUST reflect the current in-memory record count. The crate keeps the parallel array of per-record frame offsets that makes `truncate` a single `set_len`; it does **not** retain the record payloads after `open` (the caller holds those).
 
 ---
 
@@ -120,11 +120,13 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 3. `sync_dir(dir)` MUST make a directory entry durable: on unix, fsync the directory; elsewhere (where directories cannot be opened for sync) the rename is itself the durability point and the call is a no-op. Exposed for a caller that creates its own subdirectories to hold logs.
 
+4. `Sidecar` is the stamped `u64` sidecar: one value written whole to a file of its own under a caller-owned `compat::Stamp` (a fence term, a seal bound, a deletion stamp). `write` MUST persist it through `atomic_replace`. The body behind the stamp is positional `postcard`, `{ checksum, value, ext }`, the checksum being rule 2's `checksum` over the value's little-endian bytes and `ext` an extension area whose critical keys the caller declares ([compatibility](compatibility-spec.md) §2.1). `read` MUST accept the stamped form and the unstamped predecessor, a 16-byte `[u64 value][u64 checksum]`, admitting a stamped record's revision before reading any field (**V2**) and reading only magic-less bytes as the predecessor; nothing writes the predecessor. `read` MUST answer `None` for an absent file only: a short file, a long file, or a checksum mismatch is an `InvalidData` refusal naming the boundary and the path, because a durable fence read as *no fence* is a safety property lost with no diagnostic.
+
 ---
 
 ## 6. Failure policy
 
-1. Every fallible method MUST return `std::io::Result`, except `open`, which returns `OpenError` so that a policy refusal (`Incompatible`) stays distinct from an I/O failure (`Io`), §2.1 rule 6. The crate **MUST NOT decide what an I/O failure means**: it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
+1. Every fallible method MUST return `std::io::Result`; `open`'s policy refusal rides it as `InvalidData` with a message naming the boundary (§2.1 rule 6). The crate **MUST NOT decide what an I/O failure means**: it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report.
 
 2. The crate masks no corruption: a checksum failure, a torn tail, and a parse failure all surface as a shortened valid prefix (§3.1), never as an error and never as a silently patched record.
 

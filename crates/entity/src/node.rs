@@ -95,6 +95,36 @@ impl<S: EntitySystem> EntityNode<S> {
         }
     }
 
+    /// A production node over real storage under `data`: the durable entity store
+    /// every type it hosts shares (spec §7.4), the blocking-I/O pool, and the
+    /// operator metrics registry (§13), the three node-scoped choices a deployment
+    /// otherwise makes one by one. Returns the store factory beside the node because
+    /// hosting is per type ([`EntityConfig::entity_store`]) while the store is per
+    /// node: its factory caches per `(type, node)`, so every type shares one on-disk
+    /// store keyed by shard and entity, the entity analogue of the Raft WAL.
+    ///
+    /// The store stamps the codec's name and refuses to open under another (§7.4),
+    /// and the codec is read off `system`, so the stamp cannot name a value other
+    /// than the one the messages are encoded with.
+    ///
+    /// The pool: without it every fsync runs on the async worker that is also
+    /// driving this node's Raft heartbeats and its shards' quorum waits, so a slow
+    /// disk becomes spurious elections and a rehydration storm rather than slow
+    /// writes. The metrics: commit latency by outcome, rehydration cost and the
+    /// resident count, the signals that say whether this node's shards are healthy,
+    /// distinct from the event stream the simulator's checkers read.
+    pub fn durable(
+        system: S,
+        data: &std::path::Path,
+    ) -> (EntityNode<S>, crate::store::EntityStoreFactory) {
+        let store =
+            crate::file_store::FileEntityStore::factory(data.join("entities"), &*system.codec());
+        let node = EntityNode::new(system)
+            .blocking_io(Arc::new(crate::blocking::ThreadPoolIo::sized_for_host()))
+            .metrics(Arc::new(crate::metrics::AtomicEntityMetrics::new()));
+        (node, store)
+    }
+
     /// Where this node's blocking store I/O runs (spec §7.4).
     ///
     /// Without it every fsync runs on the async worker that is also driving this
@@ -128,9 +158,18 @@ impl<S: EntitySystem> EntityNode<S> {
         self.entities_named(G::ENTITY_TYPE, config, Arc::new(G::default))
     }
 
-    /// Host entities of type `G` under an explicit runtime type name with a
-    /// caller-supplied activation factory, this node's form of
-    /// [`EntityExt::entities_named`](crate::EntityExt::entities_named).
+    /// Host entities of type `G` under an explicit runtime **type name** (spec
+    /// §5.1), with a caller-supplied **factory** for each activation's behavior.
+    ///
+    /// Two extension points over [`entities`](EntityNode::entities), both for one
+    /// Rust entity that must be **many** entity types at runtime:
+    ///
+    /// - `entity_type` overrides `G::ENTITY_TYPE`, so the same `G` hosts under
+    ///   several names: distinct gateways, shard maps, and consensus groups. It
+    ///   MUST be stable cluster-wide and across runs, exactly as `G::ENTITY_TYPE`
+    ///   must be (§5.1); a `&'static str` makes that lifetime explicit.
+    /// - `factory` replaces `G::default`, so the runtime can inject per-node seam
+    ///   handles into each fresh activation (the entity needs no `Default`).
     pub fn entities_named<G>(
         &self,
         entity_type: &'static str,
@@ -163,9 +202,10 @@ impl<S: EntitySystem> EntityNode<S> {
         self.entities_named_with_alarms(G::ENTITY_TYPE, config, Arc::new(G::default), index)
     }
 
-    /// Host entities of type `G` under an explicit runtime type name with durable-alarm
-    /// firing: this node's form of
-    /// [`EntityExt::entities_named_with_alarms`](crate::EntityExt::entities_named_with_alarms).
+    /// [`entities_named`](EntityNode::entities_named) with durable-alarm firing
+    /// (spec §7.16): each host registers its pending deadline with the per-shard
+    /// `index`, and a background driver re-activates due entities on the shards
+    /// this node leads. See [`EntityExt::entities_with_alarms`](crate::EntityExt::entities_with_alarms).
     pub fn entities_named_with_alarms<G>(
         &self,
         entity_type: &'static str,
@@ -176,13 +216,13 @@ impl<S: EntitySystem> EntityNode<S> {
     where
         G: Entity<System = S>,
     {
-        crate::entity_ref::build_entities_with_alarms::<S, G>(
+        crate::entity_ref::build_entities::<S, G>(
             &self.system,
             entity_type,
             config,
             &self.capabilities,
             factory,
-            index,
+            Some(index),
         )
     }
 }

@@ -52,6 +52,8 @@ use crate::entity::events_in_page;
 use crate::entity_ref::Entities;
 use crate::error::EntityError;
 use crate::host::CommittedCell;
+use crate::facet::FacetCell;
+use crate::host::Activation;
 use crate::host::HEAD_UNPUBLISHED;
 use crate::host::Host;
 use crate::journal::DynEntityJournal;
@@ -68,7 +70,7 @@ use crate::system::ShardId;
 ///
 /// `entity_type` is the runtime type name (spec §5.1), `G::ENTITY_TYPE` by default
 /// but a caller-supplied name when one Rust entity is hosted under several type
-/// names ([`entities_named`](crate::EntityExt::entities_named)): two such names
+/// names ([`entities_named`](crate::cluster::EntityNode::entities_named)): two such names
 /// register distinct keys even though both are `Key<Gateway<G>>`.
 pub(crate) fn gateway_key<G: Entity>(entity_type: &'static str) -> Key<Gateway<G>> {
     Key::new(entity_type)
@@ -336,15 +338,21 @@ impl<G: Entity> Gateway<G> {
         let committed: CommittedCell = Arc::new(AtomicU64::new(HEAD_UNPUBLISHED));
         let cell = Arc::clone(&committed);
         let host = ctx.spawn_with(move || {
-            Host::new(
+            let activation = Arc::new(Activation {
                 entity_type,
+                name: activated.clone(),
+                gateway: gateway.clone(),
+                journal: journal.clone(),
+                facets: Arc::new(FacetCell::new()),
+                watches: std::sync::Mutex::new(Vec::new()),
+                blocking_io: Arc::clone(capabilities.blocking_io()),
+            });
+            Host::new(
                 (factory)(),
-                activated.clone(),
                 shard_index,
-                journal.clone(),
+                activation,
                 config.clone(),
-                &capabilities,
-                gateway.clone(),
+                Arc::clone(capabilities.metrics()),
                 alarm_index.clone(),
                 Arc::clone(&cell),
             )

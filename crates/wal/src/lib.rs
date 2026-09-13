@@ -47,7 +47,9 @@
 //! Some durable state is not a log but a single small file rewritten in place (a
 //! generation counter, a small piece of metadata, a checkpoint pointer). For those,
 //! [`atomic_replace`] writes `tmp → fsync → rename → fsync dir` so a reader sees
-//! either the old file or the whole new one, never a torn mix. [`checksum`] and
+//! either the old file or the whole new one, never a torn mix. [`Sidecar`] is the
+//! stamped, checksummed `u64` sidecar every such file in the tree is (a fence term,
+//! a seal bound, a deletion stamp), written and read here once; [`checksum`] and
 //! [`sync_dir`] are exposed for framing one's own sidecar bytes.
 //!
 //! # Failure policy
@@ -56,10 +58,11 @@
 //! failure *means*. The caller does: code that cannot persist a record it must not
 //! lose may have no safe way to continue, so it panics with a domain-specific message.
 //!
-//! [`open`](Wal::open) is the exception, returning [`OpenError`], because it has a
-//! second failure that is not an I/O event at all: a file this build cannot read. The
-//! bytes are intact and the disk is fine; the refusal is policy. A caller that wants
-//! the two collapsed says so, with [`OpenError::into_io`].
+//! [`open`](Wal::open) has a second failure that is not an I/O event at all: a file
+//! this build cannot read. The bytes are intact and the disk is fine; the refusal is
+//! policy. It surfaces as [`io::ErrorKind::InvalidData`] whose message names the
+//! boundary and the revision found (compatibility §3.5), so a caller that logs it
+//! says which file and which build disagree.
 
 use std::fs;
 use std::fs::File;
@@ -72,6 +75,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -232,6 +236,135 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+/// A stamped **sidecar**: one `u64` written whole to a small file of its own (§5),
+/// the shape of a fence term, a seal bound, or a tombstone's deletion stamp.
+///
+/// The body behind the stamp is positional `postcard`: a checksum over the value,
+/// the value, and an extension area (compatibility §2.1), so the record can gain a
+/// field without a revision bump. The checksum is [`checksum`], FNV-1a, frozen
+/// because the unstamped predecessor below has no header to name another; it covers
+/// the value, so a torn or bit-rotted value cannot pass unnoticed.
+///
+/// [`read`](Sidecar::read) accepts the stamped form and the 16-byte unstamped
+/// predecessor, `[u64 value][u64 checksum]` little-endian, which every sidecar in
+/// the tree had before it carried a stamp; nothing writes that form. The order is
+/// the contract (compatibility **V2**): bytes carrying the magic are *this* format,
+/// so their revision is admitted before any field is read, and a revision this
+/// build refuses is never handed to the older decoder. Only bytes without the magic
+/// are read as the predecessor.
+///
+/// `None` means one thing only: **the file is absent**. A short file, a long file,
+/// or a checksum mismatch is an `InvalidData` refusal naming the boundary and the
+/// path, never an absence, because a durable fence coming back as *no fence* is a
+/// safety property lost with no diagnostic anywhere.
+pub struct Sidecar {
+    stamp: compat::Stamp,
+    /// The critical extension keys this build implements (compatibility §2.1).
+    known_ext: &'static [u16],
+}
+
+/// A sidecar's body, behind the stamp.
+#[derive(Serialize, Deserialize)]
+struct SidecarBody {
+    checksum: u64,
+    value: u64,
+    ext: compat::Extensions,
+}
+
+/// Bytes of an unstamped sidecar: the value and its checksum, both `u64` LE.
+const SIDECAR_LEGACY_BYTES: usize = 16;
+
+impl Sidecar {
+    /// A sidecar format under `stamp`, implementing the critical extension keys
+    /// `known_ext` (compatibility §2.1).
+    pub const fn new(stamp: compat::Stamp, known_ext: &'static [u16]) -> Sidecar {
+        Sidecar { stamp, known_ext }
+    }
+
+    /// The stamp on this sidecar's files.
+    pub const fn stamp(&self) -> &compat::Stamp {
+        &self.stamp
+    }
+
+    /// `value`'s bytes, stamped at the revision this build writes.
+    pub fn encode(&self, value: u64) -> Vec<u8> {
+        let body = postcard::to_allocvec(&SidecarBody {
+            checksum: checksum(&value.to_le_bytes()),
+            value,
+            ext: compat::Extensions::new(),
+        })
+        .expect("a sidecar body is plain owned data");
+        self.stamp.stamp(&body)
+    }
+
+    /// Atomically persist `value` at `path` ([`atomic_replace`]).
+    ///
+    /// # Errors
+    ///
+    /// Any filesystem error, or `InvalidData` for a `path` with no file name.
+    pub fn write(&self, path: &Path, value: u64) -> io::Result<()> {
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("a sidecar path names no file: {}", path.display()),
+            )
+        })?;
+        let name = name.to_string_lossy();
+        atomic_replace(parent_dir(path), &name, &self.encode(value))
+    }
+
+    /// The value the file at `path` carries, or `None` if the file is absent.
+    ///
+    /// # Errors
+    ///
+    /// Any filesystem error other than absence; or `InvalidData` for bytes that
+    /// are neither a stamped record this build accepts nor the unstamped
+    /// predecessor, or whose checksum does not cover their value.
+    pub fn read(&self, path: &Path) -> io::Result<Option<u64>> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        self.decode(path, &bytes).map(Some)
+    }
+
+    fn decode(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        let boundary = self.stamp.window().boundary();
+        let named = |msg: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{boundary} at {}: {msg}", path.display()),
+            )
+        };
+        if self.stamp.is_stamped(bytes) {
+            let (_, body) = self.stamp.unstamp(bytes).map_err(|err| named(err.to_string()))?;
+            let body: SidecarBody = postcard::from_bytes(body)
+                .map_err(|err| named(format!("body did not decode: {err}")))?;
+            body.ext
+                .admit(boundary, self.known_ext)
+                .map_err(|err| named(err.to_string()))?;
+            if body.checksum != checksum(&body.value.to_le_bytes()) {
+                return Err(named("checksum mismatch".to_string()));
+            }
+            return Ok(body.value);
+        }
+        if bytes.len() == SIDECAR_LEGACY_BYTES {
+            let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
+            let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
+            if check != checksum(&raw.to_le_bytes()) {
+                return Err(named("unstamped record's checksum mismatch".to_string()));
+            }
+            return Ok(raw);
+        }
+        Err(named(format!(
+            "neither a `{}` record nor a {SIDECAR_LEGACY_BYTES}-byte unstamped one ({} bytes)",
+            String::from_utf8_lossy(self.stamp.magic()),
+            bytes.len(),
+        )))
+    }
+}
+
 /// The framing capacity a log keeps between appends, when its last batch wanted less.
 ///
 /// Reusing one buffer is what makes an append allocation-free, but the capacity it reaches
@@ -306,6 +439,10 @@ const ACCEPTED_CHECKSUMS: compat::Accepted =
 /// The header has no checksum of its own. Every field is validated against a known
 /// value or window, so detectable damage is refused; the reserved `u16` is where a
 /// header digest would go.
+/// The file header's width: the frames begin after it (§2.1). Public because a
+/// caller that edits a log's bytes (a crash-point test, a corruption fixture)
+/// needs the offset the framing starts at, and a second copy of it would not
+/// move when the header does.
 pub const HEADER_LEN: usize = 16;
 
 /// Build the header a new log opens with. `records` is the caller's schema
@@ -366,57 +503,12 @@ fn admit_header<'a>(
     Ok((digest, &bytes[HEADER_LEN..]))
 }
 
-/// Opening a log failed.
-///
-/// An [`Io`](OpenError::Io) failure is a filesystem event whose *meaning* is the
-/// caller's to decide (see the module's failure policy); an
-/// [`Incompatible`](OpenError::Incompatible) file is a policy refusal, its bytes
-/// intact and simply not something this build reads.
-#[derive(Debug)]
-pub enum OpenError {
-    /// A filesystem error reading, creating, or truncating the file.
-    Io(io::Error),
-    /// The file is not a log this build can read: a foreign file, a frame layout
-    /// from another revision, a checksum this build does not compute, or a record
-    /// schema outside the caller's window.
-    Incompatible(compat::Incompatible),
+/// A policy refusal as an I/O error: `InvalidData`, because the bytes are not what
+/// this build reads, with the refusal's own message naming the boundary and the
+/// revision it found.
+fn refused(err: compat::Incompatible) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
 }
-
-impl OpenError {
-    /// Collapse into an [`io::Error`], for a caller whose own signature is
-    /// `io::Result`. An incompatible file becomes `InvalidData` (the bytes are not
-    /// what this build reads) with the refusal's own message carrying which
-    /// boundary and which revision.
-    pub fn into_io(self) -> io::Error {
-        match self {
-            OpenError::Io(err) => err,
-            OpenError::Incompatible(err) => io::Error::new(io::ErrorKind::InvalidData, err),
-        }
-    }
-}
-
-impl From<io::Error> for OpenError {
-    fn from(err: io::Error) -> OpenError {
-        OpenError::Io(err)
-    }
-}
-
-impl From<compat::Incompatible> for OpenError {
-    fn from(err: compat::Incompatible) -> OpenError {
-        OpenError::Incompatible(err)
-    }
-}
-
-impl std::fmt::Display for OpenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OpenError::Io(err) => write!(f, "{err}"),
-            OpenError::Incompatible(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl std::error::Error for OpenError {}
 
 /// Frame one record (`[u32 len][postcard payload][u64 checksum]`, all little-endian)
 /// onto the tail of `buf`, returning the buffer.
@@ -556,14 +648,9 @@ pub struct Wal<T> {
     /// [`rewrite`](Wal::rewrite) can stamp the replacement it produces. This crate
     /// never interprets it.
     ///
-    /// Not the revision stamped in the file that was opened. The two differ once a
-    /// caller's window spans more than one revision: [`append`](Wal::append) adds
-    /// frames at *this* revision to a file whose header still records the older one,
-    /// so the stamp understates until a [`rewrite`](Wal::rewrite) restamps it. The
-    /// consequence is fail-closed: a later build whose window starts above the stale
-    /// stamp refuses the file by name rather than misreading it. A caller widening its
-    /// window should compact affected logs. Not implemented: raising the stamp in
-    /// place on the first append after a bump.
+    /// Not the revision stamped in the file that was opened: once a caller's window
+    /// spans two revisions the stamp understates until a [`rewrite`](Wal::rewrite)
+    /// restamps it, and the rule for that is wal §2.1 rule 6.
     records: compat::Version,
     _marker: PhantomData<fn() -> T>,
 }
@@ -581,12 +668,16 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     ///
     /// # Errors
     ///
-    /// Any filesystem error reading, opening, or truncating the file.
+    /// Any filesystem error reading, opening, or truncating the file; or
+    /// `InvalidData` for a file this build cannot read (a foreign file, a frame
+    /// layout from another revision, a checksum this build does not compute, or a
+    /// record schema outside the caller's window), its message naming the boundary
+    /// and the revision found.
     pub fn open(
         path: impl Into<PathBuf>,
         max_record: u32,
         records: &compat::Window,
-    ) -> Result<(Wal<T>, Vec<T>), OpenError> {
+    ) -> io::Result<(Wal<T>, Vec<T>)> {
         // What keeps the unstamped-file refusal sound: a headerless file begins with
         // a frame length at or below `max_record`, so it cannot begin with `MAGIC`
         // (see there). A caller permitting a larger record would break that.
@@ -599,7 +690,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         let (bytes, existed) = match fs::read(&path) {
             Ok(bytes) => (bytes, true),
             Err(err) if err.kind() == io::ErrorKind::NotFound => (Vec::new(), false),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         };
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
@@ -616,11 +707,10 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         let fresh = header(records.writes(), Digest::WRITES);
         if bytes.len() < HEADER_LEN {
             if !fresh.starts_with(&bytes) {
-                return Err(compat::Incompatible::Unstamped {
+                return Err(refused(compat::Incompatible::Unstamped {
                     boundary: FRAME.window().boundary(),
                     accepted: FRAME.window().accepted(),
-                }
-                .into());
+                }));
             }
             if !bytes.is_empty() {
                 file.set_len(0)?;
@@ -652,7 +742,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         }
 
         // The header is admitted whole before a single frame is scanned (**V2**).
-        let (digest, frames) = admit_header(&bytes, records)?;
+        let (digest, frames) = admit_header(&bytes, records).map_err(refused)?;
         let (recovered, offsets, valid_body) =
             scan::<T>(frames, max_record, HEADER_LEN as u64, digest);
         let valid_end = HEADER_LEN as u64 + valid_body;
@@ -677,11 +767,6 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             },
             recovered,
         ))
-    }
-
-    /// The log's path (handy for a caller's domain-specific failure message).
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// The number of records in the log.
@@ -1126,8 +1211,9 @@ mod tests {
         let err = Wal::<Rec>::open(&path, MAX, &RECORDS)
             .err()
             .expect("an unstamped file must not open");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            matches!(err, OpenError::Incompatible(compat::Incompatible::Unstamped { .. })),
+            err.to_string().contains("unstamped"),
             "expected an Unstamped refusal, got {err}"
         );
     }

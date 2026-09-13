@@ -252,16 +252,17 @@ struct Activation {
     watched: std::collections::BTreeSet<ActorId>,
 }
 
-/// The machine entity (machine §1). `P` is the node's runtime binding, injected per
-/// activation through the `entities_named` factory; `S` is the hosting system.
-pub struct Machine<S: EntitySystem, P: MachineRuntimeProvider> {
-    provider: Arc<P>,
+/// The machine entity (machine §1). The provider is the node's runtime binding,
+/// injected per activation through the `entities_named` factory; `S` is the
+/// hosting system.
+pub struct Machine<S: EntitySystem> {
+    provider: Arc<dyn MachineRuntimeProvider>,
     act: Mutex<Activation>,
     _system: PhantomData<fn() -> S>,
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
-    pub fn new(provider: Arc<P>) -> Machine<S, P> {
+impl<S: EntitySystem> Machine<S> {
+    pub fn new(provider: Arc<dyn MachineRuntimeProvider>) -> Machine<S> {
         Machine {
             provider,
             act: Mutex::new(Activation::default()),
@@ -464,7 +465,7 @@ enum Quiesce {
     Pause,
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> Entity for Machine<S, P> {
+impl<S: EntitySystem> Entity for Machine<S> {
     type System = S;
     type State = MachineState;
     type Event = MachineEvent;
@@ -670,7 +671,7 @@ impl Message for Provision {
     const MANIFEST: Manifest = Manifest::new("machine.Provision");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Provision> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<Provision> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -735,7 +736,7 @@ impl Message for Attach {
     const MANIFEST: Manifest = Manifest::new("machine.Attach");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Attach> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<Attach> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -780,7 +781,7 @@ impl Message for Detach {
     const MANIFEST: Manifest = Manifest::new("machine.Detach");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Detach> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<Detach> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -817,7 +818,7 @@ impl Message for AddKey {
     const MANIFEST: Manifest = Manifest::new("machine.AddKey");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<AddKey> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<AddKey> for Machine<S> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -846,7 +847,7 @@ impl Message for RevokeKey {
     const MANIFEST: Manifest = Manifest::new("machine.RevokeKey");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<RevokeKey> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<RevokeKey> for Machine<S> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -874,7 +875,7 @@ impl Message for SetEgress {
     const MANIFEST: Manifest = Manifest::new("machine.SetEgress");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<SetEgress> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<SetEgress> for Machine<S> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -910,7 +911,7 @@ impl Message for DoorPolicy {
     const MANIFEST: Manifest = Manifest::new("machine.DoorPolicy");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<DoorPolicy> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<DoorPolicy> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -957,7 +958,7 @@ impl Message for Status {
     const MANIFEST: Manifest = Manifest::new("machine.Status");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Status> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<Status> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,

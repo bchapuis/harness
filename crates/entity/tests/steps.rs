@@ -52,7 +52,7 @@ fn rig(
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .events(sink)
         .build();
-    let entities = system.entities_named::<Pipeline>(
+    let entities = system.entity_node().entities_named::<Pipeline>(
         support::pipeline::PIPELINE_TYPE,
         EntityConfig {
             idle_after,

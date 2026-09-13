@@ -17,7 +17,6 @@ use super::Machine;
 use super::MachineError;
 use super::MachineEvent;
 use super::MachineState;
-use crate::runtime::MachineRuntimeProvider;
 
 // --- Workspace file commands (machine §3) --------------------------------------
 
@@ -49,15 +48,15 @@ fn ws_rel_path(path: &str) -> Result<&std::path::Path, MachineError> {
 }
 
 /// Open the workspace facet's directory as a capability handle.
-fn ws_open<S: EntitySystem, P: MachineRuntimeProvider>(
-    ctx: &EntityCtx<Machine<S, P>>,
+fn ws_open<S: EntitySystem>(
+    ctx: &EntityCtx<Machine<S>>,
 ) -> Result<cap_std::fs::Dir, MachineError> {
     let root = ctx.ws().dir_path().map_err(ws_err)?;
     cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
         .map_err(|e| MachineError::Ws(format!("open workspace: {e}")))
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
+impl<S: EntitySystem> Machine<S> {
     /// The shared guard of every workspace file command: the machine must be
     /// provisioned, and no guest may be live (see [`MachineError::Running`]).
     fn ws_command_guard(&self, state: &MachineState) -> Result<(), MachineError> {
@@ -101,7 +100,7 @@ impl Message for WsWrite {
     const MANIFEST: Manifest = Manifest::new("machine.WsWrite");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<WsWrite> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<WsWrite> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -142,7 +141,7 @@ impl Message for WsRead {
     const MANIFEST: Manifest = Manifest::new("machine.WsRead");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<WsRead> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<WsRead> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -185,7 +184,7 @@ impl Message for WsList {
     const MANIFEST: Manifest = Manifest::new("machine.WsList");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<WsList> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<WsList> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -229,7 +228,7 @@ impl Message for WsRemove {
     const MANIFEST: Manifest = Manifest::new("machine.WsRemove");
 }
 
-impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<WsRemove> for Machine<S, P> {
+impl<S: EntitySystem> EntityHandler<WsRemove> for Machine<S> {
     async fn handle(
         &self,
         state: &MachineState,

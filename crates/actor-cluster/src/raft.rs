@@ -34,8 +34,6 @@ use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::protocol::Frame;
-
 /// The identity of one Raft group (spec §9.4.3). The engine runs O(groups)
 /// independent groups; each owns its log, leadership, and term sequence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -398,7 +396,7 @@ impl MultiRaft {
     }
 
     /// Drive every group one tick, in `GroupId` order (deterministic). Returns
-    /// each group's output for the caller to apply (frames to send, committed
+    /// each group's output for the caller to apply (messages to send, committed
     /// app commands, the term won if it just became leader).
     pub(crate) fn tick_all<E: Entropy>(
         &self,
@@ -443,14 +441,73 @@ pub enum Committed {
     Snapshot { index: u64, snapshot: Vec<u8> },
 }
 
-/// What one Raft step produced, for the caller to act on: frames to send over
-/// the transport (each already tagged with its group), observations newly
+/// One message between two members of a group (spec §9.4.3): the engine's whole
+/// vocabulary, and the only thing it emits or accepts. It names no group, since
+/// every caller already knows one (`tick_all` returns it and a `RaftGroup` holds
+/// its own); the group travels beside it in [`Frame::Raft`](crate::protocol::Frame),
+/// which carries this enum as it stands rather than restating its fields.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RaftMessage {
+    /// `candidate` asks for the vote in `term`, proving its log is up to date
+    /// with its last entry's index and term.
+    Vote {
+        term: u64,
+        candidate: NodeId,
+        last_index: u64,
+        last_term: u64,
+    },
+    /// The reply to a [`Vote`](RaftMessage::Vote).
+    VoteReply { term: u64, granted: bool },
+    /// Log replication and heartbeat: the `leader` sends the log suffix after
+    /// `(prev_index, prev_term)` plus its commit index. Empty `entries` is a pure
+    /// heartbeat.
+    Append {
+        term: u64,
+        leader: NodeId,
+        prev_index: u64,
+        prev_term: u64,
+        entries: Vec<RaftEntry>,
+        commit: u64,
+    },
+    /// The reply to an [`Append`](RaftMessage::Append) or an
+    /// [`InstallSnapshot`](RaftMessage::InstallSnapshot): on success `match_index`
+    /// is the highest replicated index; on a log mismatch it is a back-off hint.
+    AppendReply {
+        term: u64,
+        ok: bool,
+        match_index: u64,
+    },
+    /// The `leader`'s state-machine snapshot for a follower whose `next` has fallen
+    /// below the leader's compacted prefix (spec §9): the entries that would catch
+    /// it up no longer exist. `data` is the opaque application snapshot;
+    /// `voters`/`learners` are the membership as of the base.
+    InstallSnapshot {
+        term: u64,
+        leader: NodeId,
+        snapshot_index: u64,
+        snapshot_term: u64,
+        voters: Vec<NodeId>,
+        learners: Vec<NodeId>,
+        /// The opaque application snapshot: bulk bytes, so tagged for the same
+        /// reason as `Frame::Envelope::payload`.
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    /// The `leader` asks the recipient to stand for election **now**, without
+    /// waiting out its election timeout (Raft §3.10, [`transfer_leadership`]).
+    ///
+    /// [`transfer_leadership`]: RaftGroup::transfer_leadership
+    TimeoutNow { term: u64, leader: NodeId },
+}
+
+/// What one Raft step produced, for the caller to act on: messages to send (the
+/// caller frames each for this group), observations newly
 /// committed in log order ([`Committed`]; the opaque app bytes the caller
 /// decodes and applies, or a snapshot to install), and the term won if this step
 /// made the node leader (the caller emits `LeaderElected`, spec §16).
 #[derive(Default)]
 pub(crate) struct RaftOutput {
-    pub frames: Vec<(NodeId, Frame)>,
+    pub messages: Vec<(NodeId, RaftMessage)>,
     pub committed: Vec<Committed>,
     pub elected: Option<u64>,
 }
@@ -650,9 +707,8 @@ impl RaftState {
 }
 
 /// One group's Raft instance on this node (spec §9.4.3). All state sits behind
-/// one mutex, mutated by the driver tick and the frame handlers.
+/// one mutex, mutated by the driver tick and the message handlers.
 pub(crate) struct RaftGroup {
-    group: GroupId,
     node: NodeId,
     election_timeout: Duration,
     storage: Arc<dyn RaftWAL>,
@@ -712,7 +768,6 @@ impl RaftGroup {
             wal_poisoned: storage.poisoned().is_some(),
         };
         RaftGroup {
-            group,
             node,
             election_timeout,
             storage,
@@ -875,15 +930,75 @@ impl RaftGroup {
         if state.matched.get(&target).copied().unwrap_or(0) < state.last_index() {
             return (false, out);
         }
-        out.frames.push((
+        out.messages.push((
             target,
-            Frame::RaftTimeoutNow {
-                group: self.group,
+            RaftMessage::TimeoutNow {
                 term: state.term,
                 leader: self.node,
             },
         ));
         (true, out)
+    }
+
+    /// One inbound message, from the transport-level sender `from` (spec §9.4.3):
+    /// the engine's single receive seam. A message that names its own sender (a
+    /// candidate, a leader) is trusted on that name, as the wire carries it; the
+    /// replies are attributed to `from`.
+    pub(crate) fn handle<E: Entropy>(
+        &self,
+        from: NodeId,
+        message: RaftMessage,
+        now: Instant,
+        entropy: &E,
+    ) -> RaftOutput {
+        match message {
+            RaftMessage::Vote {
+                term,
+                candidate,
+                last_index,
+                last_term,
+            } => self.handle_vote(candidate, term, last_index, last_term, now, entropy),
+            RaftMessage::VoteReply { term, granted } => {
+                self.handle_vote_reply(from, term, granted, now, entropy)
+            }
+            RaftMessage::Append {
+                term,
+                leader,
+                prev_index,
+                prev_term,
+                entries,
+                commit,
+            } => self.handle_append(
+                leader, term, prev_index, prev_term, entries, commit, now, entropy,
+            ),
+            RaftMessage::AppendReply {
+                term,
+                ok,
+                match_index,
+            } => self.handle_append_reply(from, term, ok, match_index, now, entropy),
+            RaftMessage::InstallSnapshot {
+                term,
+                leader,
+                snapshot_index,
+                snapshot_term,
+                voters,
+                learners,
+                data,
+            } => self.handle_install_snapshot(
+                leader,
+                term,
+                snapshot_index,
+                snapshot_term,
+                voters,
+                learners,
+                data,
+                now,
+                entropy,
+            ),
+            RaftMessage::TimeoutNow { term, leader } => {
+                self.handle_timeout_now(leader, term, now, entropy)
+            }
+        }
     }
 
     /// A voter this group's leader asked to stand for election immediately
@@ -894,7 +1009,7 @@ impl RaftGroup {
     /// is extended: this starts an ordinary election, which still has to win a
     /// quorum, so the worst a wrongly-accepted invitation costs is one disrupted
     /// term, never a split leadership.
-    pub(crate) fn handle_timeout_now<E: Entropy>(
+    fn handle_timeout_now<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -968,15 +1083,14 @@ impl RaftGroup {
             self.become_leader(state, out);
             return;
         }
-        let request = Frame::RaftVote {
-            group: self.group,
+        let request = RaftMessage::Vote {
             term: state.term,
             candidate: self.node,
             last_index: state.last_index(),
             last_term: state.term_at(state.last_index()),
         };
         for &voter in state.voters.iter().filter(|&&v| v != self.node) {
-            out.frames.push((voter, request.clone()));
+            out.messages.push((voter, request.clone()));
         }
     }
 
@@ -1099,11 +1213,10 @@ impl RaftGroup {
         state.snapshot = Some(snapshot);
     }
 
-    /// The `RaftInstallSnapshot` frame carrying this node's current snapshot: sent
-    /// to a peer whose `next` has fallen below the compacted prefix.
-    fn install_snapshot_frame(&self, state: &RaftState) -> Frame {
-        Frame::RaftInstallSnapshot {
-            group: self.group,
+    /// This node's current snapshot, for a peer whose `next` has fallen below the
+    /// compacted prefix.
+    fn install_snapshot_message(&self, state: &RaftState) -> RaftMessage {
+        RaftMessage::InstallSnapshot {
             term: state.term,
             leader: self.node,
             snapshot_index: state.snapshot_index,
@@ -1127,14 +1240,13 @@ impl RaftGroup {
             // entries: its `prev_index` names a term we no longer hold. Ship the
             // snapshot instead; one accepted install moves its `next` past the base.
             if prev_index < state.snapshot_index {
-                out.frames.push((peer, self.install_snapshot_frame(state)));
+                out.messages.push((peer, self.install_snapshot_message(state)));
                 continue;
             }
             let entries: Vec<RaftEntry> = state.suffix_from(prev_index + 1).to_vec();
-            out.frames.push((
+            out.messages.push((
                 peer,
-                Frame::RaftAppend {
-                    group: self.group,
+                RaftMessage::Append {
                     term: state.term,
                     leader: self.node,
                     prev_index,
@@ -1244,7 +1356,7 @@ impl RaftGroup {
     /// per server still holds (`voted_for` persistence), and a candidate only
     /// counts votes it solicited from its own voter view, so quorums are never
     /// inflated by non-voters.
-    pub(crate) fn handle_vote<E: Entropy>(
+    fn handle_vote<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -1278,10 +1390,9 @@ impl RaftGroup {
         } else {
             false
         };
-        out.frames.push((
+        out.messages.push((
             from,
-            Frame::RaftVoteReply {
-                group: self.group,
+            RaftMessage::VoteReply {
                 term: state.term,
                 granted,
             },
@@ -1292,7 +1403,7 @@ impl RaftGroup {
     /// Handle a vote reply: a quorum of grants in the current term wins the
     /// election (at most one leader per term; invariant #22's election-safety
     /// half, by single-vote-per-term persistence).
-    pub(crate) fn handle_vote_reply<E: Entropy>(
+    fn handle_vote_reply<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -1321,7 +1432,7 @@ impl RaftGroup {
     /// leader's. Any leader-mode node accepts appends: a non-voter is a
     /// learner replicating committed state.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn handle_append<E: Entropy>(
+    fn handle_append<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -1338,10 +1449,9 @@ impl RaftGroup {
         // cannot hold entries and stops counting it toward the commit quorum, rather
         // than waiting out a timeout on every append.
         if term < state.term || state.wal_poisoned {
-            out.frames.push((
+            out.messages.push((
                 from,
-                Frame::RaftAppendReply {
-                    group: self.group,
+                RaftMessage::AppendReply {
                     term: state.term,
                     ok: false,
                     match_index: 0,
@@ -1359,10 +1469,9 @@ impl RaftGroup {
         if prev_index >= state.snapshot_index
             && (prev_index > state.last_index() || state.term_at(prev_index) != prev_term)
         {
-            out.frames.push((
+            out.messages.push((
                 from,
-                Frame::RaftAppendReply {
-                    group: self.group,
+                RaftMessage::AppendReply {
                     term: state.term,
                     ok: false,
                     // A hint for the leader: everything past our log cannot match.
@@ -1403,10 +1512,9 @@ impl RaftGroup {
             if self.storage.append(base, &entries[append_from..]) == WalAck::Failed {
                 state.log.truncate(held);
                 self.wal_failed(&mut state);
-                out.frames.push((
+                out.messages.push((
                     from,
-                    Frame::RaftAppendReply {
-                        group: self.group,
+                    RaftMessage::AppendReply {
                         term: state.term,
                         ok: false,
                         match_index: 0,
@@ -1419,10 +1527,9 @@ impl RaftGroup {
         // re-sent, so never report progress below it.
         let match_index = (prev_index + entries.len() as u64).max(state.snapshot_index);
         state.commit = state.commit.max(commit.min(state.last_index()));
-        out.frames.push((
+        out.messages.push((
             from,
-            Frame::RaftAppendReply {
-                group: self.group,
+            RaftMessage::AppendReply {
                 term: state.term,
                 ok: true,
                 match_index,
@@ -1440,7 +1547,7 @@ impl RaftGroup {
     /// snapshot to the application via `Committed::Snapshot`, and reply with an
     /// ordinary `RaftAppendReply` so the leader advances our `next`/`matched`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn handle_install_snapshot<E: Entropy>(
+    fn handle_install_snapshot<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -1456,10 +1563,9 @@ impl RaftGroup {
         let mut state = self.lock();
         if term < state.term {
             // A stale leader: reject so it learns the newer term and steps down.
-            out.frames.push((
+            out.messages.push((
                 from,
-                Frame::RaftAppendReply {
-                    group: self.group,
+                RaftMessage::AppendReply {
                     term: state.term,
                     ok: false,
                     match_index: 0,
@@ -1470,10 +1576,9 @@ impl RaftGroup {
         if state.wal_poisoned {
             // Same refusal as `handle_append`: this replica cannot durably hold what
             // the leader is shipping, so it says so rather than accepting it.
-            out.frames.push((
+            out.messages.push((
                 from,
-                Frame::RaftAppendReply {
-                    group: self.group,
+                RaftMessage::AppendReply {
                     term: state.term,
                     ok: false,
                     match_index: 0,
@@ -1499,10 +1604,9 @@ impl RaftGroup {
                 && self.storage.append(snapshot_index, &[]).persisted();
             if !stored {
                 self.wal_failed(&mut state);
-                out.frames.push((
+                out.messages.push((
                     from,
-                    Frame::RaftAppendReply {
-                        group: self.group,
+                    RaftMessage::AppendReply {
                         term: state.term,
                         ok: false,
                         match_index: 0,
@@ -1522,10 +1626,9 @@ impl RaftGroup {
                 snapshot: data,
             });
         }
-        out.frames.push((
+        out.messages.push((
             from,
-            Frame::RaftAppendReply {
-                group: self.group,
+            RaftMessage::AppendReply {
                 term: state.term,
                 ok: true,
                 match_index: state.last_index(),
@@ -1536,7 +1639,7 @@ impl RaftGroup {
 
     /// Handle an append reply (leader): record the peer's progress and advance
     /// the commit index, or back off its `next` index after a mismatch.
-    pub(crate) fn handle_append_reply<E: Entropy>(
+    fn handle_append_reply<E: Entropy>(
         &self,
         from: NodeId,
         term: u64,
@@ -1659,92 +1762,17 @@ mod tests {
         }
     }
 
-    /// The group a Raft frame belongs to (every Raft frame carries one).
-    fn frame_group(frame: &Frame) -> GroupId {
-        match frame {
-            Frame::RaftVote { group, .. }
-            | Frame::RaftVoteReply { group, .. }
-            | Frame::RaftAppend { group, .. }
-            | Frame::RaftAppendReply { group, .. }
-            | Frame::RaftInstallSnapshot { group, .. }
-            | Frame::RaftTimeoutNow { group, .. }
-            | Frame::RaftPropose { group, .. } => *group,
-            _ => unreachable!("a Raft group only ever produces Raft frames"),
-        }
-    }
-
-    /// Deliver one frame to its group instance on the target node, returning the
-    /// resulting step. `from` is the sending node.
-    fn deliver(
-        group: &RaftGroup,
-        from: NodeId,
-        frame: Frame,
-        now: Instant,
-        entropy: &TestEntropy,
-    ) -> RaftOutput {
-        match frame {
-            Frame::RaftVote {
-                term,
-                candidate,
-                last_index,
-                last_term,
-                ..
-            } => group.handle_vote(candidate, term, last_index, last_term, now, entropy),
-            Frame::RaftVoteReply { term, granted, .. } => {
-                group.handle_vote_reply(from, term, granted, now, entropy)
-            }
-            Frame::RaftAppend {
-                term,
-                leader,
-                prev_index,
-                prev_term,
-                entries,
-                commit,
-                ..
-            } => group.handle_append(
-                leader, term, prev_index, prev_term, entries, commit, now, entropy,
-            ),
-            Frame::RaftAppendReply {
-                term,
-                ok,
-                match_index,
-                ..
-            } => group.handle_append_reply(from, term, ok, match_index, now, entropy),
-            Frame::RaftInstallSnapshot {
-                term,
-                leader,
-                snapshot_index,
-                snapshot_term,
-                voters,
-                learners,
-                data,
-                ..
-            } => group.handle_install_snapshot(
-                leader,
-                term,
-                snapshot_index,
-                snapshot_term,
-                voters,
-                learners,
-                data,
-                now,
-                entropy,
-            ),
-            Frame::RaftTimeoutNow { term, leader, .. } => {
-                group.handle_timeout_now(leader, term, now, entropy)
-            }
-            _ => RaftOutput::default(),
-        }
-    }
+    /// The in-flight messages of a run: `(from, to, group, message)`.
+    type Queue = VecDeque<(NodeId, NodeId, GroupId, RaftMessage)>;
 
     /// Fold one group's step into the run state: check election safety, record
-    /// committed app bytes, and enqueue the produced frames.
+    /// committed app bytes, and enqueue the produced messages.
     #[allow(clippy::type_complexity)]
     fn record(
         group: GroupId,
         src: NodeId,
         out: RaftOutput,
-        queue: &mut VecDeque<(NodeId, NodeId, Frame)>,
+        queue: &mut Queue,
         committed: &mut BTreeMap<(GroupId, NodeId), Vec<Vec<u8>>>,
         winners: &mut BTreeMap<(GroupId, u64), NodeId>,
     ) {
@@ -1770,8 +1798,8 @@ mod tests {
                 Committed::Snapshot { .. } => {}
             }
         }
-        for (to, frame) in out.frames {
-            queue.push_back((src, to, frame));
+        for (to, message) in out.messages {
+            queue.push_back((src, to, group, message));
         }
     }
 
@@ -1832,7 +1860,7 @@ mod tests {
 
         for _round in 0..200 {
             now = now + Duration::from_millis(40);
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
 
             // Tick every group on every node.
             let ticks: Vec<(GroupId, NodeId, RaftOutput)> = groups
@@ -1843,13 +1871,12 @@ mod tests {
                 record(group, node, out, &mut queue, &mut committed, &mut winners);
             }
 
-            // Deliver frames to quiescence, routing each by its group.
+            // Deliver messages to quiescence, routing each by its group.
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm: consensus did not settle");
-                let group = frame_group(&frame);
-                let out = deliver(&groups[&(group, to)], from, frame, now, &entropy[&to]);
+                let out = groups[&(group, to)].handle(from, message, now, &entropy[&to]);
                 record(group, to, out, &mut queue, &mut committed, &mut winners);
             }
 
@@ -1888,7 +1915,7 @@ mod tests {
 
     /// The multi-raft framing property (spec §9.4.3): a node leading many groups
     /// emits one heartbeat *per group per follower*, which is what
-    /// [`Frame::RaftHeartbeats`] exists to collapse.
+    /// [`Frame::RaftHeartbeats`](crate::protocol::Frame::RaftHeartbeats) exists to collapse.
     ///
     /// Asserted at the source (what a tick produces) because that is what the
     /// coalescing in the system tick loop consumes. The count is the ceiling the
@@ -1933,7 +1960,7 @@ mod tests {
         let mut now = Instant::ZERO;
         for _ in 0..30 {
             now = now + Duration::from_millis(40);
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
             let ticks: Vec<(GroupId, NodeId, RaftOutput)> = groups
                 .iter()
                 .map(|(&(g, n), raft)| (g, n, raft.tick(now, &entropy[&n])))
@@ -1942,12 +1969,11 @@ mod tests {
                 record(g, n, out, &mut queue, &mut committed, &mut winners);
             }
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm");
-                let g = frame_group(&frame);
-                let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
-                record(g, to, out, &mut queue, &mut committed, &mut winners);
+                let out = groups[&(group, to)].handle(from, message, now, &entropy[&to]);
+                record(group, to, out, &mut queue, &mut committed, &mut winners);
             }
             if ids.iter().all(|&g| leader_of(&groups, g, &nodes).is_some()) {
                 break;
@@ -1968,8 +1994,8 @@ mod tests {
         for &group in &ids {
             let leader = leader_of(&groups, group, &nodes).expect("a leader");
             *led.entry(leader).or_default() += 1;
-            for (to, frame) in groups[&(group, leader)].tick(now, &entropy[&leader]).frames {
-                if matches!(&frame, Frame::RaftAppend { entries, .. } if entries.is_empty()) {
+            for (to, message) in groups[&(group, leader)].tick(now, &entropy[&leader]).messages {
+                if matches!(&message, RaftMessage::Append { entries, .. } if entries.is_empty()) {
                     empty_appends += 1;
                     *per_pair.entry((leader, to)).or_default() += 1;
                 }
@@ -2044,7 +2070,7 @@ mod tests {
                       committed: &mut BTreeMap<(GroupId, NodeId), Vec<Vec<u8>>>,
                       winners: &mut BTreeMap<(GroupId, u64), NodeId>,
                       seed: Option<(NodeId, RaftOutput)>| {
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
             match seed {
                 Some((src, out)) => record(group, src, out, &mut queue, committed, winners),
                 None => {
@@ -2058,10 +2084,10 @@ mod tests {
                 }
             }
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm");
-                let out = deliver(&groups[&(group, to)], from, frame, now, &entropy[&to]);
+                let out = groups[&(group, to)].handle(from, message, now, &entropy[&to]);
                 record(group, to, out, &mut queue, committed, winners);
             }
         };
@@ -2149,7 +2175,7 @@ mod tests {
         let mut winners = BTreeMap::new();
         for _ in 0..20 {
             now = now + Duration::from_millis(40);
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
             let ticks: Vec<(NodeId, RaftOutput)> = nodes
                 .iter()
                 .map(|&n| (n, groups[&n].tick(now, &entropy)))
@@ -2158,10 +2184,10 @@ mod tests {
                 record(group, n, out, &mut queue, &mut committed, &mut winners);
             }
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm");
-                let out = deliver(&groups[&to], from, frame, now, &entropy);
+                let out = groups[&to].handle(from, message, now, &entropy);
                 record(group, to, out, &mut queue, &mut committed, &mut winners);
             }
             if nodes.iter().any(|&n| groups[&n].is_leader()) {
@@ -2229,7 +2255,7 @@ mod tests {
 
         for _round in 0..200 {
             now = now + Duration::from_millis(40);
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
             let ticks: Vec<(GroupId, NodeId, RaftOutput)> = groups
                 .iter()
                 .map(|(&(g, node), raft)| (g, node, raft.tick(now, &entropy[&node])))
@@ -2238,12 +2264,11 @@ mod tests {
                 record(g, node, out, &mut queue, &mut committed, &mut winners);
             }
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm: consensus did not settle");
-                let g = frame_group(&frame);
-                let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
-                record(g, to, out, &mut queue, &mut committed, &mut winners);
+                let out = groups[&(group, to)].handle(from, message, now, &entropy[&to]);
+                record(group, to, out, &mut queue, &mut committed, &mut winners);
             }
             if !proposed && let Some(leader) = leader_of(&groups, group, &all) {
                 groups[&(group, leader)].propose(EntryPayload::App(b"x".to_vec()));
@@ -2438,26 +2463,25 @@ mod tests {
                 healed = true;
             }
 
-            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let mut queue: Queue = VecDeque::new();
             let ticks: Vec<(GroupId, NodeId, RaftOutput)> = groups
                 .iter()
                 .map(|(&(g, node), raft)| (g, node, raft.tick(now, &entropy[&node])))
                 .collect();
             for (_g, node, out) in ticks {
-                drain(node, out, &mut queue, &mut learner_snapshot, learner);
+                drain(group, node, out, &mut queue, &mut learner_snapshot, learner);
             }
 
             let mut steps = 0;
-            while let Some((from, to, frame)) = queue.pop_front() {
+            while let Some((from, to, group, message)) = queue.pop_front() {
                 steps += 1;
                 assert!(steps < 100_000, "frame storm: consensus did not settle");
-                // Partition the learner until it is healed: drop frames to/from it.
+                // Partition the learner until it is healed: drop messages to/from it.
                 if !healed && (from == learner || to == learner) {
                     continue;
                 }
-                let g = frame_group(&frame);
-                let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
-                drain(to, out, &mut queue, &mut learner_snapshot, learner);
+                let out = groups[&(group, to)].handle(from, message, now, &entropy[&to]);
+                drain(group, to, out, &mut queue, &mut learner_snapshot, learner);
             }
 
             // Once a leader exists, push a run of writes through it.
@@ -2519,12 +2543,13 @@ mod tests {
         );
     }
 
-    /// Fold one group's step for the single-group compaction test: enqueue frames
+    /// Fold one group's step for the single-group compaction test: enqueue messages
     /// and capture a snapshot the learner installs.
     fn drain(
+        group: GroupId,
         src: NodeId,
         out: RaftOutput,
-        queue: &mut VecDeque<(NodeId, NodeId, Frame)>,
+        queue: &mut Queue,
         learner_snapshot: &mut Option<(u64, Vec<u8>)>,
         learner: NodeId,
     ) {
@@ -2535,8 +2560,8 @@ mod tests {
                 *learner_snapshot = Some((index, snapshot));
             }
         }
-        for (to, frame) in out.frames {
-            queue.push_back((src, to, frame));
+        for (to, message) in out.messages {
+            queue.push_back((src, to, group, message));
         }
     }
 
@@ -2694,7 +2719,7 @@ mod tests {
         // Healthy: an up-to-date candidate at a new term is granted.
         let out = voter.handle_vote(nodes[1], 1, 0, 0, Instant::ZERO, &entropy);
         assert!(
-            matches!(out.frames[0].1, Frame::RaftVoteReply { granted: true, .. }),
+            matches!(out.messages[0].1, RaftMessage::VoteReply { granted: true, .. }),
             "a healthy voter grants an up-to-date candidate's first request",
         );
 
@@ -2703,7 +2728,7 @@ mod tests {
         wal.break_now();
         let out = voter.handle_vote(nodes[2], 2, 0, 0, Instant::ZERO, &entropy);
         assert!(
-            matches!(out.frames[0].1, Frame::RaftVoteReply { granted: false, .. }),
+            matches!(out.messages[0].1, RaftMessage::VoteReply { granted: false, .. }),
             "a voter that cannot persist its vote must refuse it, not grant it",
         );
         assert!(
@@ -2746,14 +2771,14 @@ mod tests {
             &entropy,
         );
         assert!(
-            matches!(out.frames[0].1, Frame::RaftAppendReply { ok: true, .. }),
+            matches!(out.messages[0].1, RaftMessage::AppendReply { ok: true, .. }),
             "a healthy follower accepts a matching append",
         );
 
         wal.break_now();
         let out = follower.handle_append(nodes[1], 1, 1, 1, entries, 0, Instant::ZERO, &entropy);
         assert!(
-            matches!(out.frames[0].1, Frame::RaftAppendReply { ok: false, .. }),
+            matches!(out.messages[0].1, RaftMessage::AppendReply { ok: false, .. }),
             "a follower that cannot persist an entry must not acknowledge it",
         );
     }
@@ -2792,13 +2817,13 @@ mod tests {
         );
         assert!(!voter.is_leader(), "and the node must not be leading");
         assert!(
-            out.frames.is_empty(),
+            out.messages.is_empty(),
             "nor replicate a log it cannot persist",
         );
     }
 
     /// A poisoned voter never starts an election, so it cannot win one on a term it
-    /// could not write down. Its tick is inert: no frames, no candidacy.
+    /// could not write down. Its tick is inert: no messages, no candidacy.
     #[test]
     fn a_poisoned_voter_never_starts_an_election() {
         let nodes = [NodeId::new(1), NodeId::new(2), NodeId::new(3)];
@@ -2823,7 +2848,7 @@ mod tests {
             now = now + timeout;
             let out = voter.tick(now, &entropy);
             assert!(
-                out.frames.is_empty(),
+                out.messages.is_empty(),
                 "a poisoned voter must not solicit votes",
             );
         }

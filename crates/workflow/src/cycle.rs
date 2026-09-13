@@ -23,7 +23,7 @@ use entity::EntityCtx;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::Backoff;
+use crate::backoff::Backoff;
 use crate::BackoffPolicy;
 use crate::EffectError;
 use crate::Pending;
@@ -160,9 +160,10 @@ impl<D: Workflow> Engine<D> {
     ///
     /// A consumer calls this from `Entity::can_hibernate` and MAY narrow it
     /// further by conjoining its own condition; it never has to widen it. The
-    /// agent runtime narrows exactly once, for a turn accepted into its queue
-    /// but not yet started: work owed *now* that no effect represents, so it is
-    /// invisible to the desired set.
+    /// agent runtime narrows it twice: for a turn accepted into its queue but
+    /// not yet started (work owed *now* that no effect represents, so invisible
+    /// to the desired set), and for a [`Binding`](crate::Binding) mid-open,
+    /// which is a component the engine never sees.
     ///
     /// It answers from the last cycle's conclusion rather than recomputing,
     /// because `can_hibernate` takes no seams and so cannot read the clock. That

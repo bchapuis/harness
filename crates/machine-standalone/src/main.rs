@@ -20,7 +20,6 @@ mod admin;
 mod authority;
 mod backend;
 mod node;
-mod provider;
 
 use std::collections::BTreeMap;
 

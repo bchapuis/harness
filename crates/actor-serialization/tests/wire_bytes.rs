@@ -174,7 +174,7 @@ fn each_form_decodes_what_the_other_wrote() {
 // --- The enum shapes, which the structs above do not reach -------------------------
 
 /// A byte field inside a **struct variant**, as `Frame::Envelope::payload`,
-/// `Frame::RaftInstallSnapshot::data` and `Frame::RaftPropose::command` are.
+/// `RaftMessage::InstallSnapshot::data` and `Frame::RaftPropose::command` are.
 ///
 /// A variant is not a struct: postcard writes a variant index before the fields, and
 /// `serde_json` writes an outer object keyed by the variant name. Neither of those is

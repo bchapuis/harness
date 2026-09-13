@@ -140,7 +140,6 @@ pub use entity::EntityHandler;
 pub use entity::EntityName;
 pub use entity::EntityRegistry;
 pub use entity::EventHistory;
-pub use entity::EventsFuture;
 pub use entity::NoEvent;
 pub use entity::accepted_manifests;
 pub use entity_ref::Entities;

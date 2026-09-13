@@ -673,29 +673,7 @@ are policy, held by the golden corpus and the mixed-version sweep (compatibility
 
 The core catalogue's properties are framework ones, not database ones: there is
 no durability, serializability, or lost-update notion at that layer (the actor
-model is in-memory, at-most-once, eventually consistent, §1.2, §7.2). The shape
-worth knowing:
-
-- **Messaging & execution (#1, #3–#5, #9).** No silent loss; per-pair FIFO under
-  reordering; serial, non-reentrant dispatch; bounded non-dropping mailbox;
-  local sends skip serialization yet match the remote result.
-- **Identity & dispatch (#6–#8, #10).** Lifecycle order and exactly-once;
-  `resolve` classifies locality with no round-trip; unregistered
-  `(type, manifest)` → `Unhandled`; `ActorRef`s rebind on decode.
-- **Failure & monitoring (#2, #11–#13, #18).** A downed node completes in-flight
-  `ask`s with `Unreachable`, never hangs; death-watch exactly-once including
-  `NodeDown`; watch-after-death fires immediately; signal ordering; supervision
-  contains panics (default `Stop`, restarts back off).
-- **Membership (#14–#17, #19, #22).** Convergence after partitions heal; `down`
-  is terminal; a partition alone never downs a member; SWIM refutation via
-  incarnation; receptionist pruned on node `down`; the leader-based control
-  plane is quorum-gated with at most one leader per term.
-- **Type-safety & transparency (#20, #21).** Invalid sends do not compile; local
-  vs remote targets produce identical replies and ordering.
-- **Cluster utilities (U1, U2).** Placement is a pure, version-stable function
-  of the serving set with minimal movement; singleton activations never overlap
-  on one node, a healed converged cluster runs exactly one per name, and an
-  anchor failure re-activates.
+model is in-memory, at-most-once, eventually consistent, §1.2, §7.2).
 
 Verification is **layered**, not uniform (§18.6). The safety core runs
 continuously; the rest are verified by the method that fits: a liveness or
@@ -703,8 +681,8 @@ scenario property by a targeted conformance test, #20 by a compile-fail case,
 #21 by a differential local-vs-remote run. The machine-readable
 `core_catalogue()` records, per invariant, which method applies, and the
 `conformance_catalogue` test fails the build if a continuous checker and its
-catalogue entry drift apart, so the §17 "Verified by" column stays mechanically
-true.
+catalogue entry drift apart, so the method §18.5 assigns each invariant (the §17
+conformance criterion) stays mechanically true.
 
 ## Checklist
 

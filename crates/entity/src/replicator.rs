@@ -161,47 +161,130 @@ pub(crate) struct ReplicaSets {
     pub(crate) target: Option<Vec<NodeId>>,
 }
 
-/// The live control state one shard's apply loop shares with its replicator
-/// (§7.6, §7.7): the replica sets (the quorum domain), the key range the shard
-/// currently owns, and (while a split or merge is sealing the moving range)
-/// the frozen-from bound. One mutex, read per operation, written only by the
-/// shard map's apply loop and split/merge driver.
-pub(crate) struct ShardControl {
-    /// The committed `current`/`target` replica sets (§7.7).
-    pub(crate) sets: ReplicaSets,
+/// One shard's committed allocation (§5.1, §7.6, §7.7): the key range it owns,
+/// its `current` replica set, and the one operation in flight on it, if any.
+///
+/// Held once per hosted shard, behind one mutex, by the shard map (the writer:
+/// its apply loop, in committed order) and by the shard's [`QuorumReplicator`]
+/// (the reader, once per operation), so a committed reallocation or freeze
+/// reaches every in-flight journal the moment it commits, with no second copy
+/// to keep in step. The range changes only on a committed split or merge, never
+/// on migration.
+#[derive(Clone)]
+pub(crate) struct Allocation {
     /// The key range this shard owns (§5.1): shrinks on a committed split,
     /// extends on a committed merge. An append outside it is refused
     /// `NotLeader` before any store attempt: the leader-local half of E15.
     pub(crate) range: crate::system::KeyRange,
-    /// The in-flight split/merge seal (§7.7): refuse appends at or above this
-    /// hash. A fast path only: the authoritative barrier is the replica
-    /// stores' durable append bound, which refuses at any term.
-    pub(crate) frozen_from: Option<u64>,
+    /// The committed replica set.
+    pub(crate) current: Vec<NodeId>,
+    pub(crate) in_flight: InFlight,
 }
 
-impl ShardControl {
-    pub(crate) fn new(sets: ReplicaSets, range: crate::system::KeyRange) -> ShardControl {
-        ShardControl {
-            sets,
+/// The operation in flight on a shard (§7.7): one at a time, which the type
+/// makes the only representable state.
+#[derive(Clone)]
+pub(crate) enum InFlight {
+    Idle,
+    /// A migration toward this target set; every write and recovery uses the
+    /// joint quorum until `Migrated` commits.
+    Migrating(Vec<NodeId>),
+    /// A split, on the parent, between `SplitStarted` and `SplitCommitted`.
+    Splitting(SplitPlan),
+    /// A merge, on both shards, between `MergeStarted` and `MergeCommitted`.
+    Merging(MergeRole),
+}
+
+/// An in-flight split's committed plan (§7.7).
+#[derive(Clone, Copy)]
+pub(crate) struct SplitPlan {
+    pub(crate) child: u32,
+    pub(crate) boundary: u64,
+}
+
+/// A shard's role in an in-flight merge (§7.7).
+#[derive(Clone, Copy)]
+pub(crate) enum MergeRole {
+    /// The **left** shard, absorbing the adjacent `right` (carries its index).
+    Absorbing(u32),
+    /// The **right** shard, folding into the adjacent `left` (carries its
+    /// index): the frozen, driving side.
+    Absorbed(u32),
+}
+
+impl Allocation {
+    /// A founding allocation: `current` over `range`, nothing in flight.
+    pub(crate) fn founding(range: crate::system::KeyRange, current: Vec<NodeId>) -> Allocation {
+        Allocation {
             range,
-            frozen_from: None,
+            current,
+            in_flight: InFlight::Idle,
+        }
+    }
+
+    /// Whether this shard is free to start a migration, split, or merge (§7.7's
+    /// one-op-at-a-time rule).
+    pub(crate) fn idle(&self) -> bool {
+        matches!(self.in_flight, InFlight::Idle)
+    }
+
+    /// The target set of an in-flight migration (§7.7).
+    pub(crate) fn target(&self) -> Option<&[NodeId]> {
+        match &self.in_flight {
+            InFlight::Migrating(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// The plan of an in-flight split (§7.7).
+    pub(crate) fn split(&self) -> Option<SplitPlan> {
+        match self.in_flight {
+            InFlight::Splitting(plan) => Some(plan),
+            _ => None,
+        }
+    }
+
+    /// This shard's role in an in-flight merge (§7.7).
+    pub(crate) fn merge(&self) -> Option<MergeRole> {
+        match self.in_flight {
+            InFlight::Merging(role) => Some(role),
+            _ => None,
+        }
+    }
+
+    /// The nodes involved in the shard right now: [`joint_members`].
+    pub(crate) fn union(&self) -> Vec<NodeId> {
+        joint_members(&self.current, self.target())
+    }
+
+    /// The quorum domain one fan-out counts over: the joint sets during a
+    /// migration.
+    pub(crate) fn sets(&self) -> ReplicaSets {
+        ReplicaSets {
+            current: self.current.clone(),
+            target: self.target().map(<[NodeId]>::to_vec),
+        }
+    }
+
+    /// The leader-local seal an in-flight split or merge puts on appends (§7.7):
+    /// the split boundary, or the whole range of a shard being absorbed. A fast
+    /// path only: the authoritative barrier is the replica stores' durable
+    /// append bound, which refuses at any term.
+    fn frozen_from(&self) -> Option<u64> {
+        match self.in_flight {
+            InFlight::Splitting(plan) => Some(plan.boundary),
+            InFlight::Merging(MergeRole::Absorbed(_)) => Some(self.range.start),
+            _ => None,
         }
     }
 
     /// Whether this shard currently accepts appends for an entity at `hash`.
     fn accepts(&self, hash: u64) -> bool {
-        self.range.contains(hash) && self.frozen_from.is_none_or(|from| hash < from)
+        self.range.contains(hash) && self.frozen_from().is_none_or(|from| hash < from)
     }
 }
 
 impl ReplicaSets {
-    pub(crate) fn new(current: Vec<NodeId>) -> ReplicaSets {
-        ReplicaSets {
-            current,
-            target: None,
-        }
-    }
-
     /// Every node that must receive the fan-out: [`joint_members`].
     pub(crate) fn union(&self) -> Vec<NodeId> {
         joint_members(&self.current, self.target.as_deref())
@@ -284,11 +367,10 @@ pub(crate) struct QuorumReplicator<R: RaftConsensus> {
     election: LeaderElection<R>,
     local: Arc<dyn EntityStore>,
     transport: Arc<dyn ReplicaTransport>,
-    /// The shard's live control state (§7.1, §7.7): the replica sets (the
-    /// write/recovery quorum domain), owned key range, and split/merge freeze. The
-    /// shard map's apply loop updates it in place as commands commit, so quorums always
+    /// The shard's committed allocation (§7.1, §7.7), shared with the shard map,
+    /// whose apply loop updates it in place as commands commit, so quorums always
     /// count over the committed allocation, never a snapshot from construction time.
-    control: Arc<std::sync::Mutex<ShardControl>>,
+    allocation: Arc<std::sync::Mutex<Allocation>>,
     shard: u32,
     self_node: NodeId,
     /// Where this node's own replica writes run (§7.4). The leader is a replica, so
@@ -302,9 +384,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// Build one shard's replicator over its leader-election group (spec §7.3,
     /// §7.4): the group supplies placement (who may write, under which term)
     /// holding no entity data (§7.1, §8); this replicator supplies durability.
-    /// `control` is the shard's **live** control state (replica sets, owned
-    /// range, split freeze) shared with the shard map's apply loop so a
-    /// committed reallocation or split reaches in-flight journals (§7.7). The
+    /// `allocation` is the shard's committed allocation, shared with the shard
+    /// map's apply loop so a committed reallocation or split reaches in-flight
+    /// journals (§7.7). The
     /// returned handle is the shard's `EntityJournal` (the `Quorum` tier) and
     /// the migration driver's replicator in one.
     #[allow(clippy::too_many_arguments)] // one call site, from the shard map
@@ -312,7 +394,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         consensus: R,
         group: GroupId,
         shard: u32,
-        control: Arc<std::sync::Mutex<ShardControl>>,
+        allocation: Arc<std::sync::Mutex<Allocation>>,
         local: Arc<dyn EntityStore>,
         transport: Arc<dyn ReplicaTransport>,
         io: Arc<dyn BlockingIo>,
@@ -323,7 +405,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             election: LeaderElection::new(consensus, group),
             local,
             transport,
-            control,
+            allocation,
             shard,
             self_node,
             io,
@@ -335,21 +417,19 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// so its ack counting is coherent even if the allocation commits mid-flight
     /// (the next operation picks up the new sets).
     fn sets(&self) -> ReplicaSets {
-        self.control
+        self.allocation
             .lock()
-            .expect("shard control poisoned")
-            .sets
-            .clone()
+            .expect("shard allocation poisoned")
+            .sets()
     }
 
     /// The target set of an in-flight migration, if any (§7.7).
     pub(crate) fn migration_target(&self) -> Option<Vec<NodeId>> {
-        self.control
+        self.allocation
             .lock()
-            .expect("shard control poisoned")
-            .sets
-            .target
-            .clone()
+            .expect("shard allocation poisoned")
+            .target()
+            .map(<[NodeId]>::to_vec)
     }
 
     fn not_leader(&self) -> AppendOutcome {
@@ -392,12 +472,12 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // provably never ran and the caller can re-resolve against the committed map.
         // The authoritative barrier is the replica stores' durable append bound.
         let sets = {
-            let control = self.control.lock().expect("shard control poisoned");
+            let allocation = self.allocation.lock().expect("shard allocation poisoned");
             let hash = crate::system::name_hash(entity.entity_type(), entity.key());
-            if !control.accepts(hash) {
+            if !allocation.accepts(hash) {
                 return self.not_leader();
             }
-            control.sets.clone()
+            allocation.sets()
         };
         let events_len = events.len();
         // Fan out to the remote peers first, each cloning the payload for its own wire
@@ -1972,20 +2052,19 @@ mod tests {
     /// A migrating shard led by `a`: `current` {a, b, c}, `target` {a, d, e}.
     fn migrating_replicator(unreadable: Vec<NodeId>) -> Arc<QuorumReplicator<AlwaysLeading>> {
         let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(NodeId::new);
-        let mut sets = ReplicaSets::new(vec![a, b, c]);
-        sets.target = Some(vec![a, d, e]);
-        let control = Arc::new(Mutex::new(ShardControl::new(
-            sets,
-            crate::system::KeyRange {
+        let allocation = Arc::new(Mutex::new(Allocation {
+            range: crate::system::KeyRange {
                 start: 0,
                 end: u64::MAX,
             },
-        )));
+            current: vec![a, b, c],
+            in_flight: InFlight::Migrating(vec![a, d, e]),
+        }));
         QuorumReplicator::for_shard(
             AlwaysLeading(a),
             GroupId(7),
             0,
-            control,
+            allocation,
             stored_store(),
             Arc::new(PeersWithSlowReads { unreadable }),
             Arc::new(crate::blocking::InlineIo),

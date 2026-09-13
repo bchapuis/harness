@@ -45,7 +45,7 @@
 //! [`system.entities::<Directory<S>>(config)`](entity::EntityExt::entity), all
 //! consumers share one directory namespace. A consumer that wants an isolated
 //! namespace hosts the same entity under its own runtime type name with
-//! [`entities_named`](entity::EntityExt::entities_named) (e.g. `"app.Directory"`):
+//! [`entities_named`](entity::cluster::EntityNode::entities_named) (e.g. `"app.Directory"`):
 //! distinct gateways, shard maps, and consensus groups.
 
 use std::collections::BTreeMap;

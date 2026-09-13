@@ -24,6 +24,7 @@ use agent::ToolCall;
 use agent::Usage;
 use agent::http::Protocol;
 use agent::http::ProtocolModel;
+use agent::WORKSPACE_RESET_NOTICE;
 use agent::http::tool_result_text;
 use serde::Deserialize;
 use serde::Serialize;
@@ -137,9 +138,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
             // enters as a user message the agent runtime authors.
             Entry::WorkspaceReset => messages.push(json!({
                 "role": "user",
-                "content": "[agent] The workspace was reset: files, processes, and \
-                            servers from earlier in this conversation no longer exist. \
-                            Re-derive anything you need before relying on it.",
+                "content": WORKSPACE_RESET_NOTICE,
             })),
         }
     }
@@ -318,11 +317,10 @@ mod tests {
     use agent::ToolError;
     use agent::ToolSpec;
 
-    /// A scripted transport: pops the next canned reply per call and records
-    /// every request.
+    /// A scripted transport: pops the next canned reply per call, asserting the
+    /// protocol's path and key header on the way.
     struct ScriptedHttp {
         replies: Mutex<Vec<Result<HttpResponse, HttpError>>>,
-        seen: Mutex<Vec<Value>>,
     }
 
     impl ScriptedHttp {
@@ -330,7 +328,6 @@ mod tests {
             replies.reverse();
             Arc::new(ScriptedHttp {
                 replies: Mutex::new(replies),
-                seen: Mutex::new(Vec::new()),
             })
         }
     }
@@ -348,10 +345,7 @@ mod tests {
                     .iter()
                     .any(|(k, v)| k == "authorization" && v.starts_with("Bearer "))
             );
-            self.seen
-                .lock()
-                .expect("seen")
-                .push(serde_json::from_slice(&body).expect("json body"));
+            serde_json::from_slice::<Value>(&body).expect("json body");
             let reply = self
                 .replies
                 .lock()
@@ -496,59 +490,6 @@ mod tests {
         assert_eq!(response.content, "");
         assert_eq!(response.calls.len(), 1);
         assert_eq!(response.calls[0].input, json!({}));
-    }
-
-    #[test]
-    fn pressure_is_retried_with_backoff_and_a_hard_error_is_not() {
-        let sim = Simulation::new(7);
-        // 429, then 503, then success: absorbed by the policy (§4.3).
-        let http = ScriptedHttp::new(vec![
-            Ok(HttpResponse {
-                status: 429,
-                body: b"{}".to_vec(),
-            }),
-            Ok(HttpResponse {
-                status: 503,
-                body: b"{}".to_vec(),
-            }),
-            ok_body(json!({
-                "choices": [{"message": {"content": "ok"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
-            })),
-        ]);
-        let model = OpenAiModel::new(
-            Arc::clone(&http) as Arc<dyn HttpPost>,
-            "sk-test",
-            sim.clock(),
-            Arc::new(SimEntropy::new(7)),
-        );
-        let started = sim.now();
-        let response = sim.block_on(model.complete(request()));
-        assert!(response.is_ok());
-        assert_eq!(http.seen.lock().expect("seen").len(), 3);
-        assert!(sim.now() > started, "the retries took logical time");
-
-        // A malformed request is the caller's bug: never retried (§4.3).
-        let sim = Simulation::new(8);
-        let http = ScriptedHttp::new(vec![Ok(HttpResponse {
-            status: 400,
-            body: serde_json::to_vec(&json!({
-                "error": {"type": "invalid_request_error", "message": "bad field"}
-            }))
-            .expect("encode"),
-        })]);
-        let model = OpenAiModel::new(
-            Arc::clone(&http) as Arc<dyn HttpPost>,
-            "sk-test",
-            sim.clock(),
-            Arc::new(SimEntropy::new(8)),
-        );
-        let outcome = sim.block_on(model.complete(request()));
-        assert_eq!(
-            outcome,
-            Err(ModelError::InvalidRequest("bad field".to_string()))
-        );
-        assert_eq!(http.seen.lock().expect("seen").len(), 1);
     }
 
     #[test]

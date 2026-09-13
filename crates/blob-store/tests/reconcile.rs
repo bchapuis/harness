@@ -17,7 +17,6 @@ use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use actor_simulation::swim_config;
 use blob_store::BlobConfig;
-use blob_store::BlobId;
 use blob_store::BlobStore;
 use blob_store::ClusteredBlobStore;
 use blob_store::LocalBlobStore;
@@ -174,45 +173,4 @@ fn rebalancing_never_deletes() {
             "owner {owner} still holds the blob after repeated reconcile passes",
         );
     }
-}
-
-#[test]
-fn a_delete_with_all_nodes_swept_releases_the_anchor() {
-    // B7 liveness: when delete_namespace completes with every serving node swept,
-    // the anchor's per-namespace sweep bookkeeping becomes reclaimable, and the
-    // reconcile loop releases it, bounding tombstone retention without a timer.
-    // The tiny awareness flag is retained, so the namespace still resolves nowhere.
-    let sim = Simulation::new(3);
-    let nodes = [A, B, C];
-    let (_net, stores, _dirs) = cluster(&sim, &nodes);
-    let anchor = stores[0].1.clone(); // node A; with R=3 it is a tombstone owner
-
-    let ns = Namespace::new(b"reclaim-me".to_vec());
-    drive(&sim, Duration::from_secs(5), {
-        let (s, ns, bytes) = (anchor.clone(), ns.clone(), b"x".to_vec());
-        async move {
-            s.put(&ns, bytes).await.expect("put");
-            s.delete_namespace(&ns).await
-        }
-    })
-    .expect("delete acked");
-    sim.run_for(Duration::from_secs(1)); // a reconcile pass runs reclamation
-
-    assert!(
-        anchor.tombstones().contains(&ns),
-        "the namespace is tombstoned (the delete anchored and propagated)",
-    );
-    assert!(
-        anchor.anchors().tracked().is_empty(),
-        "reconcile released the anchor's sweep bookkeeping once every member swept",
-    );
-
-    let got = drive(&sim, Duration::from_secs(5), {
-        let (s, ns) = (anchor.clone(), ns.clone());
-        async move { s.get(&ns, &BlobId::of(b"x"), None).await }
-    });
-    assert!(
-        got.is_err(),
-        "a reclaimed-bookkeeping namespace still resolves nowhere"
-    );
 }

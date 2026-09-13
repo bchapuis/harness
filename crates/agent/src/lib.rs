@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod budget;
 pub mod client;
+pub mod config;
 /// The desired set, as a pure function of committed state: this runtime's
 /// `Workflow::pending`, and with it the `Effect` type the workflow carries from
 /// `pending` to `perform`.
@@ -42,13 +43,13 @@ pub use client::Followed;
 pub use client::Follower;
 pub use client::Harness;
 pub use client::HarnessBuilder;
-pub use client::HarnessConfig;
 pub use client::HarnessSystem;
 pub use client::HasRoutes;
 pub use client::NoRoutes;
 pub use client::SessionRef;
 pub use client::TAIL_PAGE;
 pub use client::UnknownKind;
+pub use config::HarnessConfig;
 pub use event::AgentEvent;
 pub use http::HttpError;
 pub use http::HttpPost;
@@ -73,6 +74,7 @@ pub use sandbox::Tier;
 pub use session::CallId;
 pub use session::Completion;
 pub use session::Entry;
+pub use session::WORKSPACE_RESET_NOTICE;
 pub use session::KindId;
 pub use session::Lineage;
 pub use session::Record;

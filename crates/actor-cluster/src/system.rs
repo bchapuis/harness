@@ -1029,78 +1029,11 @@ where
         }
         Frame::ReceptionistSync { entries } => handle_receptionist_sync(system, entries),
         // Raft consensus traffic (leader-based mode, spec §9.4.3) rides the ordinary
-        // transport as system messages; a node not in leader mode ignores it.
-        Frame::RaftVote {
-            group,
-            term,
-            candidate,
-            last_index,
-            last_term,
-        } => {
+        // transport as system messages; a node not in leader mode ignores it. The
+        // frame carries the engine's own message, so there is nothing to open.
+        Frame::Raft { group, message } => {
             drive_group(system, group, |raft, now, entropy| {
-                raft.handle_vote(candidate, term, last_index, last_term, now, entropy)
-            })
-            .await
-        }
-        Frame::RaftVoteReply {
-            group,
-            term,
-            granted,
-        } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle_vote_reply(from, term, granted, now, entropy)
-            })
-            .await
-        }
-        Frame::RaftAppend {
-            group,
-            term,
-            leader,
-            prev_index,
-            prev_term,
-            entries,
-            commit,
-        } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle_append(
-                    leader, term, prev_index, prev_term, entries, commit, now, entropy,
-                )
-            })
-            .await
-        }
-        Frame::RaftAppendReply {
-            group,
-            term,
-            ok,
-            match_index,
-        } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle_append_reply(from, term, ok, match_index, now, entropy)
-            })
-            .await
-        }
-        Frame::RaftInstallSnapshot {
-            group,
-            term,
-            leader,
-            snapshot_index,
-            snapshot_term,
-            voters,
-            learners,
-            data,
-        } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle_install_snapshot(
-                    leader,
-                    term,
-                    snapshot_index,
-                    snapshot_term,
-                    voters,
-                    learners,
-                    data,
-                    now,
-                    entropy,
-                )
+                raft.handle(from, message, now, entropy)
             })
             .await
         }
@@ -1112,20 +1045,16 @@ where
             for beat in beats {
                 let group = beat.group;
                 if let Some(raft) = system.group(group) {
-                    let mut out = raft.handle_append(
-                        beat.leader,
-                        beat.term,
-                        beat.prev_index,
-                        beat.prev_term,
-                        Vec::new(),
-                        beat.commit,
+                    let mut out = raft.handle(
+                        from,
+                        beat.into_append(),
                         system.inner.clock.now(),
                         &system.inner.entropy,
                     );
                     // Lift this group's reply out of the output and into the batch;
                     // anything else it produced still goes out on its own.
-                    out.frames
-                        .retain(|(_, frame)| match RaftBeatReply::from_reply(frame) {
+                    out.messages
+                        .retain(|(_, message)| match RaftBeatReply::from_reply(group, message) {
                             Some(reply) => {
                                 replies.push(reply);
                                 false
@@ -1146,27 +1075,10 @@ where
         Frame::RaftHeartbeatReplies { replies } => {
             for reply in replies {
                 drive_group(system, reply.group, |raft, now, entropy| {
-                    raft.handle_append_reply(
-                        from,
-                        reply.term,
-                        reply.ok,
-                        reply.match_index,
-                        now,
-                        entropy,
-                    )
+                    raft.handle(from, reply.into_reply(), now, entropy)
                 })
                 .await;
             }
-        }
-        Frame::RaftTimeoutNow {
-            group,
-            term,
-            leader,
-        } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle_timeout_now(leader, term, now, entropy)
-            })
-            .await
         }
         Frame::RaftPropose {
             group,
@@ -1676,8 +1588,12 @@ async fn apply_raft_output<C, E, S, T>(
     } else {
         publish_commits(system, group, &out.committed);
     }
-    for (to, frame) in out.frames {
-        let _ = system.inner.transport.send(to, frame).await;
+    for (to, message) in out.messages {
+        let _ = system
+            .inner
+            .transport
+            .send(to, Frame::Raft { group, message })
+            .await;
     }
 }
 
@@ -1742,9 +1658,9 @@ where
         // of one frame per group (spec §9.4.3; see `Frame::RaftHeartbeats`).
         let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
         let mut outputs = raft.tick_all(now, &system.inner.entropy);
-        for (_, out) in &mut outputs {
-            out.frames
-                .retain(|(to, frame)| match RaftBeat::from_empty_append(frame) {
+        for (group, out) in &mut outputs {
+            out.messages
+                .retain(|(to, message)| match RaftBeat::from_empty_append(*group, message) {
                     Some(beat) => {
                         beats.entry(*to).or_default().push(beat);
                         false // carried in the batch below

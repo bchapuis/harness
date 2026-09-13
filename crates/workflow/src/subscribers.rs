@@ -71,11 +71,6 @@ impl<K: Ord, V> Subscribers<K, V> {
         self.waiting.remove(key).unwrap_or_default()
     }
 
-    /// How many callers are waiting on `key`.
-    pub fn waiting_on(&self, key: &K) -> usize {
-        self.waiting.get(key).map(Vec::len).unwrap_or(0)
-    }
-
     /// The units of work something is registered against, in key order.
     ///
     /// The post-commit pass reads this to decide what to
@@ -85,11 +80,6 @@ impl<K: Ord, V> Subscribers<K, V> {
     /// `take` remains the only way to an address.
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.waiting.keys()
-    }
-
-    /// Whether nothing is registered at all.
-    pub fn is_empty(&self) -> bool {
-        self.waiting.is_empty()
     }
 
     /// Forget every registration: a fresh activation starts clean, and callers
@@ -109,10 +99,9 @@ mod tests {
         s.register(1, "a");
         s.register(1, "b");
         s.register(2, "c");
-        assert_eq!(s.waiting_on(&1), 2);
         assert_eq!(s.take(&1), vec!["a", "b"]);
-        assert_eq!(s.waiting_on(&1), 0);
-        assert_eq!(s.waiting_on(&2), 1);
+        assert!(s.take(&1).is_empty());
+        assert_eq!(s.take(&2), vec!["c"]);
     }
 
     #[test]
@@ -146,6 +135,6 @@ mod tests {
         let mut s: Subscribers<u8, &str> = Subscribers::default();
         s.register(1, "a");
         s.reset();
-        assert!(s.is_empty(), "callers re-register by re-contacting");
+        assert_eq!(s.keys().count(), 0, "callers re-register by re-contacting");
     }
 }

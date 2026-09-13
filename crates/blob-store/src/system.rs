@@ -5,15 +5,14 @@
 //! intervals), task launching (to drain stragglers and run the reconcile loop), and
 //! the **serving set** that places a blob's owners (spec §5.2). Requiring this one
 //! object-friendly trait keeps [`ClusterSystem`]'s
-//! `Clock`/`Entropy`/`Spawner`/`Transport` type parameters out of the replica
-//! transport, the tier, and the reconcile loop.
+//! `Clock`/`Entropy`/`Spawner`/`Transport` type parameters out of the tier and the
+//! reconcile loop.
 //!
 //! Implemented for [`LocalSystem`] (a single node, itself the only serving
 //! member) and [`ClusterSystem`] (the SWIM serving set), so the same store code
 //! runs on both without naming either.
 
 use actor_cluster::ClusterSystem;
-use actor_cluster::MemberStatus;
 use actor_cluster::Transport;
 use actor_core::ActorSystem;
 use actor_core::Clock;
@@ -34,15 +33,6 @@ pub trait BlobSystem: ActorSystem {
     /// tier reads the SWIM serving set (`Membership::serving_members`).
     fn serving_members(&self) -> Vec<NodeId>;
 
-    /// Whether `node` has reached a **terminal** membership state: `down` or
-    /// `removed`, or pruned from the roster entirely (actor §9.1). This is the
-    /// load-bearing predicate for tombstone reclamation (spec §5.3, **B7**): a
-    /// terminal node can rejoin only under a fresh, empty identity, so it can never
-    /// return carrying an un-swept blob. A merely `unreachable` (reversible) node
-    /// is **not** terminal. The `Local` tier is a single node that is never
-    /// terminal to itself.
-    fn is_terminal(&self, node: NodeId) -> bool;
-
     /// Emit a [`BlobEvent`] onto the framework's observability stream (actor §16),
     /// wrapped as an application event so the checkers and the reproducibility
     /// recorder observe it in the one ordered stream (spec §8, §9). (Time,
@@ -56,10 +46,6 @@ impl<C: Clock, E: Entropy, S: Spawner> BlobSystem for LocalSystem<C, E, S> {
     fn serving_members(&self) -> Vec<NodeId> {
         vec![self.node()]
     }
-
-    fn is_terminal(&self, _node: NodeId) -> bool {
-        false
-    }
 }
 
 impl<C, E, S, T> BlobSystem for ClusterSystem<C, E, S, T>
@@ -71,15 +57,5 @@ where
 {
     fn serving_members(&self) -> Vec<NodeId> {
         self.membership().serving_members()
-    }
-
-    fn is_terminal(&self, node: NodeId) -> bool {
-        // Terminal = down/removed, or pruned from the roster entirely (`None`): a
-        // member at anchor time that is no longer present has been removed and
-        // pruned, which is terminal. A reachable-or-unreachable member is not.
-        matches!(
-            self.membership().status(node),
-            None | Some(MemberStatus::Down) | Some(MemberStatus::Removed)
-        )
     }
 }

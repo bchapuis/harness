@@ -250,16 +250,11 @@ pub trait ClusterWorkload {
         crate::swim_config()
     }
 
-    /// The membership mode to sweep under (spec §9.4). Defaults to
-    /// **gossip-based** with conservative downing; a workload overrides this to
-    /// exercise the static, registry-based, or leader-based control plane under
-    /// the same nemesis and fault injection.
-    fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Gossip {
-            swim: self.swim(),
-            downing: DowningPolicy::Conservative,
-        }
-    }
+    /// The membership mode to sweep under (spec §9.4): static, gossip-based,
+    /// registry-based, or leader-based, each under the same nemesis and fault
+    /// injection. Required rather than defaulted so the control plane a sweep ran
+    /// under is stated in the workload that ran it.
+    fn mode(&self) -> ClusterModeSpec;
 
     /// What it takes to bring a **restarted** node back into service, and, by
     /// being `Some` at all, this workload's consent for the nemesis to restart

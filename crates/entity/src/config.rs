@@ -50,7 +50,7 @@ pub struct EntityConfig {
     /// costs, and on the `Quorum` tier that cost lands on every replica (§7.3),
     /// billed R−1 times to the uplink (`docs/hardware-envelope.md` §3.9). It is no
     /// longer O(state): past 64 KiB facet 0's state travels as content-defined
-    /// chunks and only the chunks that changed are sent (§7.12), so a snapshot is
+    /// chunks and only the chunks that changed are sent (§9), so a snapshot is
     /// roughly O(delta) plus a manifest. What it buys is a shorter replay, and
     /// replay reads are **local** (§9). The default stays high, but the penalty for
     /// lowering it is far smaller for an entity whose state grows by accretion.

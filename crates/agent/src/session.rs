@@ -280,6 +280,15 @@ pub enum RecordBody {
     CancelDelivered { turn: TurnId, call: CallId },
 }
 
+/// The workspace-loss notice (agent spec §5.5) as the model reads it: it
+/// answers no `CallId`, so every protocol enters it as input content the agent
+/// runtime authors. One text for every adapter, since the model's conduct on
+/// reading it is the runtime's contract, not a protocol's.
+pub const WORKSPACE_RESET_NOTICE: &str = "[agent] The workspace was reset: files, processes, \
+                                          and servers from earlier in this conversation no \
+                                          longer exist. Re-derive anything you need before \
+                                          relying on it.";
+
 /// One transcript item, as the model request carries it (agent spec §4.1).
 /// A projection of the records: the fold appends here as turns, responses,
 /// and outcomes commit.

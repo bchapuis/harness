@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::membership::MemberDigest;
 use crate::raft::GroupId;
-use crate::raft::RaftEntry;
+use crate::raft::RaftMessage;
 
 /// The wire revisions this build accepts, and the one it writes (spec §7.1,
 /// compatibility spec §3).
@@ -214,67 +214,21 @@ pub enum Frame {
     /// (because it joined late or a broadcast was lost) without the registrant
     /// having to re-broadcast.
     ReceptionistSync { entries: Vec<ReceptionistEntry> },
-    /// A Raft vote request (leader-based mode, spec §9.4.3): `candidate` asks
-    /// for the vote in `term` for Raft `group`, proving its log is up to date
-    /// with its last entry's index and term.
-    RaftVote {
+    /// One Raft engine message for `group` (leader-based mode, spec §9.4.3).
+    ///
+    /// The engine's vocabulary is [`RaftMessage`], and this carries it as the engine
+    /// defines it rather than restating each message as a frame of its own: one
+    /// definition of what a vote or an append is, and no translation between two
+    /// spellings of it. The batched heartbeats below are the deliberate exception,
+    /// a compaction of the empty appends this would otherwise send one per group.
+    Raft {
         group: GroupId,
-        term: u64,
-        candidate: NodeId,
-        last_index: u64,
-        last_term: u64,
-    },
-    /// The reply to a [`RaftVote`](Frame::RaftVote).
-    RaftVoteReply {
-        group: GroupId,
-        term: u64,
-        granted: bool,
-    },
-    /// Raft log replication and heartbeat (spec §9.4.3): the `leader` sends
-    /// `group`'s log suffix after `(prev_index, prev_term)` plus its commit
-    /// index.
-    RaftAppend {
-        group: GroupId,
-        term: u64,
-        leader: NodeId,
-        prev_index: u64,
-        prev_term: u64,
-        entries: Vec<RaftEntry>,
-        commit: u64,
-    },
-    /// The reply to a [`RaftAppend`](Frame::RaftAppend): on success,
-    /// `match_index` is the highest replicated index; on a log mismatch it is a
-    /// back-off hint.
-    RaftAppendReply {
-        group: GroupId,
-        term: u64,
-        ok: bool,
-        match_index: u64,
-    },
-    /// A state-machine snapshot the `leader` sends a follower whose `next` has
-    /// fallen below the leader's compacted prefix (spec §9): the log entries that
-    /// would catch it up no longer exist, so the leader ships the snapshot that
-    /// subsumes them. The follower installs it (replacing its state through
-    /// `snapshot_index`) and replies with an ordinary
-    /// [`RaftAppendReply`](Frame::RaftAppendReply). `data` is the opaque
-    /// application snapshot; `voters`/`learners` are the membership as of the base.
-    RaftInstallSnapshot {
-        group: GroupId,
-        term: u64,
-        leader: NodeId,
-        snapshot_index: u64,
-        snapshot_term: u64,
-        voters: Vec<NodeId>,
-        learners: Vec<NodeId>,
-        /// The opaque application snapshot: bulk bytes, so tagged for the same
-        /// reason as `Envelope::payload`.
-        #[serde(with = "serde_bytes")]
-        data: Vec<u8>,
+        message: RaftMessage,
     },
     /// Many groups' heartbeats in one frame, from one leader to one follower
     /// (spec §9.4.3).
     ///
-    /// A heartbeat is an empty [`RaftAppend`](Frame::RaftAppend), and a node that
+    /// A heartbeat is an empty [`RaftMessage::Append`], and a node that
     /// leads `G` groups sends one to each of `R-1` followers every heartbeat
     /// interval. Sent individually that is `G × (R-1)` frames (each its own
     /// serialization, its own transport send) repeated several times a second, for
@@ -284,27 +238,12 @@ pub enum Frame {
     /// packed long before storage or CPU does.
     ///
     /// Coalescing costs nothing in semantics: each beat is dispatched to its own
-    /// group exactly as a lone `RaftAppend` would be, so every group's state machine
+    /// group exactly as a lone `RaftMessage::Append` would be, so every group's state machine
     /// sees the identical sequence.
     RaftHeartbeats { beats: Vec<RaftBeat> },
     /// The replies to a [`RaftHeartbeats`](Frame::RaftHeartbeats), batched the same
     /// way and for the same reason: one reply per beat would undo half the saving.
     RaftHeartbeatReplies { replies: Vec<RaftBeatReply> },
-    /// A leadership handoff: `leader` asks the recipient to stand for election in
-    /// `group` **now**, without waiting out its election timeout (Raft §3.10).
-    ///
-    /// Sent only to a voter the leader has confirmed is caught up to its own last
-    /// index, so the recipient can win immediately rather than being rejected for a
-    /// stale log. It is safe by construction: it starts an ordinary election, which
-    /// still requires a quorum of votes, so it can move leadership but never split
-    /// it. Its purpose is to make a *planned* departure cheap: without it a draining
-    /// node's groups each wait a full election timeout, which for a node leading many
-    /// shards is a failover storm on every rolling restart.
-    RaftTimeoutNow {
-        group: GroupId,
-        term: u64,
-        leader: NodeId,
-    },
     /// An application command offered to `group`'s leader (spec §9.4.3 item 1):
     /// a non-leader node sends it to a voter, which forwards it to its leader.
     /// The command is the opaque app payload (the engine's `EntryPayload::App`
@@ -321,8 +260,9 @@ pub enum Frame {
     },
 }
 
+
 /// One group's heartbeat inside a [`Frame::RaftHeartbeats`]: the fields of an
-/// empty [`Frame::RaftAppend`], minus the `entries` that make it empty.
+/// empty [`RaftMessage::Append`], minus the `entries` that make it empty.
 ///
 /// `leader` is carried per beat rather than once per frame because a node can lead
 /// some groups and merely follow others; only the groups it leads produce beats, but
@@ -338,17 +278,18 @@ pub struct RaftBeat {
 }
 
 impl RaftBeat {
-    /// The batching lift (spec §9.4.3): an **empty** [`Frame::RaftAppend`]
+    /// The batching lift (spec §9.4.3): `group`'s **empty** [`RaftMessage::Append`]
     /// (a pure heartbeat) reduced to its beat; `None` for anything else,
     /// including an append that carries entries (real replication, never
-    /// batched). This constructor and [`RaftBeatReply::from_reply`] are the
-    /// whole correspondence between the batched and unbatched forms; they
-    /// live beside the types so a new append field fails compilation here
-    /// instead of drifting past the two call sites silently.
-    pub(crate) fn from_empty_append(frame: &Frame) -> Option<RaftBeat> {
-        match frame {
-            Frame::RaftAppend {
-                group,
+    /// batched). Taken on the engine's output before framing, so the batch is
+    /// built from typed messages rather than picked back out of the wire union.
+    /// With [`into_append`](RaftBeat::into_append) and the reply pair this is the
+    /// whole correspondence between the batched and unbatched forms; it lives
+    /// beside the types so a new append field fails compilation here instead of
+    /// drifting past the call sites silently.
+    pub(crate) fn from_empty_append(group: GroupId, message: &RaftMessage) -> Option<RaftBeat> {
+        match message {
+            RaftMessage::Append {
                 term,
                 leader,
                 prev_index,
@@ -356,7 +297,7 @@ impl RaftBeat {
                 entries,
                 commit,
             } if entries.is_empty() => Some(RaftBeat {
-                group: *group,
+                group,
                 term: *term,
                 leader: *leader,
                 prev_index: *prev_index,
@@ -366,10 +307,23 @@ impl RaftBeat {
             _ => None,
         }
     }
+
+    /// The beat as the empty append it stands for, so the receiving group handles
+    /// it exactly as a lone one.
+    pub(crate) fn into_append(self) -> RaftMessage {
+        RaftMessage::Append {
+            term: self.term,
+            leader: self.leader,
+            prev_index: self.prev_index,
+            prev_term: self.prev_term,
+            entries: Vec::new(),
+            commit: self.commit,
+        }
+    }
 }
 
 /// One group's reply inside a [`Frame::RaftHeartbeatReplies`]: the fields of a
-/// [`Frame::RaftAppendReply`].
+/// [`RaftMessage::AppendReply`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaftBeatReply {
     pub group: GroupId,
@@ -379,23 +333,31 @@ pub struct RaftBeatReply {
 }
 
 impl RaftBeatReply {
-    /// The reply-side lift: a [`Frame::RaftAppendReply`] gathered into a
-    /// heartbeat-reply batch; `None` for any other frame. See
+    /// The reply-side lift: `group`'s [`RaftMessage::AppendReply`] gathered into a
+    /// heartbeat-reply batch; `None` for any other message. See
     /// [`RaftBeat::from_empty_append`].
-    pub(crate) fn from_reply(frame: &Frame) -> Option<RaftBeatReply> {
-        match frame {
-            Frame::RaftAppendReply {
-                group,
+    pub(crate) fn from_reply(group: GroupId, message: &RaftMessage) -> Option<RaftBeatReply> {
+        match message {
+            RaftMessage::AppendReply {
                 term,
                 ok,
                 match_index,
             } => Some(RaftBeatReply {
-                group: *group,
+                group,
                 term: *term,
                 ok: *ok,
                 match_index: *match_index,
             }),
             _ => None,
+        }
+    }
+
+    /// The reply as the append reply it stands for.
+    pub(crate) fn into_reply(self) -> RaftMessage {
+        RaftMessage::AppendReply {
+            term: self.term,
+            ok: self.ok,
+            match_index: self.match_index,
         }
     }
 }
@@ -505,7 +467,7 @@ mod tests {
         // **The failure this catches has no other detector.** `Frame`'s postcard
         // encoding is *positional*: a variant inserted anywhere but the end
         // shifts every discriminant after it, so a peer one release behind reads
-        // every subsequent frame as a different one; a `RaftAppend` arriving as
+        // every subsequent frame as a different one; a `Raft` frame arriving as
         // a `Watch`. No round-trip test can see it, because a round-trip only
         // ever asks one build to agree with itself; and the `actor.wire` golden
         // corpus does not cover it, because that fixture pins the `Hello`
@@ -514,7 +476,10 @@ mod tests {
         // Appending is the safe growth (spec §7.1), and it is what these numbers
         // permit: a new variant takes the next free index and moves none of
         // these. Changing one means the wire format changed, which is a revision
-        // and not an edit.
+        // and not an edit. These numbers were last cut when the engine's six
+        // message frames became the one `Raft` variant that carries a
+        // `RaftMessage`: a layout no deployment had yet seen, so it moved under
+        // revision 1 rather than earning a second one.
         //
         // The SWIM family is pinned because it is the likeliest thing to be
         // reshaped (its digest is where a membership field would want to go),
@@ -561,7 +526,7 @@ mod tests {
                 command: Vec::new(),
                 forwarded: false,
             }),
-            19,
+            14,
             "the last variant moved, so something was inserted rather than \
              appended and every frame after the insertion point now means \
              something else on the wire",

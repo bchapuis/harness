@@ -10,17 +10,23 @@
 //! read-repair (**B4**).
 //!
 //! A node running this tier owns its on-disk [`LocalBlobStore`], a [`BlobReplica`]
-//! actor over it (so peers can reach it), the node's [`TombstoneSet`] (shared with
-//! the replica), and an [`AnchorTracker`] for the namespaces it anchors. Owner
+//! actor over it (so peers can reach it), and the node's [`TombstoneSet`] (shared
+//! with the replica). It reaches a peer's replica through the receptionist and an
+//! ordinary `ask` (spec §6): no transport of its own, so the deterministic
+//! simulator drives the real code through the framework's seams (spec §8). Owner
 //! selection is the pure [`placement`] function of the serving set (**B5**), so a
 //! writer and a reader agree on where a blob lives with no directory lookup.
 //!
 //! This module is the data and delete paths; the reconcile loop that restores the
 //! `R` margin after a node departs (spec §7, **B6**) lives in `reconcile`.
 
+use std::future::Future;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use actor_core::ActorRef;
+use actor_core::CallError;
 use actor_core::NodeId;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -35,14 +41,17 @@ use crate::blob::verify;
 use crate::event::BlobEvent;
 use crate::local::LocalBlobStore;
 use crate::placement;
-use crate::replica::ActorBlobTransport;
 use crate::replica::BlobReplica;
-use crate::replica::BlobTransport;
+use crate::replica::DeleteAck;
+use crate::replica::DeleteNamespace;
+use crate::replica::FetchBlob;
+use crate::replica::HasBlob;
 use crate::replica::StoreAck;
-use crate::replica::StoreAckFuture;
+use crate::replica::StoreBlob;
+use crate::replica::SyncTombstones;
 use crate::replica::blob_replica_key;
 use crate::system::BlobSystem;
-use crate::tombstone::AnchorTracker;
+use crate::tombstone::Tombstone;
 use crate::tombstone::TombstoneSet;
 
 /// How long a `put`/`delete` waits for its durability target before returning
@@ -76,18 +85,113 @@ pub(crate) struct Inner<S: BlobSystem> {
     /// This node's cluster-wide awareness set, shared with its [`BlobReplica`] so
     /// the durable store and the in-memory set move together (spec §5.3).
     pub(crate) tombstones: TombstoneSet,
-    /// Sweep tracking for namespaces this node anchors (spec §5.3, B7).
-    pub(crate) anchors: AnchorTracker,
-    /// How the tier reaches peers' replicas: a seam, for deterministic simulation
-    /// (spec §6, §8).
-    pub(crate) transport: Arc<dyn BlobTransport>,
     pub(crate) self_node: NodeId,
+}
+
+/// How the tier reaches a node's [`BlobReplica`] (spec §6, no new transport): it
+/// resolves the replica in the receptionist and `ask`s it. A replica on this node
+/// resolves to the local actor, so an owner's store to itself is a local call with
+/// no serialization (spec §5.2). Resolution is a local receptionist read on every
+/// call, so it is never stale across a peer restart. Each method resolves before
+/// returning its future, so the future owns everything it needs and can be drained
+/// on the spawner after the caller has moved on.
+impl<S: BlobSystem> Inner<S> {
+    /// The replica registered on `node`; `Unreachable` if none is discovered.
+    fn replica_on(&self, node: NodeId) -> Result<ActorRef<BlobReplica<S>>, CallError> {
+        self.system
+            .receptionist()
+            .lookup(blob_replica_key::<S>())
+            .into_vec()
+            .into_iter()
+            .find(|replica| replica.id().node() == node)
+            .ok_or(CallError::Unreachable)
+    }
+
+    /// `msg` to `node`'s replica, resolved before the future is returned so the
+    /// future owns everything it needs.
+    fn ask<M>(
+        &self,
+        node: NodeId,
+        msg: M,
+        within: Duration,
+    ) -> impl Future<Output = Result<M::Reply, CallError>> + Send + 'static
+    where
+        M: actor_core::Message,
+        BlobReplica<S>: actor_core::Handler<M>,
+    {
+        let replica = self.replica_on(node);
+        async move { replica?.ask_timeout(msg, within).await }
+    }
+
+    /// `StoreBlob` to `node`'s replica (spec §5.2). A `Stored` ack counts toward
+    /// the `W` durability target; a `Deleted` ack surfaces the tombstone.
+    pub(crate) fn store_blob(
+        &self,
+        node: NodeId,
+        ns: Namespace,
+        id: BlobId,
+        bytes: Vec<u8>,
+        within: Duration,
+    ) -> impl Future<Output = Result<StoreAck, CallError>> + Send + 'static {
+        self.ask(node, StoreBlob { ns, id, bytes }, within)
+    }
+
+    /// `FetchBlob` from `node`'s replica (spec §5.2): the whole raw bytes, or
+    /// `None`. The caller verifies (B1).
+    pub(crate) fn fetch_blob(
+        &self,
+        node: NodeId,
+        ns: Namespace,
+        id: BlobId,
+        range: Option<Range<u64>>,
+        within: Duration,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, CallError>> + Send + 'static {
+        let fetched = self.ask(node, FetchBlob { ns, id, range }, within);
+        async move {
+            fetched
+                .await
+                .map(|found| found.map(serde_bytes::ByteBuf::into_vec))
+        }
+    }
+
+    /// `HasBlob` on `node`'s replica (spec §7): gates a reconcile copy.
+    pub(crate) fn has_blob(
+        &self,
+        node: NodeId,
+        ns: Namespace,
+        id: BlobId,
+        within: Duration,
+    ) -> impl Future<Output = Result<bool, CallError>> + Send + 'static {
+        self.ask(node, HasBlob { ns, id }, within)
+    }
+
+    /// `DeleteNamespace` on `node`'s replica (spec §5.3): record the tombstone and
+    /// sweep. Fanned out to every serving node, not only a blob's owners.
+    pub(crate) fn delete_namespace(
+        &self,
+        node: NodeId,
+        ns: Namespace,
+        deleted_at: u64,
+        within: Duration,
+    ) -> impl Future<Output = Result<DeleteAck, CallError>> + Send + 'static {
+        self.ask(node, DeleteNamespace { ns, deleted_at }, within)
+    }
+
+    /// `SyncTombstones` on `node`'s replica (spec §5.3, **B7**): pull its awareness
+    /// set so a rejoining or lagging node learns the deletes it missed.
+    pub(crate) fn sync_tombstones(
+        &self,
+        node: NodeId,
+        within: Duration,
+    ) -> impl Future<Output = Result<Vec<Tombstone>, CallError>> + Send + 'static {
+        self.ask(node, SyncTombstones, within)
+    }
 }
 
 impl<S: BlobSystem> ClusteredBlobStore<S> {
     /// Bring the `Clustered` tier up on `system` with this node's on-disk `local`
     /// store: spawn and register the node's [`BlobReplica`] so peers can reach it,
-    /// and wire the transport, tombstone awareness, and anchor tracker.
+    /// and share the tombstone awareness set with it.
     ///
     /// `local` is opened by the caller (one store per node), so the deterministic
     /// simulator can give each node its own directory (spec §8).
@@ -98,19 +202,16 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
             .receptionist()
             .register(blob_replica_key::<S>(), &replica);
         let self_node = system.node();
-        let transport: Arc<dyn BlobTransport> = Arc::new(ActorBlobTransport::new(system.clone()));
         let inner = Arc::new(Inner {
             system,
             config,
             local,
             tombstones,
-            anchors: AnchorTracker::new(),
-            transport,
             self_node,
         });
-        // Drive rebalancing, the tombstone anti-entropy pull, and the release of
-        // sweep bookkeeping in the background, holding a `Weak` so the loop exits
-        // once the last store handle is dropped (spec §7).
+        // Drive rebalancing and the tombstone anti-entropy pull in the background,
+        // holding a `Weak` so the loop exits once the last store handle is dropped
+        // (spec §7).
         inner
             .system
             .launch(Box::pin(crate::reconcile::reconcile_loop(Arc::downgrade(
@@ -123,11 +224,6 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
     /// before a reconcile copy (spec §7).
     pub fn tombstones(&self) -> &TombstoneSet {
         &self.inner.tombstones
-    }
-
-    /// The node's anchor tracker, for the reclamation pass (spec §5.3, §7).
-    pub fn anchors(&self) -> &AnchorTracker {
-        &self.inner.anchors
     }
 
     /// This node's on-disk store, which the reconcile loop enumerates to re-push
@@ -180,13 +276,10 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         // and drain the rest in the background, off the latency path (entity §7.2).
         let mut acks = FuturesUnordered::new();
         for owner in owners {
-            acks.push(self.inner.transport.store_blob(
-                owner,
-                ns.clone(),
-                id,
-                bytes.clone(),
-                PUT_TIMEOUT,
-            ));
+            acks.push(
+                self.inner
+                    .store_blob(owner, ns.clone(), id, bytes.clone(), PUT_TIMEOUT),
+            );
         }
 
         let mut stored = 0usize;
@@ -243,7 +336,6 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
             // against `id` after transfer (B1) before slicing.
             match self
                 .inner
-                .transport
                 .fetch_blob(node, ns.clone(), *id, None, READ_TIMEOUT)
                 .await
             {
@@ -293,7 +385,6 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         for owner in owners {
             if let Ok(true) = self
                 .inner
-                .transport
                 .has_blob(owner, ns.clone(), *id, READ_TIMEOUT)
                 .await
             {
@@ -327,40 +418,25 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         for node in &members {
             let node = *node;
             let is_anchor = anchor_owners.contains(&node);
-            let fut =
-                self.inner
-                    .transport
-                    .delete_namespace(node, ns.clone(), deleted_at, DELETE_TIMEOUT);
-            acks.push(async move { (node, is_anchor, fut.await) });
+            let fut = self
+                .inner
+                .delete_namespace(node, ns.clone(), deleted_at, DELETE_TIMEOUT);
+            acks.push(async move { (is_anchor, fut.await) });
         }
 
+        // Decided at W anchor acks, reported after the drain, so the rest of the
+        // cluster sweeps on the delete's latency path (spec §5.3). The tombstone
+        // itself is never reclaimed (spec §10).
         let mut anchored = 0usize;
-        let mut swept: Vec<NodeId> = Vec::new();
         let mut result = Err(BlobError::Unavailable(format!(
             "anchored 0 of {need_anchor} tombstone owners"
         )));
-        while let Some((node, is_anchor, ack)) = acks.next().await {
-            if ack.is_ok() {
-                swept.push(node);
-                if is_anchor {
-                    anchored += 1;
-                    if anchored >= need_anchor && result.is_err() {
-                        // Keep draining so the rest of the cluster sweeps too.
-                        result = Ok(());
-                    }
+        while let Some((is_anchor, ack)) = acks.next().await {
+            if ack.is_ok() && is_anchor {
+                anchored += 1;
+                if anchored >= need_anchor && result.is_err() {
+                    result = Ok(());
                 }
-            }
-        }
-
-        // If this node anchors the namespace, record which members acked their
-        // sweep (spec §5.3, B7). Only the coordinator records, and only when it is
-        // itself an anchor owner; the bookkeeping is released in the reconcile loop
-        // once every member-at-anchor has swept or reached a terminal state. The
-        // tombstone itself is never reclaimed (spec §10).
-        if anchor_owners.contains(&self.inner.self_node) {
-            self.inner.anchors.anchor(ns, members.iter().copied());
-            for node in swept {
-                self.inner.anchors.record_sweep(ns, node);
             }
         }
         result
@@ -368,11 +444,14 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
 
     /// Drain the remaining store acks in the background, so the commit returns at
     /// `W` latency while every issued ask still runs to completion (spec §5.2).
-    fn drain(&self, mut pending: FuturesUnordered<StoreAckFuture>) {
+    fn drain<F>(&self, mut pending: FuturesUnordered<F>)
+    where
+        F: Future<Output = Result<StoreAck, CallError>> + Send + 'static,
+    {
         if pending.is_empty() {
             return;
         }
-        self.inner.transport.launch(Box::pin(
+        self.inner.system.launch(Box::pin(
             async move { while pending.next().await.is_some() {} },
         ));
     }

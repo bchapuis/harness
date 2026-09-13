@@ -141,7 +141,7 @@ fn a_wal_frame_revision_this_build_does_not_accept_is_refused_by_name() {
     let err = Wal::<Rec>::open(&path, MAX, &RECORDS)
         .err()
         .expect("a wal.frame v9 log must be refused");
-    let msg = err.into_io().to_string();
+    let msg = err.to_string();
     assert!(
         msg.contains("wal.frame") && msg.contains("v9"),
         "the refusal must name the boundary and what it found, got: {msg}",

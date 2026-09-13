@@ -36,23 +36,22 @@ use actor_runtime::FileRaftWAL;
 use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
 use entity::cluster::AlarmIndex;
-use entity::store::FileEntityStore;
 use entity::EntityName;
 use entity::Entities;
 use entity::EntityConfig;
-use entity::EntityExt;
+use entity::cluster::EntityNode;
 use machine_frontdoor::serve_connection;
 use machine_entity::MACHINE_TYPE;
 use machine_entity::Machine;
+use machine_entity::MachineRuntimeProvider;
 use machine_entity::fake::FakeRuntimeProvider;
 
 use crate::authority::FrontDoor;
 use crate::authority::EntityAuthority;
 use crate::authority::NodeMachine;
 use crate::backend::LocalBackend;
-use crate::provider::NodeRuntimeProvider;
 
-/// Which kind of machine this node runs (see [`NodeRuntimeProvider`]).
+/// Which kind of machine this node runs (see [`runtime_provider`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MachineKind {
     Fake,
@@ -158,16 +157,8 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 /// slow start is absorbed rather than reported as a fault.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The most a stop waits on the shard handoff. The handoff is bounded on its
-/// own (entity's `hand_off_leadership`: a fixed number of rounds, each one
-/// transfer round trip per led shard), so this is the backstop against a
-/// transport that stops answering, sized well inside the unit's 120 s stop
-/// budget (`deploy/systemd`).
-const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a stop waits after announcing `Leaving` before releasing the
-/// transport: two SWIM rounds at this node's `probe_interval`, so the gossip
-/// carries the departure to peers and the control leader commits it.
+/// Two SWIM rounds at this node's `probe_interval`, the departure's gossip
+/// window; see [`actor_runtime::depart`].
 const LEAVE_GRACE: Duration = Duration::from_secs(4);
 
 /// Boot the node, open its doors, and host machines until SIGTERM or SIGINT,
@@ -253,16 +244,13 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // anything durable starts: a mechanism the operator named but this build or
     // host cannot supply is a configuration error, not a half-booted node.
     let host = machine_host(&opts, machine_kind)?;
-    let provider = Arc::new(runtime_provider(&host, node, &system));
-    let entity_store = FileEntityStore::factory(opts.data.join("entities"), codec.as_ref());
-    // This node's shared capabilities, set once and used to host every type below
-    // (entity §7.4, §13). The I/O pool matters most in this deployment: a machine's
-    // disk facet writes whole 1 MiB image blocks, so an inline fsync would stall the
+    let provider = runtime_provider(&host, node, &system);
+    // This node's durable store, I/O pool and metrics, shared by every type below
+    // (entity §7.4, §13). The pool matters most in this deployment: a machine's disk
+    // facet writes whole 1 MiB image blocks, so an inline fsync would stall the
     // executor hardest here, and the node is also running Raft heartbeats on it.
-    let entity_node = system
-        .entity_node()
-        .blocking_io(Arc::new(entity::store::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(entity::store::AtomicEntityMetrics::new()));
+    let (entity_node, entity_store) =
+        EntityNode::durable(system.clone(), &opts.data);
     let config = EntityConfig {
         shards: opts.shards,
         entity_store: Some(entity_store.clone()),
@@ -336,57 +324,17 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.doors.is_empty() {
         eprintln!("[{node}] no --door given: hosting machines with no ingress");
     }
-    shutdown_signal().await;
-    // The graceful stop the systemd unit relies on (`deploy/systemd`): hand off
-    // every led shard while this node is still a full member, so the transfers
-    // are accepted, then announce the departure and release the transport in the
-    // order `leave`/`shutdown` document. Skipping the handoff is safe but turns a
-    // rolling restart into one failover per led shard, and here a failover
-    // deposes the activation owning a guest.
-    eprintln!("[{node}] stop signal received; handing off shard leadership");
-    let outstanding = tokio::time::timeout(HANDOFF_TIMEOUT, async {
-        machines.hand_off_leadership().await + alarms.hand_off_leadership().await
-    })
+    actor_runtime::shutdown_signal().await;
+    // Skipping the handoff is safe but turns a rolling restart into one failover
+    // per led shard, and here a failover deposes the activation owning a guest.
+    actor_runtime::depart(
+        &system,
+        async { machines.hand_off_leadership().await + alarms.hand_off_leadership().await },
+        actor_runtime::HANDOFF_TIMEOUT,
+        LEAVE_GRACE,
+    )
     .await;
-    match outstanding {
-        Ok(0) => eprintln!("[{node}] handed off every led shard; leaving the cluster"),
-        Ok(n) => eprintln!(
-            "[{node}] {n} shard(s) kept their leader (no caught-up replica); leaving the cluster"
-        ),
-        Err(_) => eprintln!(
-            "[{node}] handoff still running after {HANDOFF_TIMEOUT:?}; leaving the cluster"
-        ),
-    }
-    system.leave();
-    tokio::time::sleep(LEAVE_GRACE).await;
-    system.shutdown();
     Ok(())
-}
-
-/// Resolve on SIGTERM or SIGINT (the unit's stop signal, and ctrl-c at a
-/// terminal). Without a SIGTERM handler the default disposition kills the
-/// process outright, and nothing above gets to run.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::SignalKind;
-        use tokio::signal::unix::signal;
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                term.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
 }
 
 /// Accept SSH connections for one machine until the process ends. Each
@@ -421,24 +369,23 @@ async fn serve_door(
     }
 }
 
-/// Bind the entity factory's provider to what this node holds guests with.
+/// Bind the entity factory's provider to what this node holds guests with: the
+/// simulation's guest (machine §7) when no mechanism was named, else the real
+/// guest over whichever mechanism `--machine` selected (a Firecracker microVM or
+/// a container holding the same rootfs are one binding over
+/// `machine_host::MachineHost`; see [`machine_host`]).
 fn runtime_provider(
     host: &Option<Arc<dyn machine_host::MachineHost>>,
     node: NodeId,
     system: &TcpCluster,
-) -> NodeRuntimeProvider {
+) -> Arc<dyn MachineRuntimeProvider> {
     match host {
-        None => NodeRuntimeProvider::Fake(FakeRuntimeProvider::new(
-            system.clone(),
-            FAKE_WRITE_INTERVAL,
-        )),
+        None => Arc::new(FakeRuntimeProvider::new(system.clone(), FAKE_WRITE_INTERVAL)),
         #[cfg(feature = "host")]
-        Some(mechanism) => {
-            NodeRuntimeProvider::Hosted(machine_entity::hosted::HostedRuntimeProvider::new(
-                Arc::clone(mechanism),
-                machine_entity::hosted::HostedRuntimeConfig::new(node.to_string()),
-            ))
-        }
+        Some(mechanism) => Arc::new(machine_entity::hosted::HostedRuntimeProvider::new(
+            Arc::clone(mechanism),
+            machine_entity::hosted::HostedRuntimeConfig::new(node.to_string()),
+        )),
         // Unreachable: `machine_host` answers `None` for every mode this build
         // can serve.
         #[cfg(not(feature = "host"))]

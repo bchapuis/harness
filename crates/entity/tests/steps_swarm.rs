@@ -222,7 +222,7 @@ fn shape() -> PipelineConfig {
 }
 
 fn host(node: &SimNode, fx: &Effects) -> Entities<Pipeline> {
-    node.entities_named::<Pipeline>(
+    node.entity_node().entities_named::<Pipeline>(
         support::pipeline::PIPELINE_TYPE,
         config(),
         support::pipeline::Pipeline::factory(fx.clone(), shape()),

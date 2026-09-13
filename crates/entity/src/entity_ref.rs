@@ -449,9 +449,9 @@ impl<G: Entity> EntityRef<G> {
     }
 
     /// Up to `limit` of the entity's committed events after `from` (exclusive),
-    /// decoded, in ascending `Seq` order, the remote form of the activation's
-    /// own event projection ([`EntityCtx::events`](crate::EntityCtx::events)),
-    /// served by the shard leader's **gateway** straight from the journal,
+    /// decoded, in ascending `Seq` order, the load-path form of the
+    /// subscription's event projection (§7.9), served by the shard leader's
+    /// **gateway** straight from the journal,
     /// **without get-or-activating the entity** (§7.5): polling a hibernated
     /// entity leaves it hibernated (§10). A framework built-in like
     /// [`subscribe`](Self::subscribe), available for every entity type with no
@@ -754,7 +754,7 @@ pub struct Entities<G: Entity> {
     gateway: ActorRef<Gateway<G>>,
     /// The shared routing state (§5.4): the system handle, the runtime type name
     /// (spec §5.1, `G::ENTITY_TYPE` unless
-    /// [`entities_named`](EntityExt::entities_named) overrode it), the founding
+    /// [`entities_named`](crate::cluster::EntityNode::entities_named) overrode it), the founding
     /// shard count, and the shard map; read through the cache rather than kept
     /// as copies here, so name resolution has one set of inputs.
     cache: Arc<HostCache<G>>,
@@ -874,12 +874,13 @@ pub trait EntityExt: EntitySystem {
     /// Start hosting entities of type `G` under its own `G::ENTITY_TYPE` (spec
     /// Appendix A): spawn the type's gateway and return the handle. Each
     /// activation's behavior is built by `G::default`. The common case: one Rust
-    /// type, one entity type.
+    /// type, one entity type. An explicit runtime type name or activation factory
+    /// is the node's form, [`EntityNode::entities_named`](crate::cluster::EntityNode::entities_named).
     fn entities<G>(&self, config: EntityConfig) -> Entities<G>
     where
         G: Entity<System = Self> + Default,
     {
-        self.entities_named(G::ENTITY_TYPE, config, Arc::new(G::default))
+        self.entity_node().entities(config)
     }
 
     /// Address entities of type `G` as a routing-only **client**: it hosts
@@ -919,47 +920,17 @@ pub trait EntityExt: EntitySystem {
         })
     }
 
-    /// Host entities of type `G` under an explicit runtime **type name** (spec
-    /// §5.1), with a caller-supplied **factory** for each activation's behavior.
-    ///
-    /// Two extension points over [`entity`](EntityExt::entity), both for one
-    /// Rust entity that must be **many** entity types at runtime:
-    ///
-    /// - `entity_type` overrides `G::ENTITY_TYPE`, so the same `G` hosts under
-    ///   several names: distinct gateways, shard maps, and consensus groups. It
-    ///   MUST be stable cluster-wide and across runs, exactly as `G::ENTITY_TYPE`
-    ///   must be (§5.1); a `&'static str` makes that lifetime explicit.
-    /// - `factory` replaces `G::default`, so the runtime can inject per-node seam
-    ///   handles into each fresh activation (the entity needs no `Default`).
-    fn entities_named<G>(
-        &self,
-        entity_type: &'static str,
-        config: EntityConfig,
-        factory: Arc<dyn Fn() -> G + Send + Sync>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = Self>;
-
     /// Host entities of type `G` **with durable-alarm firing across hibernation and
-    /// failover** (spec §7.16). Like [`entities_named`](EntityExt::entities_named), but
-    /// each host registers its pending [`Alarm`](crate::alarm::Alarm) deadline with the
+    /// failover** (spec §7.16). Like [`entities`](EntityExt::entities), but each host
+    /// registers its pending [`Alarm`](crate::alarm::Alarm) deadline with the
     /// per-shard `index`, and a background driver re-activates due entities on the
     /// shards this node leads. The caller starts **one** shared `AlarmIndex`
     /// entity and passes its handle to every alarm-bearing type; a type without
     /// the [`Alarm`](crate::alarm::Alarm) facet gains nothing from wiring it.
-    fn entities_named_with_alarms<G>(
-        &self,
-        entity_type: &'static str,
-        config: EntityConfig,
-        factory: Arc<dyn Fn() -> G + Send + Sync>,
-        index: Entities<AlarmIndex<Self>>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = Self>;
-
-    /// [`entities_named_with_alarms`](EntityExt::entities_named_with_alarms) under the
-    /// type's own `G::ENTITY_TYPE`, building each activation with `G::default`: the
-    /// common case, mirroring [`entity`](EntityExt::entity).
+    ///
+    /// An explicit runtime type name or activation factory (spec §5.1, Appendix
+    /// A) is the node's form:
+    /// [`EntityNode::entities_named_with_alarms`](crate::node::EntityNode::entities_named_with_alarms).
     fn entities_with_alarms<G>(
         &self,
         config: EntityConfig,
@@ -968,70 +939,11 @@ pub trait EntityExt: EntitySystem {
     where
         G: Entity<System = Self> + Default,
     {
-        self.entities_named_with_alarms(G::ENTITY_TYPE, config, Arc::new(G::default), index)
+        self.entity_node().entities_with_alarms(config, index)
     }
 }
 
-impl<T: EntitySystem> EntityExt for T {
-    fn entities_named<G>(
-        &self,
-        entity_type: &'static str,
-        config: EntityConfig,
-        factory: Arc<dyn Fn() -> G + Send + Sync>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = Self>,
-    {
-        self.entity_node()
-            .entities_named(entity_type, config, factory)
-    }
-
-    fn entities_named_with_alarms<G>(
-        &self,
-        entity_type: &'static str,
-        config: EntityConfig,
-        factory: Arc<dyn Fn() -> G + Send + Sync>,
-        index: Entities<AlarmIndex<Self>>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = Self>,
-    {
-        self.entity_node()
-            .entities_named_with_alarms(entity_type, config, factory, index)
-    }
-}
-
-/// [`build_entities`] plus this type's alarm driver (spec §7.16), the
-/// callerless-activation seam. Shared by
-/// [`EntityNode::entities_named_with_alarms`](crate::node::EntityNode::entities_named_with_alarms)
-/// and the [`EntityExt`] method that delegates to it.
-pub(crate) fn build_entities_with_alarms<S, G>(
-    system: &S,
-    entity_type: &'static str,
-    config: EntityConfig,
-    capabilities: &crate::node::NodeCapabilities,
-    factory: Arc<dyn Fn() -> G + Send + Sync>,
-    index: Entities<AlarmIndex<S>>,
-) -> Entities<G>
-where
-    S: EntitySystem,
-    G: Entity<System = S>,
-{
-    let handle = build_entities::<S, G>(
-        system,
-        entity_type,
-        config,
-        capabilities,
-        factory,
-        Some(index.clone()),
-    );
-    system.launch(Box::pin(alarm_driver_loop::<S, G>(
-        system.clone(),
-        handle.clone(),
-        index,
-    )));
-    handle
-}
+impl<T: EntitySystem> EntityExt for T {}
 
 /// How often the alarm driver sweeps the shards it leads (spec §7.16). The exact
 /// deadline is honoured by the entity's own in-activation timer once re-activated;
@@ -1039,10 +951,10 @@ where
 const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Build the node-local hosting for an entity type (spec §7.4, Appendix A): the
-/// durable store, replica store, shard map, and gateway. Shared by
-/// [`entities_named`](EntityExt::entities_named) and
-/// [`entities_named_with_alarms`](EntityExt::entities_named_with_alarms), which
-/// differ only by the `alarm_index` a host receives.
+/// durable store, replica store, shard map, and gateway, plus the type's alarm
+/// driver (§7.16, the callerless-activation seam) when an `alarm_index` is wired.
+/// The one constructor behind every [`EntityNode`](crate::node::EntityNode) hosting
+/// method.
 pub(crate) fn build_entities<S, G>(
     system: &S,
     entity_type: &'static str,
@@ -1102,14 +1014,14 @@ where
         config,
         capabilities.clone(),
         factory,
-        alarm_index,
+        alarm_index.clone(),
     ));
     // Register this node's gateway under the type's well-known key so other nodes
     // route activations to it (§5.3).
     system
         .receptionist()
         .register(gateway_key::<G>(entity_type), &gateway);
-    Entities {
+    let handle = Entities {
         gateway,
         cache: HostCache::new(
             system.clone(),
@@ -1118,7 +1030,15 @@ where
             shard_map,
             host_cache_capacity,
         ),
+    };
+    if let Some(index) = alarm_index {
+        system.launch(Box::pin(alarm_driver_loop::<S, G>(
+            system.clone(),
+            handle.clone(),
+            index,
+        )));
     }
+    handle
 }
 
 /// The per-type alarm driver (spec §7.16): the callerless-activation seam that makes a

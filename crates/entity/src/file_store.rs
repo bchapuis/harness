@@ -137,7 +137,6 @@ use crate::journal::Seq;
 use crate::journal::Term;
 use crate::store::BlobAck;
 use crate::store::BumpRefusal;
-use crate::store::EntityBlobStore;
 use crate::store::EntityCheckpoint;
 use crate::store::EntityRecords;
 use crate::store::EntityStore;
@@ -703,40 +702,22 @@ const STORE_EXT_KNOWN: &[u16] = &[];
 /// `GRFNCE` cannot be confused with the unstamped predecessor, whose leading eight
 /// bytes are a term: aliasing it needs term 0x45434E465247, some 7.6e13 elections
 /// away. The width is a second, independent discriminator.
-pub(crate) const FENCE: compat::Stamp =
-    compat::Stamp::new(b"GRFNCE", compat::Window::at("entity.store.fence", 1));
+pub(crate) const FENCE: wal::Sidecar = wal::Sidecar::new(
+    compat::Stamp::new(b"GRFNCE", compat::Window::at("entity.store.fence", 1)),
+    &[],
+);
 
 /// The stamp on a `seals/<shard>` file (compatibility §3, `entity.store.seal`).
 ///
 /// A separate boundary from [`FENCE`] for the reason [`MANIFEST_RECORDS`] and
 /// [`SEGMENT_RECORDS`] are separate: a fence term (§8) and an append bound (§7.7)
 /// mean different things and evolve apart, and **V6** says a bump at one must not
-/// invalidate the other. They share a body and a reader, not a revision.
-pub(crate) const SEAL: compat::Stamp =
-    compat::Stamp::new(b"GRSEAL", compat::Window::at("entity.store.seal", 1));
-
-/// A fence's or a seal's body, behind the stamp.
-///
-/// The checksum covers the value *and* the extension area, so a change there
-/// cannot pass unnoticed. It is still FNV-1a at revision 1: `wal::checksum` is
-/// frozen for callers who cannot say which digest wrote them, and having a header
-/// is exactly what would let this one say.
-#[derive(Serialize, Deserialize)]
-struct SidecarBody {
-    checksum: u64,
-    value: u64,
-    /// Room to grow without a revision bump (compatibility spec §2.1), for the same
-    /// reason [`StoreBody`] carries one: the body is positional `postcard`.
-    ext: compat::Extensions,
-}
-
-/// The critical extension keys a fence or a seal implements: none yet.
-const SIDECAR_EXT_KNOWN: &[u16] = &[];
-
-/// Bytes of an **unstamped** fence or seal: the value (u64 LE) followed by its
-/// checksum (u64 LE), which is the shape both files had before they carried a
-/// stamp. A reader adopts it; nothing writes it.
-const SIDECAR_LEGACY_BYTES: usize = 16;
+/// invalidate the other. They share a body and a reader (`wal::Sidecar`, wal §5),
+/// not a revision.
+pub(crate) const SEAL: wal::Sidecar = wal::Sidecar::new(
+    compat::Stamp::new(b"GRSEAL", compat::Window::at("entity.store.seal", 1)),
+    &[],
+);
 
 /// Confirm `dir` holds records `codec` can read, stamping it if it is not stamped.
 ///
@@ -813,8 +794,7 @@ fn load_fences(dir: &Path) -> io::Result<HashMap<u32, Term>> {
 /// Open and replay the manifest, truncating any torn tail.
 fn load_manifest(dir: &Path) -> io::Result<Manifest> {
     let path = dir.join("manifest");
-    let (log, entries) = Wal::<ManifestEntry>::open(&path, MAX_RECORD, &MANIFEST_RECORDS)
-        .map_err(|e| e.into_io())?;
+    let (log, entries) = Wal::<ManifestEntry>::open(&path, MAX_RECORD, &MANIFEST_RECORDS)?;
     let mut ids = HashMap::new();
     let mut next = 0u64;
     for entry in entries {
@@ -833,8 +813,7 @@ fn load_manifest(dir: &Path) -> io::Result<Manifest> {
 /// loads the whole segment state; every other op is re-applied to it in log order.
 fn open_segment(dir: &Path, id: u64) -> io::Result<Segment> {
     let path = dir.join("segments").join(id.to_string());
-    let (log, ops) =
-        Wal::<SegOp>::open(&path, MAX_RECORD, &SEGMENT_RECORDS).map_err(wal::OpenError::into_io)?;
+    let (log, ops) = Wal::<SegOp>::open(&path, MAX_RECORD, &SEGMENT_RECORDS)?;
     let mut records = EntityRecords::default();
     for op in ops {
         match op {
@@ -869,7 +848,7 @@ fn load_seals(dir: &Path) -> io::Result<HashMap<u32, u64>> {
         let Some(shard) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
-        if let Some(bound) = read_sidecar(&entry.path(), &SEAL)? {
+        if let Some(bound) = SEAL.read(&entry.path())? {
             seals.insert(shard, bound);
         }
     }
@@ -878,97 +857,23 @@ fn load_seals(dir: &Path) -> io::Result<HashMap<u32, u64>> {
 
 /// Atomically persist a shard's fence term, stamped `entity.store.fence`.
 fn write_fence(dir: &Path, shard: u32, term: Term) -> io::Result<()> {
-    write_sidecar(&dir.join("fences"), shard, term.value(), &FENCE)
+    FENCE.write(&dir.join("fences").join(shard.to_string()), term.value())
 }
 
 /// Atomically persist a shard's append bound, stamped `entity.store.seal`.
 fn write_seal(dir: &Path, shard: u32, bound: u64) -> io::Result<()> {
-    write_sidecar(&dir.join("seals"), shard, bound, &SEAL)
-}
-
-/// Atomically persist one stamped sidecar under `dir/<shard>`: the shared shape
-/// of the fence and seal files, read back by [`read_sidecar`].
-fn write_sidecar(dir: &Path, shard: u32, value: u64, stamp: &compat::Stamp) -> io::Result<()> {
-    let body = postcard::to_allocvec(&SidecarBody {
-        checksum: wal::checksum(&value.to_le_bytes()),
-        value,
-        ext: compat::Extensions::new(),
-    })
-    .expect("a sidecar body is plain owned data");
-    wal::atomic_replace(dir, &shard.to_string(), &stamp.stamp(&body))
+    SEAL.write(&dir.join("seals").join(shard.to_string()), bound)
 }
 
 /// Read a shard's fence term, or `None` if the file is absent.
-fn read_fence(path: &Path) -> io::Result<Option<Term>> {
-    Ok(read_sidecar(path, &FENCE)?.map(Term::new))
-}
-
-/// Read one fence or seal, accepting the stamped form and the unstamped
-/// predecessor. `None` means one thing only: **the file is absent**.
 ///
-/// That is what the header buys. `load_fences` reads `None` as *no fence for this
-/// shard*, so while a short file, a long file, or a checksum mismatch also answered
-/// `None`, bit-rot or a build skew silently withdrew **E1**'s single-writer
-/// guarantee with no diagnostic anywhere. A malformed sidecar now fails
+/// `None` means one thing only: **the file is absent** (wal §5). `load_fences`
+/// reads it as *no fence for this shard*, so a malformed sidecar fails
 /// [`FileEntityStore::open`] rather than opening a store with a fence quietly
-/// missing, the same direction the Raft term file already fails in: guessing risks
-/// a safety property.
-///
-/// The order is the contract: bytes carrying the magic are *this* format, so their
-/// revision is admitted before any field is read (**V2**) and a revision this build
-/// refuses is never handed to the older decoder. Only bytes without the magic are
-/// read as the predecessor.
-fn read_sidecar(path: &Path, stamp: &compat::Stamp) -> io::Result<Option<u64>> {
-    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
-    let named = |msg: &str| {
-        invalid(format!(
-            "{} at {}: {msg}",
-            stamp.window().boundary(),
-            path.display()
-        ))
-    };
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
-    };
-    if stamp.is_stamped(&bytes) {
-        let (_, body) = stamp.unstamp(&bytes).map_err(|err| {
-            invalid(format!(
-                "{} at {}: {err}",
-                stamp.window().boundary(),
-                path.display()
-            ))
-        })?;
-        let body: SidecarBody = postcard::from_bytes(body)
-            .map_err(|err| named(&format!("body did not decode: {err}")))?;
-        body.ext
-            .admit(stamp.window().boundary(), SIDECAR_EXT_KNOWN)
-            .map_err(|err| {
-                invalid(format!(
-                    "{} at {}: {err}",
-                    stamp.window().boundary(),
-                    path.display()
-                ))
-            })?;
-        if body.checksum != wal::checksum(&body.value.to_le_bytes()) {
-            return Err(named("checksum mismatch"));
-        }
-        return Ok(Some(body.value));
-    }
-    if bytes.len() == SIDECAR_LEGACY_BYTES {
-        let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
-        let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
-        if check != wal::checksum(&raw.to_le_bytes()) {
-            return Err(named("unstamped record's checksum mismatch"));
-        }
-        return Ok(Some(raw));
-    }
-    Err(named(&format!(
-        "neither a `{}` record nor a {SIDECAR_LEGACY_BYTES}-byte unstamped one ({} bytes)",
-        String::from_utf8_lossy(stamp.magic()),
-        bytes.len(),
-    )))
+/// missing, which would withdraw **E1**'s single-writer guarantee with no
+/// diagnostic; the same direction the Raft term file already fails in.
+fn read_fence(path: &Path) -> io::Result<Option<Term>> {
+    Ok(FENCE.read(path)?.map(Term::new))
 }
 
 impl WriteGuard for FileEntityStore {
@@ -1005,9 +910,27 @@ impl WriteGuard for FileEntityStore {
     }
 }
 
+impl FileEntityStore {
+    /// Drop the live segment handle, its on-disk log, and the blob subtree of one
+    /// entity. The manifest keeps the id assignment (append-only); a later access
+    /// reopens an empty segment under the same id, which reads as absent.
+    fn remove_entity(&self, shard: u32, entity: &EntityName) {
+        let Some(seg_id) = self.segment_id(shard, entity, false) else {
+            return;
+        };
+        let mut segments = self
+            .segments
+            .lock()
+            .expect("entity store segments poisoned");
+        segments.remove(&(shard, entity.clone()));
+        let _ = fs::remove_file(self.segment_path(seg_id));
+        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+    }
+}
+
 // This store fsyncs synchronously inside each call, so an outcome it settles is
 // already stable when it returns.
-impl EntityBlobStore for FileEntityStore {
+impl EntityStore for FileEntityStore {
     fn put_blob(&self, shard: u32, entity: &EntityName, id: BlobId, bytes: Vec<u8>) -> BlobAck {
         // One content-addressed file per blob, persisted with the same atomic
         // write-and-fsync the fence uses: no ack for a blob that is not durable.
@@ -1113,9 +1036,7 @@ impl EntityBlobStore for FileEntityStore {
             .filter_map(|entry| BlobId::from_hex(entry.file_name().to_str()?))
             .collect()
     }
-}
 
-impl EntityStore for FileEntityStore {
     fn store_record(
         &self,
         shard: u32,
@@ -1313,22 +1234,6 @@ impl EntityStore for FileEntityStore {
             // re-applied merge commit clears again; conservative, never unsafe.
             let _ = fs::remove_file(self.dir.join("seals").join(shard.to_string()));
         }
-    }
-
-    /// Drop the live segment handle, its on-disk log, and the blob subtree of one
-    /// entity. The manifest keeps the id assignment (append-only); a later access
-    /// reopens an empty segment under the same id, which reads as absent.
-    fn remove_entity(&self, shard: u32, entity: &EntityName) {
-        let Some(seg_id) = self.segment_id(shard, entity, false) else {
-            return;
-        };
-        let mut segments = self
-            .segments
-            .lock()
-            .expect("entity store segments poisoned");
-        segments.remove(&(shard, entity.clone()));
-        let _ = fs::remove_file(self.segment_path(seg_id));
-        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
     }
 
     /// Enumerate-and-remove, because an entity owns a file: the range is expressible
@@ -1687,18 +1592,13 @@ mod tests {
         bytes
     }
 
-    /// A stamped fence or seal, encoded the way this build reads one. Written here
-    /// rather than taken from the store so the fixture cannot move with the writer:
-    /// bytes generated by the code under test pin nothing. That the writers agree is
-    /// asserted separately, by `a_fence_and_a_seal_are_written_stamped`.
-    fn stamped_sidecar(stamp: &compat::Stamp, value: u64) -> Vec<u8> {
-        let body = postcard::to_allocvec(&SidecarBody {
-            checksum: wal::checksum(&value.to_le_bytes()),
-            value,
-            ext: compat::Extensions::new(),
-        })
-        .expect("encode a sidecar body");
-        stamp.stamp(&body)
+    /// A stamped fence or seal, encoded the way this build writes one. The corpus
+    /// fixture is what pins these bytes across builds (`crate::corpus::golden`), so
+    /// the encoder is shared with the writer rather than transcribed here; that the
+    /// *store* writes stamped at all is asserted separately, by
+    /// `a_fence_and_a_seal_are_written_stamped`.
+    fn stamped_sidecar(sidecar: &wal::Sidecar, value: u64) -> Vec<u8> {
+        sidecar.encode(value)
     }
 
     #[test]
@@ -1761,7 +1661,7 @@ mod tests {
     #[test]
     fn a_fence_this_build_cannot_read_is_refused_rather_than_read_as_no_fence() {
         let mut future = stamped_sidecar(&FENCE, 7);
-        let head = FENCE.magic().len();
+        let head = FENCE.stamp().magic().len();
         future[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
 
         let mut torn = stamped_sidecar(&FENCE, 7);
@@ -1821,9 +1721,12 @@ mod tests {
         store.seal_range(0, 99);
         drop(store);
 
-        for (kind, stamp) in [("fences", &FENCE), ("seals", &SEAL)] {
+        for (kind, sidecar) in [("fences", &FENCE), ("seals", &SEAL)] {
             let bytes = std::fs::read(dir.path().join(kind).join("0")).expect("read the sidecar");
-            assert!(stamp.is_stamped(&bytes), "{kind} must be written stamped");
+            assert!(
+                sidecar.stamp().is_stamped(&bytes),
+                "{kind} must be written stamped"
+            );
         }
 
         // And what it wrote, it reads back (**V3**).

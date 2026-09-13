@@ -162,8 +162,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     })
     .await?;
 
-    // Discover the host gateways and assemble the routing-only state. The
-    // directory shards must match the nodes' `Directory` shards (the default).
+    // Discover the host gateways and assemble the routing-only state.
     if roster.is_empty() {
         // The dev default, matching `agent-standalone`'s default kinds; a
         // real deployment states its roster explicitly, next to the nodes'.
@@ -173,7 +172,6 @@ async fn run(args: &[String]) -> Result<(), String> {
     let gateway = agent_gateway::connect(
         system,
         &roster,
-        EntityConfig::default().shards,
         tokens,
         limits,
         Duration::from_secs(30),
@@ -202,27 +200,7 @@ async fn run(args: &[String]) -> Result<(), String> {
 /// prompts are durable in the journal, so dropping their background tasks is
 /// safe: a client reconnects and folds the session back out of the journal.
 async fn shutdown_signal<S: HarnessSystem>(gateway: Arc<Gateway<S>>) {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::SignalKind;
-        use tokio::signal::unix::signal;
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                term.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
+    actor_runtime::shutdown_signal().await;
     eprintln!("[gateway] shutdown signal received; draining");
     gateway.set_ready(false);
     tokio::time::sleep(Duration::from_secs(3)).await;

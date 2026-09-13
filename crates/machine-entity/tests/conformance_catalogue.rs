@@ -6,6 +6,12 @@
 //! M-number is missing or duplicated, if an entry claims no verification method, or
 //! if a pointer names a file that no longer exists, which is what keeps §7's
 //! "Verified by" column mechanically true rather than merely written down.
+//!
+//! Entries name test *functions* rather than files, because the machine's
+//! verification spans three sites across two crates (this crate's suites, the
+//! front door's, and the egress rule generator's unit tests in `src/net.rs`), so
+//! a name is resolved to its file by searching `machine-entity`,
+//! `machine-frontdoor`, and `machine-host` for the definition.
 
 mod support;
 

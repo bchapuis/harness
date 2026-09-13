@@ -52,7 +52,7 @@ pub fn config() -> EntityConfig {
 /// Host `Fanout` on `node` under `config`, every activation sharing `seam`.
 pub fn host_with(node: &SimNode, seam: &Seam, config: EntityConfig) -> Entities<Fanout<SimNode>> {
     let seam = seam.clone();
-    node.entities_named::<Fanout<SimNode>>(
+    node.entity_node().entities_named::<Fanout<SimNode>>(
         FANOUT_TYPE,
         config,
         Arc::new(move || Fanout::new(seam.clone())),

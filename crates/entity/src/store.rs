@@ -206,15 +206,37 @@ pub enum WriteKind {
     Transfer,
 }
 
-/// An entity's immutable, content-addressed blob area (durable-workspace design).
+/// A node's durable store of entity records and snapshots (spec §7.2, §7.4).
 ///
-/// Blobs live beside an entity's records in the same per-node store but **off** the
-/// ordered, term-fenced record path: content addressing needs no term (a stale leader
-/// re-storing a block writes identical bytes) and no order. Keyed by
-/// `(shard, entity, BlobId)`; reclamation is entity-scoped, the entity driving it from
-/// its own live id set. A separate trait because it is unfenced and unordered;
-/// [`EntityStore`] requires it so one per-node handle serves both.
-pub trait EntityBlobStore: Send + Sync + 'static {
+/// The record methods are fenced by the shard **term** (§8): a write stamped with a
+/// term below the highest the store has acknowledged for that shard is refused
+/// (`Fenced`), so a deposed leader cannot land a write. Reads return each slot's
+/// term so the leader's recovery can read-repair (§8). Implementations key by
+/// `(shard, entity)` and persist durably enough to survive the restart their
+/// deployment targets (in-memory for the simulator, file-backed in production).
+///
+/// An entity's immutable, content-addressed blob area (durable-workspace design)
+/// lives in the same per-node store but **off** the ordered, term-fenced record
+/// path: content addressing needs no term (a stale leader re-storing a block writes
+/// identical bytes) and no order. Keyed by `(shard, entity, BlobId)`; reclamation is
+/// entity-scoped, the entity driving it from its own live id set. The enumeration
+/// and reclamation methods (`entities`, `remove_range`, `drop_shard`, `shard_bytes`)
+/// span both areas.
+///
+/// **A store call's effect has already happened when it returns**, durably: the guard,
+/// the in-memory apply, and the fsync all run before the call comes back, under the
+/// entity's segment lock. That is what serializes a write against the same entity's
+/// recovery `prepare`: the only fencing-critical race (§8), and it comes from these
+/// methods being *synchronous*. An `async fn` store would run its body at first poll,
+/// and a caller that never polled would silently not write.
+///
+/// **Every method that can refuse is `#[must_use]`.** A mutating call answers `Fenced`,
+/// `Stale`, `Sealed`, or `Failed` (each a *refusal to have written*), and silently
+/// dropping one is how a deposed leader convinces itself it committed (**E14**). The
+/// methods that report nothing return `()` and carry no such obligation.
+pub trait EntityStore: Send + Sync + 'static {
+    // --- the blob area: unfenced and unordered ---
+
     /// Store an immutable, content-addressed blob for an entity. Idempotent: an `id`
     /// already present is kept (storing equal content writes nothing new). Unfenced.
     ///
@@ -236,7 +258,7 @@ pub trait EntityBlobStore: Send + Sync + 'static {
     /// Drop a **single** blob of an entity. Idempotent (a missing blob is already
     /// done). Used by the read path to evict a copy that failed verification before
     /// re-fetching a good one (corruption self-heal, §7.10): a content-addressed
-    /// [`put_blob`](EntityBlobStore::put_blob) of an id already on disk writes nothing, so
+    /// [`put_blob`](EntityStore::put_blob) of an id already on disk writes nothing, so
     /// a corrupt copy must be removed before its replacement can be stored.
     fn delete_blob(&self, shard: u32, entity: &EntityName, id: BlobId);
 
@@ -253,34 +275,9 @@ pub trait EntityBlobStore: Send + Sync + 'static {
     /// source list when copying an entity's blob area to a new replica.
     #[must_use = "the answer is the whole point of the call"]
     fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<BlobId>;
-}
 
-/// A node's durable store of entity records and snapshots (spec §7.2, §7.4).
-///
-/// The record methods are fenced by the shard **term** (§8): a write stamped with a
-/// term below the highest the store has acknowledged for that shard is refused
-/// (`Fenced`), so a deposed leader cannot land a write. Reads return each slot's
-/// term so the leader's recovery can read-repair (§8). Implementations key by
-/// `(shard, entity)` and persist durably enough to survive the restart their
-/// deployment targets (in-memory for the simulator, file-backed in production).
-///
-/// Extends [`EntityBlobStore`]: an entity's content-addressed blob area lives in the
-/// same per-node store but off the fenced record path (see that trait). The
-/// enumeration and reclamation methods here (`entities`, `remove_entity`,
-/// `remove_range`, `drop_shard`, `shard_bytes`) span both areas.
-///
-/// **A store call's effect has already happened when it returns**, durably: the guard,
-/// the in-memory apply, and the fsync all run before the call comes back, under the
-/// entity's segment lock. That is what serializes a write against the same entity's
-/// recovery `prepare`: the only fencing-critical race (§8), and it comes from these
-/// methods being *synchronous*. An `async fn` store would run its body at first poll,
-/// and a caller that never polled would silently not write.
-///
-/// **Every method that can refuse is `#[must_use]`.** A mutating call answers `Fenced`,
-/// `Stale`, `Sealed`, or `Failed` (each a *refusal to have written*), and silently
-/// dropping one is how a deposed leader convinces itself it committed (**E14**). The
-/// methods that report nothing return `()` and carry no such obligation.
-pub trait EntityStore: EntityBlobStore {
+    // --- the record path: fenced by the shard term ---
+
     /// Store `records` for an entity beginning at the slot after `after`, fenced by
     /// `term`. Idempotent per slot: a slot already holding an equal-or-higher term
     /// is kept (a re-delivered or late append does not regress it). Returns
@@ -393,7 +390,7 @@ pub trait EntityStore: EntityBlobStore {
     /// snapshot, or blobs. The migration driver enumerates a shard's entities from a
     /// read quorum of its replicas with this, so an entity committed while this node
     /// was down is still found on the others. Spans both areas (records and blobs),
-    /// so it lives here rather than on [`EntityBlobStore`].
+    /// so it lives with the record path rather than among the blob methods.
     fn entities(&self, shard: u32) -> Vec<EntityName>;
 
     // --- Shard split/merge (§7.7) --------------------------------------------
@@ -416,17 +413,11 @@ pub trait EntityStore: EntityBlobStore {
     /// out and the merged data is already durable under this shard's keys.
     fn unseal(&self, shard: u32);
 
-    /// Drop every trace of one entity under `shard`: records, snapshot, and
-    /// blobs. The split driver's local GC of a moved entity's parent-keyed data
-    /// after the child's copy is quorum-durable and the mapping has committed.
-    /// Idempotent; never touches other shards' keys for the same entity.
-    fn remove_entity(&self, shard: u32, entity: &EntityName);
-
     /// Drop every trace of every entity under `shard` whose name hash is `>= from`:
     /// the same half-open range [`seal_range`](EntityStore::seal_range) bounds, and the
     /// split driver's GC of the parent-keyed data a committed split moved away.
     ///
-    /// Stated as a range rather than a `entities`-then-`remove_entity` loop so a store
+    /// Stated as a range rather than an enumerate-then-remove loop so a store
     /// that keys by name hash can honour it by discarding whole files. Idempotent.
     fn remove_range(&self, shard: u32, from: u64);
 
@@ -900,7 +891,7 @@ impl WriteGuard for MemoryEntityStore {
 
 // An in-memory store has no stability to wait for, so its outcomes are stable the
 // moment they are settled.
-impl EntityBlobStore for MemoryEntityStore {
+impl EntityStore for MemoryEntityStore {
     fn put_blob(&self, shard: u32, entity: &EntityName, id: BlobId, bytes: Vec<u8>) -> BlobAck {
         self.inner
             .blobs
@@ -972,9 +963,7 @@ impl EntityBlobStore for MemoryEntityStore {
             .map(|area| area.keys().copied().collect())
             .unwrap_or_default()
     }
-}
 
-impl EntityStore for MemoryEntityStore {
     fn store_record(
         &self,
         shard: u32,
@@ -1101,19 +1090,6 @@ impl EntityStore for MemoryEntityStore {
             .lock()
             .expect("entity store seals poisoned")
             .remove(&shard);
-    }
-
-    fn remove_entity(&self, shard: u32, entity: &EntityName) {
-        self.inner
-            .segments
-            .lock()
-            .expect("entity store segments poisoned")
-            .remove(&(shard, entity.clone()));
-        self.inner
-            .blobs
-            .lock()
-            .expect("entity store blobs poisoned")
-            .remove(&(shard, entity.clone()));
     }
 
     fn remove_range(&self, shard: u32, from: u64) {
@@ -1362,37 +1338,6 @@ mod tests {
             ),
             StoreAck::Stored(_)
         ));
-    }
-
-    #[test]
-    fn remove_entity_drops_records_snapshot_and_blobs_for_one_shard_only() {
-        let store = MemoryEntityStore::new();
-        let n = name("a");
-        let _ = store.store_record(
-            0,
-            &n,
-            Seq::ZERO,
-            Term::new(1),
-            vec![b"e1".to_vec()],
-            WriteKind::Append,
-        );
-        let _ = store.store_record(
-            1,
-            &n,
-            Seq::ZERO,
-            Term::new(1),
-            vec![b"other-shard".to_vec()],
-            WriteKind::Append,
-        );
-        let id = BlobId::of(b"blob");
-        let _ = store.put_blob(0, &n, id, b"blob".to_vec());
-        store.remove_entity(0, &n);
-        assert!(store.read(0, &n).slots.is_empty());
-        assert!(!store.has_blob(0, &n, id));
-        // The same entity under another shard index is untouched.
-        assert_eq!(store.read(1, &n).slots.len(), 1);
-        // Idempotent.
-        store.remove_entity(0, &n);
     }
 
     #[test]

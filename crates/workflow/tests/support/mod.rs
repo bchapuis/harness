@@ -492,7 +492,7 @@ pub fn fanouts(
     config: EntityConfig,
 ) -> Entities<Fanout<SimSystem>> {
     let seam = seam.clone();
-    system.entities_named::<Fanout<SimSystem>>(
+    system.entity_node().entities_named::<Fanout<SimSystem>>(
         FANOUT_TYPE,
         config,
         Arc::new(move || Fanout::new(seam.clone())),

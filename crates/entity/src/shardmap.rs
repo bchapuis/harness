@@ -37,9 +37,11 @@ use crate::event::EntityEvent;
 use crate::journal::DynEntityJournal;
 use crate::memory::LocalEntityJournal;
 use crate::replica_store::ReplicaTransport;
+use crate::replicator::Allocation;
+use crate::replicator::InFlight;
+use crate::replicator::MergeRole;
 use crate::replicator::QuorumReplicator;
-use crate::replicator::ReplicaSets;
-use crate::replicator::ShardControl;
+use crate::replicator::SplitPlan;
 use crate::store::EntityStore;
 use crate::system::KeyRange;
 use crate::system::MAP_SHARD_INDEX;
@@ -225,53 +227,6 @@ enum ShardMapCommand {
     MergeCommitted { left: u32, right: u32 },
 }
 
-/// An in-flight split's committed plan (§7.7), recorded on the parent's
-/// [`Allocation`] between `SplitStarted` and `SplitCommitted`.
-#[derive(Clone, Copy)]
-struct SplitPlan {
-    child: u32,
-    boundary: u64,
-}
-
-/// A shard's role in an in-flight merge (§7.7), recorded on its [`Allocation`]
-/// between `MergeStarted` and `MergeCommitted`. Mutually exclusive with a
-/// migration `target` and a `split`.
-#[derive(Clone, Copy)]
-enum MergeRole {
-    /// The **left** shard, absorbing the adjacent `right` (carries its index).
-    Absorbing(u32),
-    /// The **right** shard, folding into the adjacent `left` (carries its
-    /// index): the frozen, driving side.
-    Absorbed(u32),
-}
-
-/// One shard's committed allocation: the key range it owns (§5.1), the `current`
-/// replica set, and (one at a time, mutually exclusive) a migration `target`,
-/// an in-flight `split`, or an in-flight `merge` role (§7.7). The range changes
-/// only on a committed split or merge, never on migration.
-#[derive(Clone)]
-struct Allocation {
-    range: KeyRange,
-    current: Vec<NodeId>,
-    target: Option<Vec<NodeId>>,
-    split: Option<SplitPlan>,
-    merge: Option<MergeRole>,
-}
-
-impl Allocation {
-    /// Whether this shard is free to start a new split or merge, no migration,
-    /// split, or merge already in flight (§7.7's one-op-at-a-time rule).
-    fn idle(&self) -> bool {
-        self.target.is_none() && self.split.is_none() && self.merge.is_none()
-    }
-
-    /// The nodes involved in the shard right now:
-    /// [`joint_members`](crate::replicator::joint_members).
-    fn union(&self) -> Vec<NodeId> {
-        crate::replicator::joint_members(&self.current, self.target.as_deref())
-    }
-}
-
 /// The stamp on a committed `ShardMapCommand` (compatibility §3,
 /// `entity.shardmap`).
 ///
@@ -439,9 +394,11 @@ impl ShardMapSource for EmptyShardMap {
 /// the apply loop (writer) and the [`ShardMapSource`] reads.
 #[derive(Default)]
 struct Inner {
-    /// shard index → the committed allocation (`current`, plus the migration
-    /// `target` or split plan while one is in flight, §7.7).
-    allocation: BTreeMap<u32, Allocation>,
+    /// shard index → the committed allocation (§7.7). Each is shared with the
+    /// shard's replicator when this node hosts it, so a commit applied here is
+    /// the one every in-flight journal reads; the per-shard mutex is only ever
+    /// taken under this map's lock, never the other way round.
+    allocation: BTreeMap<u32, Arc<Mutex<Allocation>>>,
     /// shard index → local store, for shards this node replicates (or is a
     /// migration target of).
     journals: BTreeMap<u32, Arc<dyn DynEntityJournal>>,
@@ -484,6 +441,51 @@ impl Inner {
     fn poisoned(&self) -> bool {
         self.poison.is_some()
     }
+
+    /// A snapshot of one shard's committed allocation.
+    fn alloc(&self, shard: u32) -> Option<Allocation> {
+        self.allocation
+            .get(&shard)
+            .map(|alloc| alloc.lock().expect("shard allocation poisoned").clone())
+    }
+
+    /// The first shard whose allocation satisfies `pred`, in shard order. Reads
+    /// each allocation under its own lock and copies nothing: the routing path
+    /// (`shard_of`) asks this per message, so a snapshot of every shard would
+    /// allocate per lookup to answer a question about one `Copy` field.
+    fn find_shard(&self, pred: impl Fn(&Allocation) -> bool) -> Option<u32> {
+        self.allocation
+            .iter()
+            .find(|(_, alloc)| pred(&alloc.lock().expect("shard allocation poisoned")))
+            .map(|(&shard, _)| shard)
+    }
+
+    /// One field of one shard's committed allocation, read under its own lock.
+    fn with_alloc<T>(&self, shard: u32, f: impl Fn(&Allocation) -> T) -> Option<T> {
+        self.allocation
+            .get(&shard)
+            .map(|alloc| f(&alloc.lock().expect("shard allocation poisoned")))
+    }
+
+    /// Snapshots of every shard's committed allocation, in shard order.
+    fn allocs(&self) -> Vec<(u32, Allocation)> {
+        self.allocation
+            .iter()
+            .map(|(&shard, alloc)| {
+                (
+                    shard,
+                    alloc.lock().expect("shard allocation poisoned").clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// One shard's committed allocation, for the apply loop to update in place.
+    fn alloc_mut(&self, shard: u32) -> Option<std::sync::MutexGuard<'_, Allocation>> {
+        self.allocation
+            .get(&shard)
+            .map(|alloc| alloc.lock().expect("shard allocation poisoned"))
+    }
 }
 
 /// The shard-event emitter (spec §13): how the map's loops put `ShardSplit`,
@@ -492,19 +494,11 @@ impl Inner {
 /// which does not carry the `EntitySystem` event channel.
 type EmitEvent = Arc<dyn Fn(EntityEvent) + Send + Sync>;
 
-/// The typed per-shard handles the loops share (the [`ShardMapSource`] seam is
-/// object-safe, so these cannot live in [`Inner`]): each hosted shard's **live**
-/// [`ShardControl`]; replica sets, owned range, split freeze; the apply loop
-/// mutates it in place as commands commit and the shard's replicator reads it
-/// per operation (§7.7), and its replicator, the migration/split driver's
-/// handle.
-type ShardHandles<R> = BTreeMap<
-    u32,
-    (
-        Arc<std::sync::Mutex<ShardControl>>,
-        Arc<QuorumReplicator<R>>,
-    ),
->;
+/// The typed per-shard replicators the loops share (the [`ShardMapSource`] seam
+/// is object-safe, so these cannot live in [`Inner`]): one per shard this node
+/// hosts, the migration/split driver's handle. Each reads the shard's
+/// [`Allocation`] in `Inner` per operation (§7.7).
+type ShardHandles<R> = BTreeMap<u32, Arc<QuorumReplicator<R>>>;
 
 /// A [`ShardMapSource`] backed by a per-type Raft group (the `Quorum` tier). The group's
 /// committed log is the allocation. The consensus handle lives only in the
@@ -676,9 +670,9 @@ async fn hand_off_all<R: RaftConsensus>(
         let allocation: Vec<(u32, Vec<NodeId>)> = {
             let guard = inner.lock().expect("shard map mutex poisoned");
             guard
-                .allocation
-                .iter()
-                .map(|(&shard, alloc)| (shard, alloc.current.clone()))
+                .allocs()
+                .into_iter()
+                .map(|(shard, alloc)| (shard, alloc.current))
                 .collect()
         };
         let mut remaining = 0;
@@ -726,9 +720,7 @@ impl ShardMapSource for RaftShardMap {
         self.inner
             .lock()
             .expect("shard map mutex poisoned")
-            .allocation
-            .get(&shard)
-            .map(|alloc| alloc.current.clone())
+            .with_alloc(shard, |alloc| alloc.current.clone())
     }
 
     fn journal(&self, shard: u32) -> Option<Arc<dyn DynEntityJournal>> {
@@ -746,10 +738,7 @@ impl ShardMapSource for RaftShardMap {
         self.inner
             .lock()
             .expect("shard map mutex poisoned")
-            .allocation
-            .iter()
-            .find(|(_, alloc)| alloc.range.contains(hash))
-            .map(|(&shard, _)| shard)
+            .find_shard(|alloc| alloc.range.contains(hash))
     }
 
     fn shard_indices(&self) -> Vec<u32> {
@@ -794,10 +783,11 @@ impl ShardMapSource for RaftShardMap {
 /// whichever command committed, so threading them into each method would be ten
 /// pass-through parameters written out six times.
 ///
-/// Each method is one committed command's local effect: creating and retiring
-/// shard groups, building and dropping shard journals, and flipping the
-/// live [`ReplicaSets`] so every in-flight journal switches to the joint quorum (a
-/// majority of current AND of target) the moment a migration commits. A node newly
+/// Each method is one committed command's local effect: updating the shard's
+/// [`Allocation`] in place, so every in-flight journal switches to the joint
+/// quorum (a majority of current AND of target) the moment a migration commits,
+/// then creating and retiring shard groups and building and dropping shard
+/// journals. A node newly
 /// involved creates the shard group as a non-member over the *current* voters, so
 /// it never disrupts an election; the reconcile loop promotes it. A node leaving a
 /// set drops its journal: an active `Host` keeps its own `Arc`, so an in-flight
@@ -819,17 +809,16 @@ struct ShardApply<R: RaftConsensus> {
 }
 
 impl<R: RaftConsensus> ShardApply<R> {
-    /// Build this node's journal + live control for `shard` and register them.
-    /// The replicator handle is the journal (`EntityJournal for
+    /// Build this node's journal for `shard` over its committed allocation and
+    /// register it. The replicator handle is the journal (`EntityJournal for
     /// Arc<QuorumReplicator>`), so one value serves both maps.
-    fn build(&self, shard: u32, sets: ReplicaSets, range: KeyRange) {
+    fn build(&self, shard: u32, allocation: Arc<Mutex<Allocation>>) {
         let shard_group = shard_group_id(self.entity_type, shard);
-        let control = Arc::new(std::sync::Mutex::new(ShardControl::new(sets, range)));
         let replicator = QuorumReplicator::for_shard(
             self.consensus.clone(),
             shard_group,
             shard,
-            Arc::clone(&control),
+            allocation,
             Arc::clone(&self.local),
             Arc::clone(&self.transport),
             Arc::clone(&self.io),
@@ -838,7 +827,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         self.handles
             .lock()
             .expect("shard handles mutex poisoned")
-            .insert(shard, (control, Arc::clone(&replicator)));
+            .insert(shard, Arc::clone(&replicator));
         self.inner
             .lock()
             .expect("shard map mutex poisoned")
@@ -853,41 +842,40 @@ impl<R: RaftConsensus> ShardApply<R> {
         enum Change {
             /// The founding allocation for this shard.
             Founding,
-            /// A migration toward `replicas` began; carries the current
-            /// set and the shard's committed range (migration never
-            /// moves the range, so the command's `range` is ignored).
-            Migration(Vec<NodeId>, KeyRange),
-            /// A re-proposed identical allocation, nothing changed.
+            /// A migration toward `replicas` began; carries the current set.
+            /// Migration never moves the range, so the command's `range` is
+            /// ignored.
+            Migration(Vec<NodeId>),
+            /// A re-proposed identical allocation, or one that finds another
+            /// operation in flight (§7.7's one-op-at-a-time rule): nothing
+            /// changed. The allocator re-proposes once the shard is idle.
             Noop,
         }
-        let change = {
+        let (change, allocation) = {
             let mut guard = self.inner.lock().expect("shard map mutex poisoned");
-            match guard.allocation.get_mut(&shard) {
-                None => {
-                    guard.allocation.insert(
-                        shard,
-                        Allocation {
-                            range,
-                            current: replicas.clone(),
-                            target: None,
-                            split: None,
-                            merge: None,
-                        },
-                    );
-                    Change::Founding
-                }
+            let change = match guard.alloc_mut(shard) {
+                None => Change::Founding,
                 Some(alloc)
-                    if alloc.current == replicas && alloc.target.is_none()
-                        || alloc.target.as_ref() == Some(&replicas) =>
+                    if alloc.current == replicas && alloc.idle()
+                        || alloc.target() == Some(replicas.as_slice()) =>
                 {
                     Change::Noop
                 }
-                Some(alloc) => {
-                    alloc.target = Some(replicas.clone());
-                    Change::Migration(alloc.current.clone(), alloc.range)
+                Some(alloc) if !alloc.idle() => Change::Noop,
+                Some(mut alloc) => {
+                    alloc.in_flight = InFlight::Migrating(replicas.clone());
+                    Change::Migration(alloc.current.clone())
                 }
+            };
+            if matches!(change, Change::Founding) {
+                guard.allocation.insert(
+                    shard,
+                    Arc::new(Mutex::new(Allocation::founding(range, replicas.clone()))),
+                );
             }
+            (change, guard.allocation.get(&shard).map(Arc::clone))
         };
+        let Some(allocation) = allocation else { return };
         let shard_group = shard_group_id(self.entity_type, shard);
         match change {
             Change::Noop => {}
@@ -895,40 +883,26 @@ impl<R: RaftConsensus> ShardApply<R> {
                 if replicas.contains(&self.self_node) {
                     self.consensus
                         .create_group(shard_group, replicas.clone(), Vec::new());
-                    self.build(shard, ReplicaSets::new(replicas), range);
+                    self.build(shard, allocation);
                 }
             }
-            Change::Migration(current, committed_range) => {
+            Change::Migration(current) => {
+                // A continuing participant already reads the joint sets through
+                // the shared allocation. A node newly a target member forms the
+                // shard group as a non-member over the CURRENT voters (no
+                // election disruption; the reconcile loop promotes it) and
+                // builds its journal over the joint sets.
                 let involved =
                     current.contains(&self.self_node) || replicas.contains(&self.self_node);
-                let control = self
+                let hosted = self
                     .handles
                     .lock()
                     .expect("shard handles mutex poisoned")
-                    .get(&shard)
-                    .map(|(control, _)| Arc::clone(control));
-                if let Some(control) = control {
-                    // A continuing participant: flip its live sets so every
-                    // in-flight journal switches to the joint quorum (§7.7).
-                    control.lock().expect("shard control poisoned").sets = ReplicaSets {
-                        current,
-                        target: Some(replicas),
-                    };
-                } else if involved {
-                    // Newly a target member: form the shard group as a
-                    // non-member over the CURRENT voters (no election
-                    // disruption; the reconcile loop promotes it) and build
-                    // the journal over the joint sets.
+                    .contains_key(&shard);
+                if involved && !hosted {
                     self.consensus
-                        .create_group(shard_group, current.clone(), Vec::new());
-                    self.build(
-                        shard,
-                        ReplicaSets {
-                            current,
-                            target: Some(replicas),
-                        },
-                        committed_range,
-                    );
+                        .create_group(shard_group, current, Vec::new());
+                    self.build(shard, allocation);
                 }
             }
         }
@@ -939,29 +913,21 @@ impl<R: RaftConsensus> ShardApply<R> {
         // Flip `current = target` (a duplicate `Migrated` finds no target
         // and is a no-op).
         let flipped = {
-            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
-            match guard.allocation.get_mut(&shard) {
-                Some(alloc) => {
-                    let target = alloc.target.take();
-                    if let Some(target) = &target {
+            let guard = self.inner.lock().expect("shard map mutex poisoned");
+            match guard.alloc_mut(shard) {
+                Some(mut alloc) => match alloc.target().map(<[NodeId]>::to_vec) {
+                    Some(target) => {
                         alloc.current = target.clone();
+                        alloc.in_flight = InFlight::Idle;
+                        Some(target)
                     }
-                    target
-                }
+                    None => None,
+                },
                 None => None,
             }
         };
         let Some(current) = flipped else { return };
-        if current.contains(&self.self_node) {
-            if let Some((control, _)) = self
-                .handles
-                .lock()
-                .expect("shard handles mutex poisoned")
-                .get(&shard)
-            {
-                control.lock().expect("shard control poisoned").sets = ReplicaSets::new(current);
-            }
-        } else {
+        if !current.contains(&self.self_node) {
             // Leaving the set: drop the journal and handles (the reconcile
             // loop removes this node from the group's voters).
             self.inner
@@ -983,33 +949,32 @@ impl<R: RaftConsensus> ShardApply<R> {
         // rejects identically. Rejection is a silent no-op: the proposer
         // raced a migration, another split, or a stale request.
         let started = {
-            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            let guard = self.inner.lock().expect("shard map mutex poisoned");
             let child_free = !guard.allocation.contains_key(&child)
                 && child != MAP_SHARD_INDEX
                 && guard
-                    .allocation
-                    .values()
-                    .all(|a| a.split.is_none_or(|p| p.child != child));
-            match guard.allocation.get_mut(&parent) {
-                Some(alloc)
+                    .allocs()
+                    .iter()
+                    .all(|(_, a)| a.split().is_none_or(|p| p.child != child));
+            match guard.alloc_mut(parent) {
+                Some(mut alloc)
                     if alloc.idle()
                         && alloc.range.start < boundary
                         && boundary <= alloc.range.end
                         && child_free =>
                 {
-                    alloc.split = Some(SplitPlan { child, boundary });
+                    alloc.in_flight = InFlight::Splitting(SplitPlan { child, boundary });
                     true
                 }
                 _ => false,
             }
         };
         if started {
-            // A parent replica arms the leader-local freeze and bounds
-            // its own store as apply-time catch-up; the driver's
-            // majority-acked seal fan is the authoritative barrier.
+            // The plan on the shared allocation is the leader-local freeze; a
+            // parent replica also bounds its own store as apply-time catch-up.
+            // The driver's majority-acked seal fan is the authoritative barrier.
             let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if let Some((control, _)) = handles.get(&parent) {
-                control.lock().expect("shard control poisoned").frozen_from = Some(boundary);
+            if handles.contains_key(&parent) {
                 self.local.seal_range(parent, boundary);
             }
         }
@@ -1022,50 +987,44 @@ impl<R: RaftConsensus> ShardApply<R> {
         // plan and is a no-op.
         let committed = {
             let mut guard = self.inner.lock().expect("shard map mutex poisoned");
-            match guard.allocation.get_mut(&parent) {
-                Some(alloc) => match alloc.split.take() {
+            let shrunk = match guard.alloc_mut(parent) {
+                Some(mut alloc) => match alloc.split() {
                     Some(plan) => {
+                        // Shrinking the shared range is what makes the leader
+                        // refuse appends to the moved range as `NotLeader`; the
+                        // freeze went with the plan.
                         let old_end = alloc.range.end;
                         alloc.range.end = plan.boundary - 1;
-                        let current = alloc.current.clone();
-                        let child_range = KeyRange {
-                            start: plan.boundary,
-                            end: old_end,
-                        };
-                        guard.allocation.insert(
-                            plan.child,
-                            Allocation {
-                                range: child_range,
-                                current: current.clone(),
-                                target: None,
-                                split: None,
-                                merge: None,
-                            },
-                        );
-                        Some((plan, child_range, current))
+                        alloc.in_flight = InFlight::Idle;
+                        Some((plan, old_end, alloc.current.clone()))
                     }
                     None => None,
                 },
                 None => None,
-            }
+            };
+            shrunk.map(|(plan, old_end, current)| {
+                let child_range = KeyRange {
+                    start: plan.boundary,
+                    end: old_end,
+                };
+                let child = Arc::new(Mutex::new(Allocation::founding(
+                    child_range,
+                    current.clone(),
+                )));
+                guard.allocation.insert(plan.child, Arc::clone(&child));
+                (plan, child, current)
+            })
         };
-        let Some((plan, child_range, current)) = committed else {
+        let Some((plan, child, current)) = committed else {
             return;
         };
-        // Parent replicas: shrink the live control range (appends to the
-        // moved range now refuse `NotLeader` at the leader), drop the
-        // freeze (the shrunken range subsumes it), catch up the durable
-        // bound in case this replica missed the driver's fan, and GC the
-        // moved entities' parent-keyed data; the child copy is
-        // quorum-durable, that is what licensed `SplitCommitted`.
+        // Parent replicas: catch up the durable bound in case this replica
+        // missed the driver's fan, and GC the moved entities' parent-keyed
+        // data; the child copy is quorum-durable, that is what licensed
+        // `SplitCommitted`.
         {
             let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if let Some((control, _)) = handles.get(&parent) {
-                {
-                    let mut control = control.lock().expect("shard control poisoned");
-                    control.range.end = plan.boundary - 1;
-                    control.frozen_from = None;
-                }
+            if handles.contains_key(&parent) {
                 // One bound and one range reclamation, rather than a walk
                 // of every entity in the shard (§7.7).
                 self.local.seal_range(parent, plan.boundary);
@@ -1080,7 +1039,7 @@ impl<R: RaftConsensus> ShardApply<R> {
             let child_group = shard_group_id(self.entity_type, plan.child);
             self.consensus
                 .create_group(child_group, current.clone(), Vec::new());
-            self.build(plan.child, ReplicaSets::new(current), child_range);
+            self.build(plan.child, child);
         }
         (self.emit)(EntityEvent::ShardSplit {
             node: self.self_node,
@@ -1101,8 +1060,8 @@ impl<R: RaftConsensus> ShardApply<R> {
         // On success, the start of the moving (right) range rides out of the
         // critical section, so the freeze below needs no second look at the map.
         let started = {
-            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
-            let start = match (guard.allocation.get(&left), guard.allocation.get(&right)) {
+            let guard = self.inner.lock().expect("shard map mutex poisoned");
+            let start = match (guard.alloc(left), guard.alloc(right)) {
                 (Some(l), Some(r))
                     if l.idle()
                         && r.idle()
@@ -1113,19 +1072,21 @@ impl<R: RaftConsensus> ShardApply<R> {
                 _ => None,
             };
             if start.is_some() {
-                guard.allocation.get_mut(&left).expect("checked").merge =
-                    Some(MergeRole::Absorbing(right));
-                guard.allocation.get_mut(&right).expect("checked").merge =
-                    Some(MergeRole::Absorbed(left));
+                if let Some(mut l) = guard.alloc_mut(left) {
+                    l.in_flight = InFlight::Merging(MergeRole::Absorbing(right));
+                }
+                if let Some(mut r) = guard.alloc_mut(right) {
+                    r.in_flight = InFlight::Merging(MergeRole::Absorbed(left));
+                }
             }
             start
         };
         if let Some(start) = started {
-            // Right replicas: freeze the whole right range and bound the
-            // store (the driver's majority-acked seal is authoritative).
+            // The role on the shared allocation freezes the whole right range at
+            // the leader; a right replica also bounds its store (the driver's
+            // majority-acked seal is authoritative).
             let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if let Some((control, _)) = handles.get(&right) {
-                control.lock().expect("shard control poisoned").frozen_from = Some(start);
+            if handles.contains_key(&right) {
                 self.local.seal_range(right, start);
             }
         }
@@ -1140,31 +1101,32 @@ impl<R: RaftConsensus> ShardApply<R> {
             // Left must still be absorbing exactly this right (a duplicate
             // or crossed commit otherwise finds a mismatched role).
             let matches = matches!(
-                guard.allocation.get(&left).and_then(|l| l.merge),
+                guard.alloc(left).and_then(|l| l.merge()),
                 Some(MergeRole::Absorbing(r)) if r == right
             );
-            if matches && guard.allocation.contains_key(&right) {
-                let right_end = guard.allocation[&right].range.end;
-                let left_alloc = guard.allocation.get_mut(&left).expect("checked");
-                left_alloc.range.end = right_end;
-                left_alloc.merge = None;
-                guard.allocation.remove(&right);
-                Some(right_end)
-            } else {
-                None
+            let right_end = guard.alloc(right).map(|r| r.range.end);
+            match (matches, right_end) {
+                (true, Some(right_end)) => {
+                    if let Some(mut l) = guard.alloc_mut(left) {
+                        l.range.end = right_end;
+                        l.in_flight = InFlight::Idle;
+                    }
+                    guard.allocation.remove(&right);
+                    Some(right_end)
+                }
+                _ => None,
             }
         };
         let Some(new_end) = committed else { return };
-        // Left replicas: extend the live range, then re-establish the
-        // store bound. `unseal` clears any prior split boundary; a fresh
-        // seal at `new_end + 1` protects whatever shards still lie above
-        // left (a no-op-safe backstop when none do), so a stale
+        // Left replicas: the extended range is already live through the shared
+        // allocation; re-establish the store bound. `unseal` clears any prior
+        // split boundary; a fresh seal at `new_end + 1` protects whatever shards
+        // still lie above left (a no-op-safe backstop when none do), so a stale
         // higher-term leader can never append past left's committed range
         // (E15). Left keeps its journal/group.
         {
             let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if let Some((control, _)) = handles.get(&left) {
-                control.lock().expect("shard control poisoned").range.end = new_end;
+            if handles.contains_key(&left) {
                 self.local.unseal(left);
                 if let Some(bound) = new_end.checked_add(1) {
                     self.local.seal_range(left, bound);
@@ -1389,9 +1351,9 @@ async fn allocator_loop<R: RaftConsensus>(
                     .collect();
                 candidates.extend(
                     guard
-                        .allocation
-                        .iter()
-                        .map(|(&shard, alloc)| (shard, alloc.range)),
+                        .allocs()
+                        .into_iter()
+                        .map(|(shard, alloc)| (shard, alloc.range)),
                 );
                 candidates
             };
@@ -1414,8 +1376,7 @@ async fn allocator_loop<R: RaftConsensus>(
                 let proposable = match inner
                     .lock()
                     .expect("shard map mutex poisoned")
-                    .allocation
-                    .get(&shard)
+                    .alloc(shard)
                 {
                     None => true,
                     Some(alloc) => alloc.idle() && alloc.current != desired,
@@ -1488,9 +1449,9 @@ async fn reconcile_loop<R: RaftConsensus>(
             let allocation: Vec<(u32, Vec<NodeId>)> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
                 guard
-                    .allocation
-                    .iter()
-                    .map(|(&s, alloc)| (s, alloc.union()))
+                    .allocs()
+                    .into_iter()
+                    .map(|(s, alloc)| (s, alloc.union()))
                     .collect()
             };
             for (shard, voters) in allocation {
@@ -1529,10 +1490,10 @@ async fn migrate_loop<R: RaftConsensus>(
             let migrating: Vec<u32> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
                 guard
-                    .allocation
-                    .iter()
-                    .filter(|(_, alloc)| alloc.target.is_some())
-                    .map(|(&shard, _)| shard)
+                    .allocs()
+                    .into_iter()
+                    .filter(|(_, alloc)| alloc.target().is_some())
+                    .map(|(shard, _)| shard)
                     .collect()
             };
             for shard in migrating {
@@ -1540,7 +1501,7 @@ async fn migrate_loop<R: RaftConsensus>(
                 if !consensus.group_is_leader(shard_group) {
                     continue; // another (leading) node drives this shard's migration
                 }
-                let Some((_, replicator)) = handles
+                let Some(replicator) = handles
                     .lock()
                     .expect("shard handles mutex poisoned")
                     .get(&shard)
@@ -1663,9 +1624,9 @@ async fn split_loop<R: RaftConsensus>(
             for shard in requests {
                 let action = {
                     let guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get(&shard) {
+                    match guard.alloc(shard) {
                         None => Action::Clear, // shard gone (merged away)
-                        Some(alloc) if alloc.split.is_some() => Action::Clear, // started: handed off
+                        Some(alloc) if alloc.split().is_some() => Action::Clear, // started: handed off
                         Some(alloc) if alloc.range.start >= alloc.range.end => Action::Clear, // one point
                         // Migrating or merging: not idle. Retry once the shard frees up.
                         Some(alloc) if !alloc.idle() => Action::Wait,
@@ -1675,10 +1636,10 @@ async fn split_loop<R: RaftConsensus>(
                             // concurrent splits cannot mint the same child (the
                             // apply validation still arbitrates a propose race).
                             let highest = guard
-                                .allocation
-                                .iter()
-                                .flat_map(|(&s, a)| {
-                                    std::iter::once(s).chain(a.split.map(|p| p.child))
+                                .allocs()
+                                .into_iter()
+                                .flat_map(|(s, a)| {
+                                    std::iter::once(s).chain(a.split().map(|p| p.child))
                                 })
                                 .max()
                                 .unwrap_or(0);
@@ -1715,10 +1676,10 @@ async fn split_loop<R: RaftConsensus>(
             let splitting: Vec<(u32, SplitPlan, Vec<NodeId>)> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
                 guard
-                    .allocation
-                    .iter()
-                    .filter_map(|(&shard, alloc)| {
-                        alloc.split.map(|plan| (shard, plan, alloc.current.clone()))
+                    .allocs()
+                    .into_iter()
+                    .filter_map(|(shard, alloc)| {
+                        alloc.split().map(|plan| (shard, plan, alloc.current))
                     })
                     .collect()
             };
@@ -1726,7 +1687,7 @@ async fn split_loop<R: RaftConsensus>(
                 if !consensus.group_is_leader(shard_group_id(entity_type, parent)) {
                     continue; // another (leading) node drives this split
                 }
-                let Some((_, replicator)) = handles
+                let Some(replicator) = handles
                     .lock()
                     .expect("shard handles mutex poisoned")
                     .get(&parent)
@@ -1750,9 +1711,8 @@ async fn split_loop<R: RaftConsensus>(
                     && inner
                         .lock()
                         .expect("shard map mutex poisoned")
-                        .allocation
-                        .get(&parent)
-                        .is_some_and(|alloc| alloc.split.is_some())
+                        .alloc(parent)
+                        .is_some_and(|alloc| alloc.split().is_some())
                 {
                     consensus
                         .propose_to(
@@ -1806,24 +1766,22 @@ async fn merge_loop<R: RaftConsensus>(
             for left in requests {
                 let action = {
                     let guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get(&left) {
-                        None => Action::Clear,                         // gone
-                        Some(l) if l.merge.is_some() => Action::Clear, // started: handed off
+                    match guard.alloc(left) {
+                        None => Action::Clear,                           // gone
+                        Some(l) if l.merge().is_some() => Action::Clear, // started: handed off
                         Some(l) => {
                             // The right neighbour: the shard whose range begins just
                             // past left's. `None` (left owns the top) → nothing to merge.
-                            let right = l.range.end.checked_add(1).and_then(|start| {
-                                guard
-                                    .allocation
-                                    .iter()
-                                    .find(|(_, r)| r.range.start == start)
-                                    .map(|(&idx, _)| idx)
-                            });
+                            let right = l
+                                .range
+                                .end
+                                .checked_add(1)
+                                .and_then(|start| guard.find_shard(|r| r.range.start == start));
                             match right {
                                 None => Action::Clear,
                                 Some(right) => {
                                     let both_idle = l.idle()
-                                        && guard.allocation.get(&right).is_some_and(|r| r.idle());
+                                        && guard.alloc(right).is_some_and(|r| r.idle());
                                     if both_idle {
                                         Action::Propose(right)
                                     } else {
@@ -1857,11 +1815,11 @@ async fn merge_loop<R: RaftConsensus>(
             let merging: Vec<(u32, u32, Vec<NodeId>)> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
                 guard
-                    .allocation
-                    .iter()
-                    .filter_map(|(&right, alloc)| match alloc.merge {
+                    .allocs()
+                    .into_iter()
+                    .filter_map(|(right, alloc)| match alloc.merge() {
                         Some(MergeRole::Absorbed(left)) => {
-                            let left_replicas = guard.allocation.get(&left)?.current.clone();
+                            let left_replicas = guard.alloc(left)?.current;
                             Some((right, left, left_replicas))
                         }
                         _ => None,
@@ -1874,12 +1832,12 @@ async fn merge_loop<R: RaftConsensus>(
                 }
                 let right_start = {
                     let guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get(&right) {
+                    match guard.alloc(right) {
                         Some(alloc) => alloc.range.start,
                         None => continue,
                     }
                 };
-                let Some((_, replicator)) = handles
+                let Some(replicator) = handles
                     .lock()
                     .expect("shard handles mutex poisoned")
                     .get(&right)
@@ -1894,9 +1852,8 @@ async fn merge_loop<R: RaftConsensus>(
                     && inner
                         .lock()
                         .expect("shard map mutex poisoned")
-                        .allocation
-                        .get(&right)
-                        .is_some_and(|alloc| alloc.merge.is_some())
+                        .alloc(right)
+                        .is_some_and(|alloc| alloc.merge().is_some())
                 {
                     consensus
                         .propose_to(
@@ -1953,10 +1910,10 @@ async fn split_trigger_loop<R: RaftConsensus>(
             let candidates: Vec<u32> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
                 guard
-                    .allocation
-                    .iter()
+                    .allocs()
+                    .into_iter()
                     .filter(|(_, alloc)| alloc.idle() && alloc.range.start < alloc.range.end)
-                    .map(|(&shard, _)| shard)
+                    .map(|(shard, _)| shard)
                     .collect()
             };
             for shard in candidates {
@@ -2216,16 +2173,13 @@ mod tests {
         let mut inner = Inner::default();
         inner.allocation.insert(
             0,
-            Allocation {
-                range: KeyRange {
+            Arc::new(Mutex::new(Allocation::founding(
+                KeyRange {
                     start: 0,
                     end: u64::MAX,
                 },
-                current: vec![NodeId::new(1)],
-                target: None,
-                split: None,
-                merge: None,
-            },
+                vec![NodeId::new(1)],
+            ))),
         );
         inner.poison("stopped at entry 9".into());
         let map = map_over(inner);

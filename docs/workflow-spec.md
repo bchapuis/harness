@@ -1,11 +1,11 @@
 # Workflow: Specification
 
-**Status:** Implemented by the `workflow` crate and consumed by the agent runtime, which implements `Workflow` (agent §3.2, §13): its `pending` is a pure desired set, its `perform` the model and sandbox seams, its `settle` the fold of one outcome, and the engine holds the claims, the orphan classification, the straggler filter, and quiescence. What the agent keeps beside the cycle is what no fold expresses: an environment pre-pass ahead of every tick (agent §5.4, §5.5, §5.6), plus owed-cancel propagation, its subscriber set, and its event outbox, which could follow and block nothing.
+**Status:** Implemented by the `workflow` crate and consumed by the agent runtime, which implements `Workflow` (agent §3.2): its `pending` is a pure desired set (the live run's calls and the cancels a cancelled run still owes), its `perform` the model and sandbox seams, its `settle` the fold of one outcome, and the engine holds the claims, the orphan classification, the straggler filter, and quiescence. What the agent keeps beside the cycle is what no fold expresses: an environment pre-pass ahead of every tick (agent §5.4, §5.5, §5.6) and the events it owes once a record commits (agent §10.4, §11).
 **Scope:** The mechanism of autonomy under an entity, specified as its own layer: re-derive the work committed state calls for, launch what is not yet in flight, fold each outcome back, and stop when nothing is left. The entity layer supplies identity, the journal, the single-writer fence, placement, activation, and hibernation. The workflow adds the cycle that reconciles wanted work against launched work, and the properties that make that cycle safe under crash and failover.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the entity specification ([`entity-spec.md`](entity-spec.md)) are cited as **entity §N** (its invariants as **E1–E21**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N**; the agent runtime ([`agent-spec.md`](agent-spec.md)) as **agent §N**; the machine ([`machine-spec.md`](machine-spec.md)) as **machine §N**. Sections of this document are cited as plain **§N**, and its invariants are numbered **W1, W2, …**, apart from every sibling catalogue. The agent runtime citations run against the layering: the agent runtime is the layer this document generalizes, so it is at once the motivation, the worked example, and the measure (Appendix C). The crate dependency runs the other way, `agent` on `workflow`; the citations follow the mechanism, not the manifest.
+Sections of the entity specification ([`entity-spec.md`](entity-spec.md)) are cited as **entity §N** (its invariants as **E1–E21**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N**; the agent runtime ([`agent-spec.md`](agent-spec.md)) as **agent §N**; the machine ([`machine-spec.md`](machine-spec.md)) as **machine §N**. Sections of this document are cited as plain **§N**, and its invariants are numbered **W1, W2, …**, apart from every sibling catalogue. The agent runtime citations run against the layering: the agent runtime is the layer this document generalizes, so it is at once the motivation, the worked example, and the measure. The crate dependency runs the other way, `agent` on `workflow`; the citations follow the mechanism, not the manifest.
 
 > **Design stance.** An entity waits: it holds durable state, admits a command, decides records, commits them, and replies (entity §4.2, §6). An agent does not wait: its activation drives itself forward until the work it holds is finished, never awaiting I/O inside a handler, because a handler is a pure decision the entity replays (entity §4.1, E2). The agent runtime calls this **autonomy** (agent §3) and builds it once, welded to one agentic policy.
 >
@@ -164,6 +164,8 @@ Each tick:
 
 The workflow MUST NOT await a launch. Step 3 hands the future to the spawner and returns; the outcome arrives later as a `Settled` command (§4.2). The activation never blocks, so an entity with a hundred outstanding effects holds no thread and, once quiescent, no memory (entity §10).
 
+A tick launches the whole unclaimed desired set, so a consumer holding a gate the set cannot express (an environment it must open or reacquire, which is activation state and so no function of any fold) MUST settle that gate before it ticks, never inside a launch. The agent runtime's environment pre-pass is this rule (agent §5.4, §5.5, §5.6).
+
 Step 2 is not bookkeeping. Releasing the claim of a key that has left the desired set bounds the claim table by the work outstanding rather than by the work ever done, and lets a consumer re-request the same *call site* later, a retried tool call under a fresh journal record, without the workflow mistaking it for the one already done. It does **not** license reusing the same *key*: §3.1's uniqueness rule stands, and it keeps the straggler filter of §4.5 exact once a claim has been let go.
 
 ### 3.3 Launch-once is per-activation, and the record is the durable fact
@@ -194,7 +196,7 @@ fn perform(&self, effect: Self::Effect, cx: Perform<Self::System>)
 
 `perform` is the **only** place a workflow entity performs I/O, and it runs outside the activation: in a task the workflow launched, holding no lock on the entity and no claim on its mailbox. It MUST NOT touch the entity's state, journal, or facets. It has no access to any of them, so the rule is enforced rather than asked for. `Perform` carries what an effect legitimately needs from outside itself: the entity's name and the system's seams (`Clock`, `Entropy`, `Spawner`, core §4.6). Whatever else an effect needs, such as the consumer's own model, sandbox, or network seams, the consumer clones out of `&self` before returning the future; those are injected into the behavior at activation (entity Appendix A, the `entities_named` factory that "lets the runtime inject per-node seam handles into each fresh activation"). `Perform` is owned rather than borrowed and the future is `'static`, because the task the workflow launches outlives the call that returned it.
 
-A consumer's `Effect` type is where its seams appear. The agent runtime's is, in outline, `Model | Tool | Delegate | Fail`, and its `perform` a four-arm dispatch onto the model seam, the sandbox seam, a child `Submit`, and, for a call its own fold already answers, no seam at all. Owed cancels are not among the arms: they stay beside the cycle, for the reason Appendix C gives.
+A consumer's `Effect` type is where its seams appear. The agent runtime's is, in outline, `Model | Tool | Delegate | Cancel | Fail`, and its `perform` a five-arm dispatch onto the model seam, the sandbox seam, a child `Submit`, a child `Cancel`, and, for a call its own fold already answers, no seam at all.
 
 ### 4.2 Settling
 
@@ -273,9 +275,9 @@ An entity with outstanding autonomous work must not be evicted mid-flight, and a
 
 > An activation is **quiescent** when nothing is in flight and every member of its desired set is **at rest**: the set is empty, or its remaining members are backed off to §3.4's cap. The workflow MUST report quiescence to `Entity::can_hibernate` (entity §10), permitting hibernation exactly when quiescent and vetoing it otherwise.
 
-The at-rest clause carries weight. §3.4 imposes no attempt bound, so a rule of "the set is empty" alone would let one permanently failing effect, such as an owed cancel to a node that is not coming back (§7.2), veto eviction forever and pin an activation whose only remaining work is a timer. That is worse than what the agent runtime does with an owed cancel: it abandons a launch after bounded retries, leaves the debt in the fold, and lets the session hibernate until a message next ticks it (agent §9.2 item 3, agent §7.5). At the cap the workflow makes the same trade, safely, because the debt is a fold and not activation state: hibernation drops the claims and the counts, and the next activation re-derives the identical desired set and drives it (W1). What is given up is *unattended* progress, which the workflow never had: a caller or an alarm (§11) resumes a hibernated entity, never the entity itself.
+The at-rest clause carries weight. §3.4 imposes no attempt bound, so a rule of "the set is empty" alone would let one permanently failing effect, such as an owed cancel to a node that is not coming back (§7.2), veto eviction forever and pin an activation whose only remaining work is a timer. At the cap the workflow makes the trade an owed cancel needs (agent §9.2 item 3): the key comes to rest, the debt stays in the fold, and the session hibernates until a message next ticks it (agent §7.5). That is safe because the debt is a fold and not activation state: hibernation drops the claims and the counts, and the next activation re-derives the identical desired set and drives it (W1). What is given up is *unattended* progress, which the workflow never had: a caller or an alarm (§11) resumes a hibernated entity, never the entity itself.
 
-A consumer MAY narrow this further, keeping its own `can_hibernate` conjoined with the workflow's, but it never has to widen it, and the common case needs no code at all. The agent runtime narrows: a turn accepted into its queue but not yet started (agent §3.1, §7.2) is work owed *now* that no effect represents, so it is invisible to the desired set, and hibernating on it would strand the turn until the next contact. Its `can_hibernate` therefore shrinks to that one clause. The two effect-shaped clauses it would otherwise carry, a launched call still outstanding and a sandbox mid-open, are the workflow's: the first as quiescence, the second as `Binding`'s *opening* state below.
+A consumer MAY narrow this further, keeping its own `can_hibernate` conjoined with the workflow's, but it never has to widen it, and the common case needs no code at all. The agent runtime narrows twice. A turn accepted into its queue but not yet started (agent §3.1, §7.2) is work owed *now* that no effect represents, so it is invisible to the desired set, and hibernating on it would strand the turn until the next contact. A sandbox mid-open is `Binding`'s *opening* state below: a component, so the engine never sees it and the consumer conjoins it. A launched call still outstanding needs no clause of the consumer's: that is quiescence.
 
 The rule composes with the rest of the model because the desired set is journal-derived: an entity evicted while quiescent and re-activated later re-derives the same set, and one that acquires work while hibernated (an alarm, a command) re-derives that work on activation and drives it.
 
@@ -306,15 +308,15 @@ Two things a reader will expect here are absent by design, for one reason: the w
 
 **Idempotent submission** (agent §7.4) needs a notion of request identity and content equality. Both are the consumer's (the agent runtime compares a turn's content and its literal budget, and rejects a kind mismatch), and all of it is a fold over the consumer's own records. A generic version would need a serialization bound, a digest scheme, and a conflict type, and would serve one consumer.
 
-**Cancellation** needs nothing. The agent runtime's propagation (agent §9.2) is: journal the terminal record; the fold moves each unresolved child into an owed-cancels projection; a post-commit pass sends `Cancel` to each; the child's ack journals a delivery receipt that clears the debt. Read that against §3: *the owed cancels are a desired set*. A consumer under the workflow expresses them as effects returned by `pending`, one per owed child, keyed by the child's call, and receives, with no cancellation feature anywhere in this document:
+**Cancellation** needs nothing. The agent runtime's propagation (agent §9.2) is: journal the terminal record; the fold moves each unresolved child into an owed-cancels projection; `pending` returns one `Cancel` effect per owed child, under a key of its own; the child's ack journals a delivery receipt that clears the debt. Read that against §3: *the owed cancels are a desired set*, and the consumer receives, with no cancellation feature anywhere in this document:
 
-- **crash-safety**, because the debt is a fold and the next activation re-derives it (agent §9.2 item 3 hand-builds exactly this);
-- **launch-once**, because claims already cover it (the agent runtime's separate `cancels_launched` guard would go);
-- **retry with backoff**, from §3.4 (its bespoke transport-retry loop would go with it);
+- **crash-safety**, because the debt is a fold and the next activation re-derives it;
+- **launch-once**, because claims already cover it;
+- **retry with backoff**, from §3.4;
 - **straggler rejection**, from §4.5;
 - **completion**, because the receipt record removes the effect from the desired set.
 
-One property is not free, and §6 pays for it. The agent runtime's propagation gives up on an unreachable child after bounded retries so the parent can hibernate, and re-launches on the next contact. The desired set has no notion of giving up, so a naive quiescence rule would hold the parent resident for as long as the child stayed unreachable. §6's at-rest clause restores the behavior at the backoff cap rather than at a retry count, the same trade read off a clock instead of a counter, and the debt survives it because it was a fold all along.
+One property is not free, and §6 pays for it. The desired set has no notion of giving up, so a naive quiescence rule would hold the parent resident for as long as the child stayed unreachable. §6's at-rest clause lets the parent hibernate at the backoff cap, and the debt survives it because it is a fold.
 
 That the agent runtime's most intricate piece of crash-safety reduces to "return it from `pending`" is the best evidence that the desired set is the right primitive.
 
@@ -385,6 +387,7 @@ Under seed control a simulated workflow MUST be able to inject at least: effect 
 - **The programmable agent.** The layer above: transcript, model seam, tool dispatch, and compaction, with the loop written by the application. It is the reason this document exists, and it is specified separately.
 - **Effect priority and concurrency bounds.** The desired set is launched in full today. A consumer with a hundred outstanding effects and one sandbox needs a bound, and the bound belongs here rather than in each consumer, but its shape (a per-key class, a token count, a fairness rule) should be chosen against a second consumer's needs, not the agent runtime's alone.
 - **Cross-entity effects.** An effect whose target is another entity is an ordinary effect today (§7.2's cancel is one). Whether the workflow should know that, deduplicating by entity name or riding the sagas entity defers (entity §16), is open.
+- **Post-commit emission for consumers.** A consumer's own events owed once a record commits (the agent's, agent §10.4) are staged by the handler that decides the record and emitted by the tick after the commit, the way the engine stages its own (§8). One staging could serve both; nothing blocks on it.
 
 ---
 
@@ -494,22 +497,3 @@ workflow/                  # the autonomous entity (this spec): an entity that d
 ```
 
 `workflow` depends on `entity` (the entity) and through it on `actor-core`. It defines **no journal, no fence, no placement function, and no resume protocol**; each is consumed from entity. It names no durable type of its own: every record a workflow entity writes is the consumer's `Entity::Event`, and the workflow's own state (claims, backoff, subscribers) is ephemeral by specification (§3.3, §3.4, §7.1). It observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.
-
----
-
-## Appendix C: What the agent runtime handed over, and what it kept
-
-The agent runtime implements `Workflow` (agent §3.2, §13), and what it used to own of the cycle is gone rather than wrapped: its launch guard is the engine's claims (**W3**); its dispatch loop and three launch paths are `pending` and `perform` (**W2**, **W4**); its once-per-activation orphan resolution is first-sight classification (**W6**); its resolved-call set is the desired set itself, exact now that a key names its turn (**W5**, §3.1); its self-driving advance command is `Tick` (§3.2) and its two outcome commands are one `Settled` (§4.2); its per-tool recovery policy is this crate's `OnOrphan` (§4.4); and the effect clause of its `can_hibernate` is derived quiescence (**W7**). Both components went the same way: its sandbox slot is a `Binding<Arc<dyn Sandbox>>` (§6) and its subscriber set a `Subscribers<TurnId, ActorRef<ReplyMailbox>>` (§7.1), so the two state machines this document describes have exactly one implementation each.
-
-Four things stayed, and only one of them is a decision this layer should ever revisit.
-
-| Kept in `agent/agent.rs` | Why | Would become |
-|---|---|---|
-| the environment pre-pass (agent §5.4, §5.5, §5.6) | a lost workspace, a failed sandbox open, and an unheld tier are activation state, not fold state, so no `pending` can express them and no engine can gate on them | nothing: this is the consumer's, by construction |
-| owed-cancel propagation and its transport retries (agent §9.2) | a debt the fold already carries, driven by a launch guard of its own | ordinary effects, with §3.4's backoff in place of the retry loop (§7.2) |
-| the sandbox's open path, its release, and the `opening` clause of `can_hibernate` (agent §5.3) | the resource's type and how it opens are the consumer's; only the state machine around them was ever general | nothing: the slot itself is a `Binding` (§6), and conjoining its `opening` state is what §6 asks a consumer to do |
-| the run-boundary event outbox (agent §10.4) | events owed once their records commit | post-commit emission in the cycle (§8) |
-
-The first row is not a gap in the layering but the shape of it: the workflow launches the whole desired set, so a consumer holding a gate the set cannot express MUST settle that gate before it ticks, never inside its launch. The agent runtime does exactly that, and holds itself to it with an assertion on every round.
-
-What stays for good is what the agent runtime is about: the transcript and its fold, the model seam and its request assembly, the tool registry and the tier discipline, kinds and their digest, budgets, delegation policy, and idempotent submission (§1.1). Its `can_hibernate` also keeps a clause of its own, for a turn accepted into the queue but not yet started: work owed now that no effect represents (§6). That list describes an agent runtime. The list above describes nothing in particular, which is why it belongs one layer down.

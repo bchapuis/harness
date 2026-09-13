@@ -5,8 +5,9 @@
 //! is missing or duplicated, if a catalogue `Checker(name)` is not actually
 //! present in `default_invariants()`, if a live checker is not recorded in the
 //! catalogue, or if a `SimTest`/`Differential`/`CompileFail` file pointer names
-//! a test file that no longer exists. Keeping it green is what makes the §17
-//! "Verified by" column mechanically true rather than just documented.
+//! a test file that no longer exists. Keeping it green is what makes the
+//! verification method §18.5 assigns each invariant (the §17 conformance
+//! criterion) mechanically true rather than just documented.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -129,8 +130,8 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 
 /// Every `SimTest`/`Differential`/`CompileFail` file pointer must name a file
 /// that actually exists: otherwise a renamed or deleted conformance test drifts
-/// out from under the catalogue unnoticed, and the §17 "Verified by" column stops
-/// being mechanically true. `SimTest`/`Differential` pointers are comma-separated
+/// out from under the catalogue unnoticed, and the method §18.5 assigns that
+/// invariant stops being mechanically true. `SimTest`/`Differential` pointers are comma-separated
 /// `*.rs` files under this crate's `tests/` directory; a `CompileFail` pointer is
 /// a path relative to the `crates/` directory (e.g. `actor-core/tests/compile_fail`).
 #[test]

@@ -98,25 +98,11 @@ agent, never by the client, so they never reach the authorization gate.
 - **Determinism guard-rail.** Verification happens at the edge only;
   `Meta.created_at` stays caller-supplied.
 
-## How it stands
+## Limitations
 
-- **Isolation core**: an authenticated bearer token binds a request's principal;
-  session keys are prefixed with it (`auth::scoped_session`); a `TokenVerifier`
-  seam ships `StaticTokens` (opaque secrets from `--auth-tokens`, the secure mode)
-  and `InsecureTokens` (the token is the principal, loopback-only).
-- **Directory wiring**: the node hosts the `tenancy::Directory` entity (one per
-  principal, sharing the kinds' durable store); the gateway records ownership on
-  each prompt and answers `GET /v1/sessions` from it.
-- **Gateway-as-cluster-client edge**: `agent-gateway` joins the transport as a
-  non-voting member (`Harness::client` + `entities_client`), terminates tenant
-  auth, and addresses session entities directly. SSE carries the live record stream.
-- **Clients of the edge**: two, both speaking HTTP/SSE to the gateway and
-  nothing else: `agent-tui` (`crates/agent-tui`), a terminal chat UI that
-  authenticates as a tenant, lists its sessions, and streams a run's records; and
-  the VS Code extension in `clients/agent-vscode`, on the same endpoints.
-- **Not implemented**: per-tenant budgets and quotas, `session/delete` (forget
-  plus entity retire), token introspection, signed (HMAC/JWT) tokens, and a
-  WebSocket transport.
+Not implemented: per-tenant budgets and quotas, `session/delete` (forget plus
+entity retire), token introspection, signed (HMAC/JWT) tokens, and a WebSocket
+transport.
 
 ## Tests
 

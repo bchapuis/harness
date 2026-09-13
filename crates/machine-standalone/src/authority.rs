@@ -24,10 +24,8 @@ use machine_entity::Machine;
 use russh::keys::PrivateKey;
 use russh::keys::PublicKey;
 
-use crate::provider::NodeRuntimeProvider;
-
 /// The entity type this node hosts and this authority addresses.
-pub type NodeMachine = Machine<TcpCluster, NodeRuntimeProvider>;
+pub type NodeMachine = Machine<TcpCluster>;
 
 /// A [`MachineAuthority`] backed by the cluster (machine §5.1).
 pub struct EntityAuthority {

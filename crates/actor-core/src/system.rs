@@ -37,6 +37,15 @@ use crate::runtime::Spawner;
 
 /// The runtime an actor runs on (spec §4). A cloneable handle: cloning shares
 /// the same underlying system.
+///
+/// One trait with two faces (spec §4.1). A layer above calls the consumer face:
+/// `spawn`/`spawn_with`/`resolve`, `node`, `receptionist`, `clock`/`now`/`sleep`,
+/// `launch`, `emit`, and `next_random`, taking its identity, time, randomness,
+/// scheduling, and observability from the system so one seed reproduces it under
+/// simulation. An implementation supplies the rest: `spawn_factory`,
+/// `resolve_local`, `is_local`, `is_serving`, `codec`, `remote_ask`/`remote_tell`,
+/// `watch`/`unwatch`, `receptionist_state`, and `replicate_registration`. The
+/// provided methods define the first face in terms of the second.
 pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// Spawn an actor from `factory`, parented to `parent` (`None` for a root):
     /// the one spawn seam an implementation supplies (spec §4.1, §4.2). The

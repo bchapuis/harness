@@ -160,8 +160,9 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     /// On the `Quorum` tier this recovers the head from a write quorum of the
     /// shard's replicas by read-repair (highest-term record per slot, written back
     /// under the leader's own term, §8), so a fresh leader never folds onto a stale
-    /// head and subsequent `load`s read locally; on the `Local` tier it reads
-    /// locally. Rehydration derives `head` from this, never from memory.
+    /// head and subsequent `load`s read locally. Short of a quorum within
+    /// `recover_timeout` it adopts the merged view without write-back, which MAY be
+    /// stale but cannot fork a write (§8). On the `Local` tier it reads locally. Rehydration derives `head` from this, never from memory.
     fn head(
         &self,
         entity: &EntityName,

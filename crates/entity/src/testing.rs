@@ -170,7 +170,7 @@ impl StaticEntityStore {
     }
 }
 
-impl crate::store::EntityBlobStore for StaticEntityStore {
+impl crate::store::EntityStore for StaticEntityStore {
     fn put_blob(
         &self,
         _shard: u32,
@@ -209,9 +209,7 @@ impl crate::store::EntityBlobStore for StaticEntityStore {
     fn blob_ids(&self, _shard: u32, _entity: &EntityName) -> Vec<crate::blobs::BlobId> {
         Vec::new()
     }
-}
 
-impl crate::store::EntityStore for StaticEntityStore {
     fn store_record(
         &self,
         _shard: u32,
@@ -278,8 +276,6 @@ impl crate::store::EntityStore for StaticEntityStore {
 
     fn unseal(&self, _shard: u32) {}
 
-    fn remove_entity(&self, _shard: u32, _entity: &EntityName) {}
-
     fn remove_range(&self, _shard: u32, _from: u64) {}
 
     fn drop_shard(&self, _shard: u32) {}
@@ -331,7 +327,7 @@ impl SnapshotAheadOfHeadStore {
     }
 }
 
-impl crate::store::EntityBlobStore for SnapshotAheadOfHeadStore {
+impl crate::store::EntityStore for SnapshotAheadOfHeadStore {
     fn put_blob(
         &self,
         shard: u32,
@@ -375,9 +371,7 @@ impl crate::store::EntityBlobStore for SnapshotAheadOfHeadStore {
     fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<crate::blobs::BlobId> {
         self.inner.blob_ids(shard, entity)
     }
-}
 
-impl crate::store::EntityStore for SnapshotAheadOfHeadStore {
     fn store_record(
         &self,
         shard: u32,
@@ -464,10 +458,6 @@ impl crate::store::EntityStore for SnapshotAheadOfHeadStore {
 
     fn unseal(&self, shard: u32) {
         self.inner.unseal(shard)
-    }
-
-    fn remove_entity(&self, shard: u32, entity: &EntityName) {
-        self.inner.remove_entity(shard, entity)
     }
 
     fn remove_range(&self, shard: u32, from: u64) {

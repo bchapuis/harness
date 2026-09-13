@@ -27,6 +27,7 @@ use machine_entity::Attach;
 use machine_entity::Detach;
 use machine_entity::DoorPolicy;
 use machine_entity::Machine;
+use machine_entity::MachineRuntimeProvider;
 use machine_entity::MachineError;
 use machine_entity::Provision;
 use machine_entity::Status;
@@ -38,7 +39,7 @@ use machine_entity::fake::FakeRuntimeProvider;
 use serde::Deserialize;
 use serde::Serialize;
 
-type SimMachine = Machine<SimSystem, FakeRuntimeProvider<SimSystem>>;
+type SimMachine = Machine<SimSystem>;
 
 /// A stand-in for the front-door member holding an attachment (machine §5.1):
 /// the machine death-watches this actor's id.
@@ -113,11 +114,11 @@ fn fixture(seed: u64) -> Fixture {
     let sim = Simulation::new(seed);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
-    let provider = Arc::new(FakeRuntimeProvider::new(
+    let provider: Arc<dyn MachineRuntimeProvider> = Arc::new(FakeRuntimeProvider::new(
         system.clone(),
         Duration::from_millis(10),
     ));
-    let machines = system.entities_named::<SimMachine>(
+    let machines = system.entity_node().entities_named::<SimMachine>(
         machine_entity::MACHINE_TYPE,
         EntityConfig {
             idle_after: Duration::from_millis(200),

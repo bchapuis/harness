@@ -7,10 +7,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use actor_core::ActorId;
-use actor_core::ActorRef;
-use actor_core::ActorSystem;
 use actor_core::BoxError;
-use actor_core::BoxFuture;
 use actor_core::HandlerRegistry;
 use actor_core::Message;
 use actor_core::TerminationReason;
@@ -24,10 +21,9 @@ use crate::facet::EVENT_TAG;
 use crate::facet::FacetCell;
 use crate::facet::FacetSet;
 use crate::facet::split_record;
-use crate::gateway::Gateway;
+use crate::host::Activation;
 use crate::host::Host;
 use crate::host::RunTyped;
-use crate::journal::DynEntityJournal;
 use crate::journal::EntityJournalError;
 use crate::journal::Seq;
 use crate::system::EntitySystem;
@@ -199,8 +195,8 @@ pub trait EntityHandler<M: Message>: Entity {
     ) -> impl Future<Output = (Vec<Self::Event>, M::Reply)> + Send;
 }
 
-/// A completed event read ([`EntityCtx::events`], [`EntityRef::events`]
-/// (crate::EntityRef::events)): the decoded events, plus the highest compaction
+/// A completed event read ([`EntityRef::events`](crate::EntityRef::events)):
+/// the decoded events, plus the highest compaction
 /// **base** the read observed (§9). A slot at `Seq <= base` that is absent from
 /// `events` is truncated history (compacted away, subsumed by the entity's
 /// snapshot), not one of the interleaved records the projection skips (§7.12).
@@ -216,18 +212,13 @@ pub struct EventHistory<E> {
     pub events: Vec<(Seq, E)>,
 }
 
-/// The boxed result of [`EntityCtx::events`]: the entity's committed events after
-/// a `Seq` ([`EventHistory`]), decoded, at the journal's real slots.
-pub type EventsFuture<E> = BoxFuture<'static, Result<EventHistory<E>, EntityJournalError>>;
-
 /// One loaded journal page clamped to the committed prefix (§7.5), with the
 /// at-head verdict derived from the clamp: slots above `floor` are an
 /// in-flight append's tentative writes (or undecided leftovers), served only
 /// once a commit or recovery raises the floor, and a page is at head exactly
 /// when the clamp cut it short or the store ran out before `limit`. Returns
-/// `(base, committed records, at_head)`. Shared by the activation's
-/// [`EntityCtx::events`] and the gateway's non-activating read, so the two
-/// cannot drift.
+/// `(base, committed records, at_head)`. Paired with [`events_in_page`] under
+/// the gateway's non-activating read.
 pub(crate) fn committed_prefix(
     page: crate::journal::RecordPage,
     floor: Seq,
@@ -247,9 +238,8 @@ pub(crate) fn committed_prefix(
 /// The events among one loaded journal page, the record-to-event projection
 /// (spec §7.9) applied to a `load` page: each record split into facet tag and
 /// payload, facet records (§7.12) skipped, the events returned at the journal's
-/// real slots. Shared by the activation's [`EntityCtx::events`] and the gateway's
-/// non-activating read (§7.5), so the two projections cannot drift. A record
-/// that will not split is corruption: an error, never silently skipped.
+/// real slots, the gateway's non-activating read (§7.5). A record that will not
+/// split is corruption: an error, never silently skipped.
 /// Consumes the page and strips each event's one-byte envelope in place, so
 /// the serial gateway pays a memmove per event, never a second allocation.
 pub(crate) fn events_in_page(
@@ -270,56 +260,18 @@ pub(crate) fn events_in_page(
 /// The handler/lifecycle context (spec §4.3). It deliberately exposes **no**
 /// `persist` method and no state mutation: state changes only through events
 /// folded by [`Entity::apply`] (§4.2).
+///
+/// A handle to the host's [`Activation`]: the identity and seams every command
+/// reads are shared with the host rather than copied per command, so building a
+/// context is one reference-count bump.
 pub struct EntityCtx<G: Entity> {
-    entity_type: &'static str,
-    name: EntityName,
+    activation: Arc<Activation<G>>,
     system: G::System,
-    gateway: ActorRef<Gateway<G>>,
-    /// The journal seam, so the entity can reach its colocated blob area
-    /// ([`blobs`](EntityCtx::blobs)).
-    journal: Arc<dyn DynEntityJournal>,
-    /// The host's published committed head (spec §7.5): the floor of
-    /// [`events`](EntityCtx::events). The local store alone cannot tell a
-    /// committed record from a tentative one (a leader writes its own replica
-    /// before the quorum resolves, §7.2), so the read clamps to this cell
-    /// rather than trusting the input gate.
-    committed: crate::host::CommittedCell,
-    /// The host's facet cell (spec §7.12): committed forms plus the per-command
-    /// stage, shared so the facet accessors (`kv()`, `ws()`, …) read and stage
-    /// through it.
-    facets: Arc<FacetCell<G::Facets>>,
-    watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
-    /// This node's blocking-I/O pool (§7.4). Physical facets reach it to keep their
-    /// scans off the async executor: a facet that reads and hashes a whole image
-    /// inline stalls the worker driving this node's Raft heartbeats, which is a
-    /// cluster-wide event produced by one entity's local work.
-    blocking_io: Arc<dyn crate::blocking::BlockingIo>,
 }
 
 impl<G: Entity> EntityCtx<G> {
-    #[allow(clippy::too_many_arguments)] // one call site, `Host::entity_ctx`
-    pub(crate) fn new(
-        entity_type: &'static str,
-        name: EntityName,
-        system: G::System,
-        gateway: ActorRef<Gateway<G>>,
-        journal: Arc<dyn DynEntityJournal>,
-        committed: crate::host::CommittedCell,
-        facets: Arc<FacetCell<G::Facets>>,
-        watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
-        blocking_io: Arc<dyn crate::blocking::BlockingIo>,
-    ) -> EntityCtx<G> {
-        EntityCtx {
-            entity_type,
-            name,
-            system,
-            gateway,
-            journal,
-            committed,
-            facets,
-            watches,
-            blocking_io,
-        }
+    pub(crate) fn new(activation: Arc<Activation<G>>, system: G::System) -> EntityCtx<G> {
+        EntityCtx { activation, system }
     }
 
     /// Death-watch `target` (actor §12): when it terminates for any reason
@@ -330,11 +282,15 @@ impl<G: Entity> EntityCtx<G> {
     /// with the activation, so a rehydrated entity re-watches from its folded
     /// state in `on_activate` (watch-after-death fires immediately, actor §12).
     pub fn watch(&self, target: ActorId) {
-        self.watches.lock().expect("watch queue lock").push(target);
+        self.activation
+            .watches
+            .lock()
+            .expect("watch queue lock")
+            .push(target);
     }
 
     pub(crate) fn facet_cell(&self) -> &Arc<FacetCell<G::Facets>> {
-        &self.facets
+        &self.activation.facets
     }
 
     /// This node's blocking-I/O pool (spec §7.4), for a **physical facet** whose work
@@ -345,11 +301,11 @@ impl<G: Entity> EntityCtx<G> {
     /// deployment that has not opted into a pool gets, and what the deterministic
     /// simulation requires.
     pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::blocking::BlockingIo> {
-        &self.blocking_io
+        &self.activation.blocking_io
     }
 
     pub fn name(&self) -> &EntityName {
-        &self.name
+        &self.activation.name
     }
 
     /// A handle to this entity's **colocated content-addressed blob area**:
@@ -361,18 +317,21 @@ impl<G: Entity> EntityCtx<G> {
     pub fn blobs(&self) -> EntityBlobs {
         // Every sweep through this handle unions the facets' live roots (spec
         // §7.12), so neither the entity nor the host can drop the other's bytes.
-        let cell = Arc::clone(&self.facets);
-        EntityBlobs::new(Arc::clone(&self.journal), self.name.clone())
-            .with_facet_roots(Arc::new(move || cell.roots()))
+        let cell = Arc::clone(&self.activation.facets);
+        EntityBlobs::new(
+            Arc::clone(&self.activation.journal),
+            self.activation.name.clone(),
+        )
+        .with_facet_roots(Arc::new(move || cell.roots()))
     }
 
     /// A shareable self-reference (spec §4.3). It resolves through the gateway on
     /// each call, with no host cache.
     pub fn this(&self) -> EntityRef<G> {
         EntityRef::new(
-            self.entity_type,
-            self.name.clone(),
-            self.gateway.clone(),
+            self.activation.entity_type,
+            self.activation.name.clone(),
+            self.activation.gateway.clone(),
             self.system.clone(),
             None,
         )
@@ -380,75 +339,6 @@ impl<G: Entity> EntityCtx<G> {
 
     pub fn system(&self) -> &G::System {
         &self.system
-    }
-
-    /// Up to `limit` of this entity's committed **events** after `from`
-    /// (exclusive), decoded, in ascending `Seq` order, the load-path form of
-    /// the subscription's event projection (spec §7.9): facet records (§7.12)
-    /// are skipped, so the returned `Seq`s are the journal's real slots and may
-    /// have gaps between consecutive events. A local, fence-free read of the
-    /// leader's journal (§7.3), read-your-leader like any query (§7.5).
-    ///
-    /// Returns fewer than `limit` events only when the head is reached, so an
-    /// empty page means no event follows `from`: the loop pages past facet
-    /// records rather than surfacing them as short pages. A record that will
-    /// not split or decode is [`EntityJournalError::Unavailable`]: corruption,
-    /// never silently skipped.
-    ///
-    /// The returned [`EventHistory`] carries the store's compaction base (§9):
-    /// a `from` below it asked for history the snapshot has subsumed, and the
-    /// events in `(from, base]` are not (and can no longer be) served.
-    ///
-    /// Every page is bounded by the activation's **committed head**, exactly
-    /// like the gateway's non-activating read (§7.5): the local store may hold
-    /// an in-flight append's tentative slots (§7.2), and this `'static` future
-    /// may race the host's own append. Slots above the head are not served
-    /// (**E5**).
-    pub fn events(&self, from: Seq, limit: usize) -> EventsFuture<G::Event> {
-        /// Journal entries per `load` page: sized to a subscription batch, not
-        /// to `limit`, so a caller's large `limit` cannot force one huge read.
-        const LOAD_PAGE: usize = 256;
-        let journal = Arc::clone(&self.journal);
-        let committed = Arc::clone(&self.committed);
-        let name = self.name.clone();
-        let codec = self.system.codec();
-        Box::pin(async move {
-            let floor = committed.load(std::sync::atomic::Ordering::Acquire);
-            if floor == crate::host::HEAD_UNPUBLISHED {
-                // Only reachable from a future that escaped a host still
-                // rehydrating: the head is being recovered; transient, and a
-                // read commits nothing, so re-asking is safe.
-                return Err(EntityJournalError::Unavailable(
-                    "the entity's committed head is not yet recovered".into(),
-                ));
-            }
-            let floor = Seq::new(floor);
-            let mut base = Seq::ZERO;
-            let mut events = Vec::new();
-            let mut cursor = from;
-            while events.len() < limit {
-                let page = journal.load(&name, cursor, LOAD_PAGE).await?;
-                let (page_base, records, at_head) = committed_prefix(page, floor, LOAD_PAGE);
-                // The store's base only advances, so the last page's is the
-                // highest this read observed.
-                base = page_base;
-                if let Some((seq, _)) = records.last() {
-                    cursor = *seq;
-                }
-                for (seq, payload) in events_in_page(records)? {
-                    let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
-                        .map_err(|e| EntityJournalError::Unavailable(e.to_string()))?;
-                    events.push((seq, event));
-                    if events.len() == limit {
-                        break;
-                    }
-                }
-                if at_head {
-                    break;
-                }
-            }
-            Ok(EventHistory { base, events })
-        })
     }
 }
 

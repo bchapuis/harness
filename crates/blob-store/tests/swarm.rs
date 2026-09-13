@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use actor_cluster::DowningPolicy;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::Clock;
@@ -26,6 +27,7 @@ use actor_core::Entropy;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
 use actor_simulation::SimNode;
@@ -150,6 +152,15 @@ impl ClusterWorkload for BlobSwarm {
 
     fn node_count(&self) -> usize {
         self.nodes
+    }
+
+    /// Gossip membership: the blob store's placement reads the serving set, which
+    /// the coordinator-free control plane converges without a quorum.
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
+            downing: DowningPolicy::Conservative,
+        }
     }
 
     fn setup(&self, _ctx: &ClusterCtx) {}

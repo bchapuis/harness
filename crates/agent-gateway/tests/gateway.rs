@@ -128,7 +128,6 @@ async fn gateway() -> Arc<agent_gateway::Gateway<Sys>> {
     agent_gateway::connect(
         system,
         &roster,
-        EntityConfig::default().shards,
         Arc::new(InsecureTokens),
         agent_gateway::Limits::default(),
         Duration::from_secs(5),

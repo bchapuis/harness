@@ -245,33 +245,42 @@ The system is the runtime an actor runs on. The cluster runtime (§9 to §13) is
 
 ### 4.1 The trait
 
-A system resolves ids to refs and bridges the transport boundary, working on **already-serialized payloads**; the typed API and the local fast path live in the `ActorRef`/mailbox layer above this trait:
+One trait has two faces. A layer above it (an entity host, a workflow engine, an agent runtime) calls the first group: it spawns and resolves actors, and it takes its node identity, its time, its randomness, its task scheduling, and its observability from the system rather than from the host, which is what lets one seed reproduce that layer under simulation (§4.6, §18). An implementation (the reference cluster runtime, the simulator's node) supplies the second group: the byte-level transport boundary, working on **already-serialized payloads**, and the hooks the typed `ActorRef`/mailbox layer above dispatches through. The two are one trait rather than two so that a system value is one cheap handle (§3.3) and a bound names one thing:
 
 ```rust
-pub trait ActorSystem: Clone + Send + Sync + 'static {   // Clone: a system value is a cheap handle (§3.3)
-    // ---- Resolution (§4.3) ----
+pub trait ActorSystem: Clone + Send + Sync + 'static {
+    // ---- What a layer above calls ----
+    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;        // §4.2: assign_id → register mailbox → actor_ready
+    fn spawn_with<A, F: FnMut() -> A>(&self, factory: F) -> ActorRef<A>;      // restartable (§11.2); `Ctx` has the child forms
     /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed
     /// and locality-classifiable (§3.6), so resolution never fails.
     fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
+    fn node(&self) -> NodeId;
+    fn receptionist(&self) -> Receptionist<Self>;                              // §13
+    type Clock: Clock;                                                         // §4.6: the one source of time
+    fn clock(&self) -> &Self::Clock;
+    fn now(&self) -> Instant;
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()>;
+    fn launch(&self, task: BoxFuture<'static, ()>);                            // §4.6: the one spawner
+    fn emit(&self, event: Event);                                              // §16: the one observability stream
+    fn next_random(&self) -> u64;                                              // §4.6: the one source of randomness
 
-    // ---- Outbound, transport boundary (§4.4) ----
-    async fn remote_ask(
-        &self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration,
-    ) -> Result<Vec<u8>, CallError>;
-
-    async fn remote_tell(
-        &self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>,
-    ) -> Result<(), CallError>;
+    // ---- What an implementation supplies ----
+    fn spawn_factory<A: Actor<System = Self>>(&self, factory: ActorFactory<A>, parent: Option<ActorId>) -> ActorRef<A>;
+    fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>>;
+    fn is_local(&self, id: &ActorId) -> bool;                                  // §4.3, from the id alone
+    fn is_serving(&self, node: NodeId) -> bool;                                // §9.4, §13
+    fn codec(&self) -> Arc<dyn Codec>;                                         // §5
+    async fn remote_ask(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration) -> Result<Vec<u8>, CallError>;
+    async fn remote_tell(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>) -> Result<(), CallError>;
+    fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery); // §12
+    fn unwatch(&self, target: &ActorId, watcher: &ActorId);
+    fn receptionist_state(&self) -> Arc<ReceptionistState>;                    // §13
+    fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId);  // §13; a single node does nothing
 }
 ```
 
-The wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as callable API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
-
-The user-facing entry point is `spawn`, which composes the lifecycle steps in the order §4.2 specifies:
-
-```rust
-fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>  // = assign_id → register mailbox → actor_ready
-```
+The provided forms (`spawn`, `spawn_with`, `resolve`, `now`, `sleep`) are defined in terms of the supplied ones, so an implementation writes the second group and gets the first. On the transport boundary the wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as callable API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
 ### 4.2 Lifecycle ordering
 
@@ -616,7 +625,7 @@ The cluster self-hosts its source of truth as a **replicated log** coordinated t
 
    **A committed entry a member cannot decode MUST stop that member's control plane, never be skipped.** Members apply in log order, so an entry one member skips is one its peers apply: its view is then not a *prefix* of the log but a **gap** in it, holding the transitions after an admission or a downing it never saw, while it remains a full member of the cluster whose membership it has stopped tracking. Skipping leaves item 1's total order gated for everyone but that member. Such a member MUST therefore stop applying transitions, permanently, and MUST NOT proceed as though it had applied one.
 
-   **The transition payload carries its own revision** (`actor.membership`, [compatibility](compatibility-spec.md) §3). It rides `EntryPayload::App` inside the already-stamped `actor.raft.log`, whose revision covers the *envelope* and not it, so without a stamp of its own the two reasons a member stops here (a transition a later build defined, and a truncated or damaged payload) would be indistinguishable, though their fixes are opposite: run the node on a build that accepts the entry, or repair a log. An unstamped payload is adopted as revision 1, because every transition committed before the stamp existed is still in some cluster's log and a build that refused them would refuse its own history. The stamp is the widest *relative* cost in the tree (a magic and a revision more than double a nine-byte payload), but the absolute cost is eight bytes on a record written once per membership change, and a stamp must be on the bytes before the revision that needs it exists.
+   **The transition payload carries its own revision** (`actor.membership`, [compatibility](compatibility-spec.md) §3): it rides `EntryPayload::App` inside the already-stamped `actor.raft.log`, whose revision covers the envelope and not it, so the stamp is what distinguishes a transition a later build defined from a damaged payload, whose fixes are opposite. An unstamped payload is adopted as revision 1, because every transition committed before the stamp existed is still in some cluster's log. What the stamp costs, and why it is paid here, is the compatibility spec's subject.
 
    Such a member SHOULD keep replicating and acknowledging the log: the entry is durable either way, and a restart onto a build that can read it applies it, so refusing the append would cost availability and buy no safety. If it leads, it SHOULD hand leadership to a peer that can still apply (item 8): a leader that cannot observe the effect of its own committed decisions will propose them again on every pass, forever. Its condition SHOULD be readable by an operator, for the reason item 2 gives about a voter that has stopped voting. Where the mode also disseminates stamped status by gossip (item 3), such a member SHOULD keep gossiping: a peer that applied the entry can still deliver its *outcome*, which bounds the damage of stopping, though only for transitions the stopped build can name, which excludes the one that stopped it.
 2. **Voters.** A configured, modest subset of members (typically 3 or 5) are **voters**; only they elect leaders and form quorums. Voters MUST persist their Raft state (term, vote, log) durably and MUST keep stable node identities across restarts. Changes to the voter set are themselves committed configuration entries (single-server change or joint consensus). A voter declared `down` MUST be removed from the voter set by a committed change; its replacement joins as a new member with a fresh `NodeId` (§9.1).
@@ -629,11 +638,9 @@ The cluster self-hosts its source of truth as a **replicated log** coordinated t
 5. **Quorum loss** pauses the control plane only (no join, drain, or down commits until a quorum reforms) while existing members keep exchanging actor traffic on the last committed view.
 6. **Beyond membership.** The log MAY carry other control-plane decisions as opaque entries (singleton placement, shard allocation, cluster-wide configuration), giving them the same total order and failover. This specification normatively defines only the membership entries.
 7. **Runtime seams.** Consensus traffic rides the ordinary `Transport` (§7) as system messages, election and heartbeat timers come from `Clock`, and election-timeout jitter from `Entropy` (§4.6), so a leader-based cluster simulates deterministically (§18).
-8. **Leadership transfer (RECOMMENDED).** A group leader SHOULD be able to hand leadership to a named voter without waiting out an election timeout (Raft §3.10): it verifies that the target has replicated the leader's last entry, then invites it to stand for election immediately. The leader MUST NOT invite a target whose match index is behind the leader's last index: such a target would lose the election it was invited to hold, so inviting it costs a disrupted term and achieves nothing. The invitation MUST be accepted only from the leader of the recipient's current term. Transfer needs no new agreement: it starts an ordinary election, which still requires a quorum of votes, so it can move leadership but never split it, and initiating one does not itself end the leader's term. Its purpose is planned departure. Without it a node that leads many groups costs one full election timeout *per group* when it stops, which makes a rolling restart, the most frequent operation a production cluster performs, indistinguishable from that many simultaneous failures.
-9. **Heartbeat coalescing (RECOMMENDED).** A heartbeat is an empty append, and a node leading `G` groups sends one to each of `R-1` followers every heartbeat interval: `G × (R-1)` frames per interval carrying no data. Where `G` grows with the deployment (entity runs one group per shard, entity §8.2, and shard count is its elasticity knob, entity §7.7), an implementation SHOULD batch the empty appends bound for one peer into a single frame, and their replies likewise. The batching MUST be framing only: each heartbeat is dispatched to its own group exactly as a lone append would be, so no group's state machine can observe the difference. An implementation SHOULD also send the batches **before** applying the tick's per-group outputs, so heartbeat latency does not grow with `G`: a heartbeat delayed behind `G` units of work turns a well-packed node into a source of spurious elections.
-10. **The first election is not the detector's business (RECOMMENDED).** The election timeout exists to notice a leader that *stopped*. A group that has never had one (no persisted term, no log, no snapshot) is detecting nothing, and an implementation SHOULD NOT make it wait out that timeout before its first campaign. Groups are created in sequence (a shard's group only exists once the allocation naming it commits), so a cold cluster pays the timeout once per stage, serially, before it can serve anything. A group that *does* hold persisted state keeps the full timeout: a voter rejoining a healthy group has no business campaigning early.
-
-    Two constraints bound how eager that first campaign may be. It MUST NOT begin before an existing leader could have been heard from, at least one heartbeat interval, because groups are created on each node as the allocation reaches it, not simultaneously, and a node building its copy late is "pristine" while the group already has a leader; campaigning first leaves it a candidate with no leader to route to, a stall the caller pays rather than a wasted vote. The delay SHOULD be staggered per voter, deterministically, so a cold cluster elects in sequence rather than tying and re-arming. Deriving that stagger from `(group, node)` rather than node identity alone also keeps a single node from leading every group. A deterministic stagger draws no entropy, which §18.1 requires of anything on this path: a draw here would shift the seeded stream and change the behaviour of every recorded seed.
+8. **Leadership transfer (RECOMMENDED).** A group leader SHOULD be able to hand leadership to a named voter without waiting out an election timeout (Raft §3.10), so a planned departure is not one failover per led group; it MUST offer the transfer only to a voter that has replicated its last entry, the invitation MUST be accepted only from the leader of the recipient's current term, and the transfer starts an ordinary election, so it can move leadership but never split it.
+9. **Heartbeat coalescing (RECOMMENDED).** An implementation SHOULD batch the empty appends bound for one peer into a single frame, and their replies likewise, since a node leading `G` groups otherwise sends `G × (R-1)` empty frames per interval (entity runs one group per shard, entity §8.2); the batching MUST be framing only, so no group's state machine can observe the difference.
+10. **The first election is not the detector's business (RECOMMENDED).** A group with no persisted term, log, or snapshot has no stopped leader to detect, so an implementation SHOULD NOT make it wait out the election timeout before its first campaign, but that campaign MUST NOT begin before an existing leader could have been heard from (one heartbeat interval), and its stagger SHOULD be deterministic per `(group, node)` so it draws no entropy (§18.1); a group holding persisted state keeps the full timeout.
 
 #### 9.4.4 Gossip-based
 
@@ -836,31 +843,14 @@ The same events drive deterministic simulation: a simulator subscribes to this s
 
 ## 17. Conformance
 
-An implementation conforms to this specification **iff** every property below holds. The cited section's MUSTs *define* each property normatively, and the listed method *verifies* it: for runtime properties, the numbered invariant of §18.5, checked by whichever method the §18.5 catalogue assigns it (continuous checker, targeted test, compile-fail, or differential run).
+An implementation conforms to this specification **iff** the twenty-two runtime invariants of §18.5 hold, each checked by the method that catalogue assigns it (continuous checker, targeted test, compile-fail, or differential run), and the four properties below hold by construction. The cited section's MUSTs *define* each property normatively; the runtime catalogue is stated once, in §18.5, and the `spec` crate holds the Rust copy equal to it.
 
 | Property | Defined in | Verified by |
 |---|---|---|
 | Actor state reachable only through the actor's own handlers | §3.5 | construction (ownership); §18.5 #4 |
-| An invalid `ask`/`tell` does not compile | §3.3 | §18.5 #20 (compile-fail) |
-| The call site is identical for local and remote targets | §3.3 | §18.5 #21 (differential) |
-| Lifecycle `assign_id → actor_ready → resign_id`: ordering and exactly-once | §4.2 | §18.5 #6 |
-| `resolve` classifies locality with no network round-trip | §4.3 | §18.5 #7 |
-| Stable hand-written manifest; unregistered `(actor, manifest)` → `Unhandled` | §4.4 | §18.5 #8; construction |
-| Remote dispatch listed by a hand-written `register` (a defaulted `Actor` method); no framework macro | §1.1, §4.4 | construction |
-| Local sends enqueue by value, without serialization | §4.3, §4.4 | §18.5 #9 |
-| `ActorRef`s in messages/replies are rebound on decode | §4.4 | §18.5 #10 |
 | Every message and reply satisfies `SerializationRequirement` | §5 | compile-time (trait bound) |
-| Serial execution, per-sender FIFO, bounded non-dropping mailbox | §6 | §18.5 #3, #4, #5 |
+| Remote dispatch listed by a hand-written `register` (a defaulted `Actor` method); no framework macro | §1.1, §4.4 | construction |
 | Associations established by an authenticated, version-checked handshake | §7, §15 | construction; transport tests |
-| At-most-once delivery; no `ask` completes silently | §7.2 | §18.5 #1, #2 |
-| Membership converges under the mode's authority; `down` terminal | §9 | §18.5 #14, #15, #16, #17 |
-| Leader-based control plane: quorum-gated, log-ordered transitions | §9.4.3 | §18.5 #22 |
-| SWIM suspicion/refutation maintains reachability wherever the detector runs | §10 | §18.5 #17 (underlies #16) |
-| Local faults contained by supervision; default `Stop`; restarts back off | §11 | §18.5 #18 |
-| `watch` yields exactly-once `Terminated`, including `NodeDown` | §12 | §18.5 #11, #12, #13 |
-| Receptionist: typed register/lookup/subscribe, pruned on node `down` | §13 | §18.5 #19 |
-| Transport/system failures are exhaustive `CallError`; app errors in `M::Reply` | §14 | compile-time (exhaustive enum); §18.5 #1 |
-| Runs over virtual clock/network/entropy; one seed reproduces a run; every property above holds under fault injection | §18 | §18.1; §18.5 under §18.3 |
 
 ---
 

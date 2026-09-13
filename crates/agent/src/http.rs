@@ -180,3 +180,137 @@ pub fn tool_result_text(value: &Value) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use actor_simulation::SimEntropy;
+    use actor_simulation::Simulation;
+    use serde_json::json;
+
+    use super::*;
+    use crate::model::ModelParams;
+    use crate::budget::Usage;
+
+    /// The smallest protocol: no headers, an empty body, and a status-only
+    /// classification, so the test exercises the shell's policy and nothing
+    /// of any wire format.
+    struct StatusOnly;
+
+    impl Protocol for StatusOnly {
+        const PATH: &'static str = "/complete";
+        fn headers(_api_key: &str) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn encode(_req: &ModelRequest) -> Value {
+            json!({})
+        }
+        fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
+            match response.status {
+                200 => Ok(ModelResponse {
+                    content: String::new(),
+                    calls: Vec::new(),
+                    usage: Usage::default(),
+                }),
+                429 => Err(ModelError::RateLimited),
+                503 => Err(ModelError::Overloaded),
+                _ => Err(ModelError::InvalidRequest("bad field".to_string())),
+            }
+        }
+    }
+
+    /// A scripted transport: pops the next canned status per call and counts
+    /// the calls.
+    struct ScriptedHttp {
+        statuses: Mutex<Vec<u16>>,
+        calls: Mutex<usize>,
+    }
+
+    impl ScriptedHttp {
+        fn new(mut statuses: Vec<u16>) -> Arc<Self> {
+            statuses.reverse();
+            Arc::new(ScriptedHttp {
+                statuses: Mutex::new(statuses),
+                calls: Mutex::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock().expect("calls")
+        }
+    }
+
+    impl HttpPost for ScriptedHttp {
+        fn post(
+            &self,
+            _path: &str,
+            _headers: &[(String, String)],
+            _body: Vec<u8>,
+        ) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
+            *self.calls.lock().expect("calls") += 1;
+            let status = self
+                .statuses
+                .lock()
+                .expect("statuses")
+                .pop()
+                .expect("scripted status");
+            Box::pin(async move {
+                Ok(HttpResponse {
+                    status,
+                    body: Vec::new(),
+                })
+            })
+        }
+    }
+
+    fn request() -> ModelRequest {
+        ModelRequest {
+            system_prompt: String::new(),
+            params: ModelParams::default(),
+            tools: Vec::new(),
+            transcript: Arc::new(Vec::new()),
+            max_tokens: 1,
+        }
+    }
+
+    fn model(
+        seed: u64,
+        sim: &Simulation,
+        http: Arc<ScriptedHttp>,
+    ) -> ProtocolModel<StatusOnly, actor_simulation::SimClock, SimEntropy> {
+        ProtocolModel::new(http, "key", sim.clock(), Arc::new(SimEntropy::new(seed)))
+    }
+
+    #[test]
+    fn pressure_is_retried_with_backoff_and_a_hard_error_is_not() {
+        // Rate limit, then overload, then success: absorbed by the policy
+        // (agent spec §4.3), each retry after a backoff on the logical clock.
+        let sim = Simulation::new(7);
+        let http = ScriptedHttp::new(vec![429, 503, 200]);
+        let started = sim.now();
+        let outcome = sim.block_on(model(7, &sim, Arc::clone(&http)).complete(request()));
+        assert!(outcome.is_ok());
+        assert_eq!(http.calls(), 3);
+        assert!(sim.now() > started, "the retries took logical time");
+
+        // A malformed request is the caller's bug: never retried (§4.3).
+        let sim = Simulation::new(8);
+        let http = ScriptedHttp::new(vec![400]);
+        let outcome = sim.block_on(model(8, &sim, Arc::clone(&http)).complete(request()));
+        assert_eq!(
+            outcome,
+            Err(ModelError::InvalidRequest("bad field".to_string()))
+        );
+        assert_eq!(http.calls(), 1);
+    }
+
+    #[test]
+    fn the_policy_gives_up_after_its_attempts() {
+        let sim = Simulation::new(9);
+        let http = ScriptedHttp::new(vec![429; 8]);
+        let outcome = sim.block_on(model(9, &sim, Arc::clone(&http)).complete(request()));
+        assert_eq!(outcome, Err(ModelError::RateLimited));
+        assert_eq!(http.calls(), RetryPolicy::default().attempts as usize);
+    }
+}

@@ -225,15 +225,8 @@ impl FirecrackerTier {
         }
     }
 
-    /// Execute one Native call (`shell` only).
-    pub(crate) async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
-        if name != "shell" {
-            return Err(crate::provider::unknown_tool(name));
-        }
-        let command = input
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidArguments("`command` must be a string".to_string()))?;
+    /// Run one `shell` command in the session's microVM.
+    pub(crate) async fn run(&self, command: &str) -> Result<Value, ToolError> {
         let mut slot = self.vm.lock().await;
         if let Some(vm) = slot.as_mut() {
             // A VM that exited behind our back is single-tier loss now, not
@@ -265,13 +258,6 @@ impl FirecrackerTier {
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
-        // Checked before anything touches the disk: an unconfigured profile
-        // fails cleanly, leaving no stray control directory behind.
-        if self.image.is_empty() {
-            return Err(fail(
-                "no base rootfs: the profile's `image` names it".to_string(),
-            ));
-        }
         let control = machine_host::microvm::control_dir(CONTROL_PREFIX, &self.control_key)
             .await
             .map_err(|e| fail(e.to_string()))?;

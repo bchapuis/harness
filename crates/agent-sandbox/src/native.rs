@@ -140,27 +140,10 @@ impl NativeTier {
         }
     }
 
-    /// Execute one Native call (`shell` only).
-    pub(crate) async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
-        if name != "shell" {
-            return Err(crate::provider::unknown_tool(name));
-        }
-        let command = input
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidArguments("`command` must be a string".to_string()))?
-            .to_string();
-        if self.image.is_empty() {
-            // Checked before any docker invocation: an unconfigured profile
-            // fails identically with or without docker installed.
-            return Err(ToolError::Sandbox(
-                "native: the kind's SandboxProfile.image is empty; the docker-backed \
-                 Native tier needs an image reference and pulls no default"
-                    .to_string(),
-            ));
-        }
+    /// Run one `shell` command in the session's container.
+    pub(crate) async fn run(&self, command: &str) -> Result<Value, ToolError> {
         let guest = self.container().await?;
-        match guest.exec(&["/bin/sh", "-c", &command]).await {
+        match guest.exec(&["/bin/sh", "-c", command]).await {
             // A nonzero exit is an outcome the model reacts to, not an error;
             // the mechanism has already told them apart (`GuestError::Gone` is
             // the container being gone, never a command's own failure).

@@ -11,33 +11,21 @@ a drift test that keeps the catalogue mechanically true. The exception is
 compatibility, whose table names neither a defining section nor a verifying
 suite, so there is no Rust copy to hold it against (its V3 is asserted at
 compile time and its V4/V5 by the golden corpus instead, compatibility §4).
-They layer bottom-up: every spec cites the ones beneath it by a short prefix
-(`core §N`, `entity §N`, and so on), citations the build resolves rather than
-trusts (the `spec` crate, under Testing). A spec may still *name* a layer above
-it where that explains a choice: actor §9.4.3 cites entity's group-per-shard
-count to motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity
-to disclaim a sharding utility, and entity §7.17 names the agent as the steps
-facet's reference consumer. The workflow spec's *argument* runs upward: it cites
-the agent runtime as its motivation, its worked example, and its measure,
-because the agent is the layer it generalizes. The crate dependency runs the
-other way, `agent` on `workflow`, and the agent implements `Workflow` rather
-than re-deriving it, so those citations point at a worked consumer. Beside the
-cycle the agent keeps the environment reconciliation of agent §5.4, §5.5 and
-§5.6, activation state and so no function of any fold, run as a pre-pass ahead
-of every tick.
 
-| | Spec | Owns | Invariants |
-|---|---|---|---|
-| substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, transport, membership, SWIM, supervision, receptionist, deterministic simulation | #1–#22 |
-| | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | U1–U2 |
-| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | L1–L5 |
-| | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | E1–E21, F1–F4 |
-| | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | B1–B7 |
-| consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | W1–W7 |
-| | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | A1–A8 |
-| | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | S1–S5 |
-| | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | M1–M6 |
-| cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | V1–V6 |
+They layer bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`, `entity §N`, and so on), citations the build resolves rather than trusts (the `spec` crate, under Testing).
+
+| | Spec | Owns | Crates | Invariants |
+|---|---|---|---|---|
+| substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, transport, membership, SWIM, supervision, receptionist, deterministic simulation | `actor-core`, `actor-serialization`, `actor-cluster`, `actor-runtime`, `actor-simulation` | #1–#22 |
+| | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | `actor-cluster` | U1–U2 |
+| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | `wal` | L1–L5 |
+| | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | `entity` | E1–E21, F1–F4 |
+| | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | `blob-store` | B1–B7 |
+| consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | `workflow` | W1–W7 |
+| | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | `agent`, with `agent-anthropic` and `agent-openai` (model adapters), `agent-http`, `agent-gateway`, `agent-standalone`, `agent-tui` | A1–A8 |
+| | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | `agent-sandbox` | S1–S5 |
+| | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | `machine-entity`, `machine-host`, `machine-proto`, `machine-frontdoor`, `machine-standalone` | M1–M6 |
+| cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | `compat`; `spec` (the drift gate, under Testing); `tenancy` (the directory of [multi-tenant-edge](multi-tenant-edge.md)) | V1–V6 |
 
 One layer has a design note rather than a spec:
 
@@ -69,50 +57,26 @@ One layer has a design note rather than a spec:
 
 ## Testing
 
-- [`../crates/spec/`](../crates/spec/): the drift gate for this directory.
-  The layering above is made of citations, two thousand-odd of them, and
-  `cargo test -p spec` resolves every one against a section that exists. It is
-  the `docs/` analogue of a crate's `conformance_catalogue.rs`, there for the
-  same reason: renumbering a section is a local edit whose citations are not
-  local, so prose that points at nothing fails nothing. A document missing
-  from its `DOCUMENTS` table is checked by nothing, so a new spec is registered
-  there (with the convention its own unprefixed `§N` follows) as part of
-  adding it.
+The citations run downward, and the gate below holds them to it. A spec may
+still *name* a layer above it where that explains a choice: actor §9.4.3 cites entity's group-per-shard
+count to motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity
+to disclaim a sharding utility, and entity §7.17 names the agent as the steps
+facet's reference consumer. The workflow spec's *argument* runs upward: it cites
+the agent runtime as its motivation, its worked example, and its measure,
+because the agent is the layer it generalizes. The crate dependency runs the
+other way, `agent` on `workflow`, and the agent implements `Workflow` rather
+than re-deriving it, so those citations point at a worked consumer. Beside the
+cycle the agent keeps the environment reconciliation of agent §5.4, §5.5 and
+§5.6, activation state and so no function of any fold, run as a pre-pass ahead
+of every tick.
 
-  It also reads each spec's **invariant catalogue**, so the table a reader trusts
-  and the machine-readable one beside the suite are held equal rather than
-  maintained twice. Each crate's `conformance_catalogue.rs` runs the comparison,
-  because a Rust catalogue lives in a `tests/` module only its own crate can
-  import. All nine are compared on which invariants exist and which sections
-  define them, and eight on their "Verified by" column as well: by file for
-  entity, utilities, workflow, agent, and sandbox, by test function for wal, blob,
-  and machine, whichever the spec itself names. The ninth says why at the site:
-  the core catalogue is a numbered list and names no suites at all (actor §18.6
-  carries that).
-
-  Its third gate is the **ranges**. A spec names a sibling's catalogue by its
-  extent, as in `entity §N` (its invariants as `E1–E21`): a citation like any
-  other, pointing at a catalogue and saying how far it runs. Two checks pin it
-  from both sides: no range reaches past the catalogue it names, and across the
-  whole set some range reaches its last invariant. Neither is the obvious rule,
-  and the module says why both obvious ones are wrong: `A1–A8` spans an A2 that
-  agent §11 deliberately retires, and `M1–M3` is a true claim about three of
-  six. The pair catches a catalogue that *grows*: `E21` was added at
-  entity §7.16 and six citations across four documents went on describing
-  entity as ending at E20, each of them resolving, parsing, and passing every
-  other gate.
-
-  Its fourth gate is the **identifiers**. These documents are written in the
-  code's vocabulary (`EntityHandler`, `ReadReply::head`, `load_snapshot()`), and
-  a rename moves the code while the prose keeps the old word. Every backticked
-  token of a shape the tree would own is checked against an index of every name
-  declared under `crates/`. The index is a scan rather than rustdoc, because
-  rustdoc's JSON needs nightly and the toolchain is pinned; it knows a name
-  exists somewhere, not where or what it is, and that is all the check claims.
-  Names that are right and absent (std's, another system's, a table column, and
-  the ones a spec writes to say the tree has no such thing) are listed with
-  their reasons, and the list is checked in that direction too: an exemption the
-  tree starts defining fails the build, so it cannot outlive its reason.
+- [`../crates/spec/`](../crates/spec/), the drift gate for this directory, four
+  checks over every document in its `DOCUMENTS` table (a spec is registered there
+  as part of adding it; its `lib.rs` states each gate in full):
+  - **citations**: every `§N` reference, two thousand-odd of them, resolves to a section that exists;
+  - **catalogues**: each spec's invariant table is held equal to the Rust copy its crate's `conformance_catalogue.rs` compares it against, section numbers and "Verified by" included;
+  - **ranges**: a cited extent such as `E1–E21` reaches no further than the catalogue it names, and across the set some range reaches each catalogue's last invariant, so a catalogue that grows is caught;
+  - **identifiers**: every backticked name of a shape the tree would own exists somewhere under `crates/`, with the listed exemptions checked in the other direction too.
 - [simulation-testing](simulation-testing.md), the whole verification story:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression

@@ -639,12 +639,12 @@ fn entity_named_hosts_one_entity_under_many_type_names() {
     let sim = Simulation::new(5);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
 
-    let researchers = system.entities_named::<CounterEntity>(
+    let researchers = system.entity_node().entities_named::<CounterEntity>(
         "agent.researcher",
         EntityConfig::default(),
         Arc::new(CounterEntity::default),
     );
-    let summarizers = system.entities_named::<CounterEntity>(
+    let summarizers = system.entity_node().entities_named::<CounterEntity>(
         "agent.summarizer",
         EntityConfig::default(),
         Arc::new(CounterEntity::default),

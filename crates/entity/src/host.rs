@@ -158,6 +158,34 @@ pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
 /// stopping host is safe to serve at or below.
 pub(crate) type CommittedCell = std::sync::Arc<std::sync::atomic::AtomicU64>;
 
+/// What an activation is to its handlers (spec §4.3): the identity and seams every
+/// [`EntityCtx`] reads. Built once per activation by the gateway and shared between
+/// the [`Host`] and each context it hands a handler, so one decision about what an
+/// activation carries lives in one struct.
+pub(crate) struct Activation<G: Entity> {
+    /// The runtime type name (spec §5.1), so a self-reference resolves under the
+    /// right type.
+    pub(crate) entity_type: &'static str,
+    pub(crate) name: EntityName,
+    pub(crate) gateway: ActorRef<Gateway<G>>,
+    /// The journal seam, so the entity can reach its colocated blob area
+    /// ([`EntityCtx::blobs`]).
+    pub(crate) journal: Arc<dyn DynEntityJournal>,
+    /// The facet cell (spec §7.12): the declared facets' committed forms and the
+    /// per-command stage, read and staged through by the facet accessors (`kv()`,
+    /// `ws()`, …). Rebuilt from the composite snapshot plus tagged records on
+    /// rehydration (**E3**).
+    pub(crate) facets: Arc<FacetCell<G::Facets>>,
+    /// Death-watch requests the entity queued through [`EntityCtx::watch`],
+    /// installed by the host after each handler/lifecycle hook completes. Ephemeral
+    /// activation state (**E3**): a rehydrated entity re-watches from its folded
+    /// state in `on_activate`.
+    pub(crate) watches: std::sync::Mutex<Vec<ActorId>>,
+    /// This node's blocking-I/O pool (§7.4), so a physical facet's scan runs off
+    /// the executor driving Raft.
+    pub(crate) blocking_io: Arc<dyn crate::blocking::BlockingIo>,
+}
+
 /// An entity's live activation (spec §10): state folded from the journal, plus the
 /// machinery of the §6 durability protocol. Disposable: rebuilt from the journal
 /// on the next activation (invariant **E3**).
@@ -174,34 +202,23 @@ pub struct Host<G: Entity> {
     committed: CommittedCell,
     /// The seq of the latest persisted snapshot, to decide when to snapshot again.
     last_snapshot: Seq,
-    /// The runtime type name (spec §5.1), threaded into [`EntityCtx`] so a
-    /// self-reference resolves under the right type.
-    entity_type: &'static str,
-    name: EntityName,
+    /// The identity and seams its handlers see, shared with every [`EntityCtx`].
+    activation: Arc<Activation<G>>,
     /// The shard this activation serves under: resolved by the gateway from the
     /// committed partition (§5.1) at activation, fixed for the activation's
     /// lifetime. Keys the per-shard alarm index (§7.16); after a split/merge moves
     /// the name, the next activation carries the new shard.
     shard: u32,
-    journal: Arc<dyn DynEntityJournal>,
     config: EntityConfig,
     /// The operator-facing sink (§13), lifted out of `config` because it is read on
     /// every commit.
     metrics: Arc<dyn crate::metrics::EntityMetrics>,
-    /// This node's blocking-I/O pool (§7.4), handed to each [`EntityCtx`] so a physical
-    /// facet's scan runs off the executor driving Raft.
-    blocking_io: Arc<dyn crate::blocking::BlockingIo>,
-    gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
     last_active: actor_core::Instant,
     /// Live record sinks (spec §7.9): one bounded channel per subscription, drained
     /// by a forwarder task. Dropped when the host stops, so a move or hibernation
     /// ends every subscription and subscribers re-subscribe (**E3**).
     sinks: Vec<async_channel::Sender<Arc<RecordBatch>>>,
-    /// The facet cell (spec §7.12): the declared facets' committed forms and the
-    /// per-command stage, shared with the [`EntityCtx`] accessors. Rebuilt from the
-    /// composite snapshot plus tagged records on rehydration (**E3**).
-    facets: Arc<FacetCell<G::Facets>>,
     /// The durable-alarm arm generation (spec §7.16). Bumped on every (re)arm so a
     /// stale timer task's [`AlarmDue`] is ignored. Ephemeral activation state, reset
     /// per activation (**E3**).
@@ -220,26 +237,17 @@ pub struct Host<G: Entity> {
     /// The registration attempt generation: bumped on every launched sync, so a
     /// superseded attempt's late [`AlarmSynced`] is ignored. Ephemeral.
     sync_epoch: u64,
-    /// Death-watch requests the entity queued through [`EntityCtx::watch`],
-    /// installed after each handler/lifecycle hook completes. Ephemeral
-    /// activation state (**E3**): a rehydrated entity re-watches from its folded
-    /// state in `on_activate`.
-    pending_watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
 }
 
 impl<G: Entity> Host<G> {
     /// Build a fresh, un-rehydrated activation. Rehydration happens in
     /// [`Actor::started`], where the journal's authoritative head is reachable.
-    #[allow(clippy::too_many_arguments)] // one private call site, the gateway's activation
     pub(crate) fn new(
-        entity_type: &'static str,
         entity: G,
-        name: EntityName,
         shard: u32,
-        journal: Arc<dyn DynEntityJournal>,
+        activation: Arc<Activation<G>>,
         config: EntityConfig,
-        capabilities: &crate::node::NodeCapabilities,
-        gateway: ActorRef<Gateway<G>>,
+        metrics: Arc<dyn crate::metrics::EntityMetrics>,
         alarm_index: Option<Entities<AlarmIndex<G::System>>>,
         committed: CommittedCell,
     ) -> Host<G> {
@@ -249,38 +257,22 @@ impl<G: Entity> Host<G> {
             head: Seq::ZERO,
             committed,
             last_snapshot: Seq::ZERO,
-            entity_type,
-            name,
+            activation,
             shard,
-            journal,
-            metrics: Arc::clone(capabilities.metrics()),
-            blocking_io: Arc::clone(capabilities.blocking_io()),
+            metrics,
             config,
-            gateway,
             last_active: actor_core::Instant::ZERO,
             sinks: Vec::new(),
-            facets: Arc::new(FacetCell::new()),
             alarm_epoch: 0,
             alarm_index,
             index_sync: IndexSync::Unsynced,
             sync_epoch: 0,
-            pending_watches: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     /// Build the handler/lifecycle context for the entity (§4.3).
     fn entity_ctx(&self, ctx: &Ctx<Host<G>>) -> EntityCtx<G> {
-        EntityCtx::new(
-            self.entity_type,
-            self.name.clone(),
-            ctx.system().clone(),
-            self.gateway.clone(),
-            Arc::clone(&self.journal),
-            Arc::clone(&self.committed),
-            Arc::clone(&self.facets),
-            Arc::clone(&self.pending_watches),
-            Arc::clone(&self.blocking_io),
-        )
+        EntityCtx::new(Arc::clone(&self.activation), ctx.system().clone())
     }
 
     /// Install the death watches the entity queued through [`EntityCtx::watch`]
@@ -288,7 +280,7 @@ impl<G: Entity> Host<G> {
     /// mailbox. Called after each handler/lifecycle hook completes, so a watch
     /// requested mid-command is live before the reply releases.
     fn register_watches(&self, ctx: &Ctx<Host<G>>) {
-        let targets = std::mem::take(&mut *self.pending_watches.lock().expect("watch queue lock"));
+        let targets = std::mem::take(&mut *self.activation.watches.lock().expect("watch queue lock"));
         for target in targets {
             ctx.watch_id(target);
         }
@@ -301,7 +293,7 @@ impl<G: Entity> Host<G> {
     /// nodes' materializations of the same entity on one path.
     fn facet_env(&self, ctx: &Ctx<Host<G>>) -> FacetEnv {
         FacetEnv::new(
-            EntityBlobs::new(Arc::clone(&self.journal), self.name.clone()),
+            EntityBlobs::new(Arc::clone(&self.activation.journal), self.activation.name.clone()),
             self.config
                 .scratch_dir()
                 .join(ctx.system().node().to_string()),
@@ -323,11 +315,12 @@ impl<G: Entity> Host<G> {
         // read-repair, so an entity activating on a freshly-elected leader never
         // rebuilds from a stale head and then serves stale reads; it fails fast with
         // `Unavailable` while the shard is still electing (§8.3).
-        let head = self.journal.head(&self.name).await.map_err(boxed)?;
+        let head = self.activation.journal.head(&self.activation.name).await.map_err(boxed)?;
 
         let (mut seq, from_snapshot) = match self
+            .activation
             .journal
-            .load_snapshot(&self.name)
+            .load_snapshot(&self.activation.name)
             .await
             .map_err(boxed)?
         {
@@ -341,13 +334,13 @@ impl<G: Entity> Host<G> {
                 // Adopt facet 0's chunks as its roots before fetching them: from
                 // here they are the durable manifest's, and the previous
                 // activation's are gone (**F3**).
-                self.facets.adopt_state_chunks(composite.state.chunks());
+                self.activation.facets.adopt_state_chunks(composite.state.chunks());
                 let state = composite.state.load(env.blobs()).await.map_err(boxed)?;
                 self.state = actor_serialization::decode(&*codec, &state).map_err(boxed)?;
                 let forms = G::Facets::restore(&composite.facets, &env)
                     .await
                     .map_err(boxed)?;
-                self.facets.install(forms);
+                self.activation.facets.install(forms);
                 self.last_snapshot = s_seq;
                 (s_seq, true)
             }
@@ -367,7 +360,7 @@ impl<G: Entity> Host<G> {
                 let forms = G::Facets::restore(&[], &self.facet_env(ctx))
                     .await
                     .map_err(boxed)?;
-                self.facets.install(forms);
+                self.activation.facets.install(forms);
                 self.last_snapshot = Seq::ZERO;
                 (Seq::ZERO, false)
             }
@@ -376,8 +369,9 @@ impl<G: Entity> Host<G> {
         let mut replayed = 0u64;
         loop {
             let batch = self
+                .activation
                 .journal
-                .load(&self.name, seq, REPLAY_BATCH)
+                .load(&self.activation.name, seq, REPLAY_BATCH)
                 .await
                 .map_err(boxed)?;
             // Defence in depth for the fold (E3): the replay cursor starts at the
@@ -405,7 +399,7 @@ impl<G: Entity> Host<G> {
                         actor_serialization::decode(&*codec, payload).map_err(boxed)?;
                     G::apply(&mut self.state, &event);
                 } else {
-                    self.facets.fold_replay(tag, payload).map_err(boxed)?;
+                    self.activation.facets.fold_replay(tag, payload).map_err(boxed)?;
                 }
                 seq = s;
                 replayed += 1;
@@ -420,7 +414,7 @@ impl<G: Entity> Host<G> {
         // Resolve blob-referencing facet records into their materializations (spec
         // §7.15): replay folded them into a pending set (F1 holds on the recorded
         // bytes), and the fetch-and-apply runs here, once, before `on_activate`.
-        self.facets
+        self.activation.facets
             .rehydrate(&self.facet_env(ctx))
             .await
             .map_err(boxed)?;
@@ -441,23 +435,23 @@ impl<G: Entity> Host<G> {
         let node = ctx.system().node();
         ctx.system().emit_entity_event(EntityEvent::Rehydrated {
             node,
-            name: self.name.clone(),
+            name: self.activation.name.clone(),
             from_snapshot,
             replayed,
         });
         ctx.system().emit_entity_event(EntityEvent::Activated {
             node,
-            name: self.name.clone(),
+            name: self.activation.name.clone(),
         });
         // What a cold access cost, and one more entity resident (§13); the
         // `Deactivated` decrement is the pair that makes the gauge track the working
         // set hibernation is meant to bound (§10).
         self.metrics.rehydrated(
-            self.entity_type,
+            self.activation.entity_type,
             ctx.system().now().duration_since(rehydrate_started),
             replayed,
         );
-        self.metrics.activation_delta(self.entity_type, 1);
+        self.metrics.activation_delta(self.activation.entity_type, 1);
         self.schedule_idle_check(ctx);
         // Re-arm the durable alarm from the rehydrated form (spec §7.16), so firing
         // survives deactivation (**E3**).
@@ -489,7 +483,7 @@ impl<G: Entity> Host<G> {
         ) -> BoxFuture<'a, (Vec<G::Event>, R)>,
     ) -> Result<R, EntityError> {
         self.last_active = ctx.system().now();
-        if let Err(e) = self.facets.begin() {
+        if let Err(e) = self.activation.facets.begin() {
             // A physical facet could not open its per-command work: the
             // materialization can no longer be trusted (E20).
             self.forced_step_down(ctx).await;
@@ -553,7 +547,7 @@ impl<G: Entity> Host<G> {
             match actor_serialization::encode(&*codec, event) {
                 Ok(bytes) => encoded.push(tag_record(EVENT_TAG, &bytes)),
                 Err(e) => {
-                    self.facets.abandon();
+                    self.activation.facets.abandon();
                     return Err(EntityError::Call(CallError::Serialization(e.to_string())));
                 }
             }
@@ -562,7 +556,7 @@ impl<G: Entity> Host<G> {
         // 3. Seal and drain the facet stages into tagged records (§7.12): a
         //    physical facet commits its local transaction and captures the delta
         //    here (§7.14). All records join one atomic batch (**E19**).
-        let facet_records = match self.facets.seal_and_drain() {
+        let facet_records = match self.activation.facets.seal_and_drain() {
             Ok(records) => records,
             Err(e) => {
                 // A physical local commit failed: the materialization is tainted;
@@ -595,9 +589,9 @@ impl<G: Entity> Host<G> {
         // outcome it actually got, recorded on every arm below. Kept here rather than
         // in the journal because this is the only place that sees both.
         let started = ctx.system().now();
-        let appended = self.journal.append(&self.name, self.head, encoded).await;
+        let appended = self.activation.journal.append(&self.activation.name, self.head, encoded).await;
         self.metrics.commit(
-            self.entity_type,
+            self.activation.entity_type,
             match &appended {
                 AppendOutcome::Committed(_) => CommitOutcome::Committed,
                 AppendOutcome::NotLeader(_) => CommitOutcome::NotLeader,
@@ -628,7 +622,7 @@ impl<G: Entity> Host<G> {
                 // fold its own just-drained record leaves the in-memory forms
                 // untrustworthy, so step down and let rehydration rebuild (E3).
                 for (tag, payload) in &facet_records {
-                    if let Err(e) = self.facets.fold_live(*tag, payload) {
+                    if let Err(e) = self.activation.facets.fold_live(*tag, payload) {
                         self.forced_step_down(ctx).await;
                         return Err(EntityError::Unavailable(format!("facet fold: {e}")));
                     }
@@ -638,7 +632,7 @@ impl<G: Entity> Host<G> {
                     .store(new_head.value(), std::sync::atomic::Ordering::Release);
                 ctx.system().emit_entity_event(EntityEvent::Committed {
                     node: ctx.system().node(),
-                    name: self.name.clone(),
+                    name: self.activation.name.clone(),
                     shard: self.shard,
                     seq: new_head.value(),
                 });
@@ -677,10 +671,10 @@ impl<G: Entity> Host<G> {
     /// `Activated` gets a matching `Deactivated`/`NodeDown`, the basis of the
     /// **E6** singleton checker.
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
-        self.metrics.activation_delta(self.entity_type, -1);
+        self.metrics.activation_delta(self.activation.entity_type, -1);
         ctx.system().emit_entity_event(EntityEvent::Deactivated {
             node: ctx.system().node(),
-            name: self.name.clone(),
+            name: self.activation.name.clone(),
         });
         ctx.stop();
     }
@@ -693,7 +687,7 @@ impl<G: Entity> Host<G> {
     /// is unwritable (the [`EntityCtx`] exposes no `persist`). Unlike idle
     /// hibernation (§10) it takes **no snapshot**.
     async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
-        self.facets.discard();
+        self.activation.facets.discard();
         let ectx = self.entity_ctx(ctx);
         self.entity.on_deactivate(&ectx).await;
         self.step_down(ctx);
@@ -736,12 +730,12 @@ impl<G: Entity> Host<G> {
             return;
         };
         let env = self.facet_env(ctx);
-        let Ok(state) = StatePayload::store(state, env.blobs(), &self.facets.state_roots()).await
+        let Ok(state) = StatePayload::store(state, env.blobs(), &self.activation.facets.state_roots()).await
         else {
             return;
         };
-        self.facets.keep_state_chunks(state.chunks());
-        let forms = self.facets.forms();
+        self.activation.facets.keep_state_chunks(state.chunks());
+        let forms = self.activation.facets.forms();
         let Ok(facets) = G::Facets::snapshot(&forms, &env).await else {
             return;
         };
@@ -749,14 +743,15 @@ impl<G: Entity> Host<G> {
             return;
         };
         if let AppendOutcome::Committed(at) = self
+            .activation
             .journal
-            .save_snapshot(&self.name, self.head, bytes)
+            .save_snapshot(&self.activation.name, self.head, bytes)
             .await
         {
             self.last_snapshot = at;
             ctx.system().emit_entity_event(EntityEvent::Snapshotted {
                 node: ctx.system().node(),
-                name: self.name.clone(),
+                name: self.activation.name.clone(),
                 at: at.value(),
             });
         }
@@ -808,7 +803,7 @@ impl<G: Entity> Host<G> {
         // Keep the per-shard index current before (re)arming the local timer (§7.16).
         self.sync_alarm_index(ctx);
         self.alarm_epoch = self.alarm_epoch.wrapping_add(1);
-        let Some(due_nanos) = self.facets.alarm_due() else {
+        let Some(due_nanos) = self.activation.facets.alarm_due() else {
             return;
         };
         let epoch = self.alarm_epoch;
@@ -838,7 +833,7 @@ impl<G: Entity> Host<G> {
         let Some(index) = self.alarm_index.clone() else {
             return;
         };
-        let due = self.facets.alarm_due();
+        let due = self.activation.facets.alarm_due();
         match self.index_sync {
             IndexSync::Acked { due: d } | IndexSync::Pending { due: d } if d == due => return,
             _ => {}
@@ -846,8 +841,8 @@ impl<G: Entity> Host<G> {
         self.sync_epoch = self.sync_epoch.wrapping_add(1);
         self.index_sync = IndexSync::Pending { due };
         let epoch = self.sync_epoch;
-        let key = index_key(self.entity_type, self.shard as usize);
-        let name = self.name.clone();
+        let key = index_key(self.activation.entity_type, self.shard as usize);
+        let name = self.activation.name.clone();
         let head = self.head.value();
         let me: ActorRef<Host<G>> = ctx.this();
         ctx.system().launch(Box::pin(async move {
@@ -955,7 +950,7 @@ impl<G: Entity> Handler<AlarmDue> for Host<G> {
             return;
         }
         let now = ctx.system().now();
-        match self.facets.alarm_due() {
+        match self.activation.facets.alarm_due() {
             // Due: fire `on_alarm` through the durability barrier. A failed commit
             // steps the activation down (the journal is the authority, E3); the
             // next activation re-arms from the folded due.
@@ -1013,7 +1008,7 @@ impl<G: Entity> Handler<CheckIdle> for Host<G> {
         // time with no caller. Anything short of that keeps the safe default: stay
         // resident, where the local timer guarantees the fire, and let the
         // reschedule below retry the registration.
-        let alarm_covered = match self.facets.alarm_due() {
+        let alarm_covered = match self.activation.facets.alarm_due() {
             None => true,
             due => matches!(self.index_sync, IndexSync::Acked { due: acked } if acked == due),
         };

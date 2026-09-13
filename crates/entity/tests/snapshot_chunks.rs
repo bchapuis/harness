@@ -1,4 +1,4 @@
-//! Facet 0's state through the blob area (entity §7.12).
+//! Facet 0's state through the blob area (entity §9).
 //!
 //! A composite snapshot used to carry the entity's whole encoded `State` inline, so
 //! a snapshot cost what the entity had accumulated, and on the `Quorum` tier that
@@ -25,7 +25,6 @@ use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::EntityName;
-use entity::store::EntityBlobStore;
 use entity::store::EntityStore;
 use entity::store::MemoryEntityStore;
 use serde::Deserialize;

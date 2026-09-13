@@ -6,8 +6,8 @@
 //! with [`default_invariants`](crate::default_invariants), so a checker added in
 //! code but not recorded here, or the reverse, fails the build.
 
-/// How a §18.5 invariant is verified: the machine-readable form of the §17
-/// conformance table's "Verified by" column.
+/// How a §18.5 invariant is verified: the method the catalogue assigns it, which
+/// §17 makes the conformance criterion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verify {
     /// A continuous [`Invariant`](crate::Invariant) in

@@ -32,6 +32,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use entity::Entity;
+use entity::EntityConfig;
 use entity::EntityName;
 use entity::Entities;
 use entity::EntityExt;
@@ -180,18 +181,20 @@ impl<S: HarnessSystem> Gateway<S> {
 
 /// Join the cluster as a client and build the [`Gateway`]: poll until both the
 /// kinds' and the directory's host gateways have gossiped into this client's
-/// receptionist, then assemble the shared state. `directory_shards` MUST match the
-/// nodes' `Directory` shards (the entity default). Errors if discovery does not
-/// complete within `timeout`.
+/// receptionist, then assemble the shared state. The directory rides the entity
+/// default shard count on both sides (the nodes host it with `EntityConfig`'s
+/// default, and there is no flag for it either side), so a name hashes to the
+/// same shard here as there. Errors if discovery does not complete within
+/// `timeout`.
 pub async fn connect<S: HarnessSystem>(
     system: S,
     roster: &[(String, usize)],
-    directory_shards: usize,
     tokens: Arc<dyn TokenVerifier>,
     limits: Limits,
     timeout: Duration,
 ) -> Result<Arc<Gateway<S>>, String> {
     let directory_type = <Directory<S> as Entity>::ENTITY_TYPE;
+    let directory_shards = EntityConfig::default().shards;
     let deadline = system.now() + timeout;
     loop {
         let harness = Harness::client(system.clone(), roster);

@@ -16,6 +16,7 @@ use agent::SandboxProfile;
 use agent::SandboxProvider;
 use agent::SessionId;
 use agent::Tier;
+use agent::ToolDecl;
 use agent::ToolError;
 use agent::session::content_digest;
 use serde_json::Value;
@@ -183,6 +184,57 @@ impl TieredSandboxes {
     pub fn stats(&self) -> &TierStats {
         &self.stats
     }
+
+    /// The tool declarations this provider, as configured, answers: the
+    /// `Workspace` file tools always; `run_js` once the QuickJS runner is
+    /// registered; and `shell` in the declaration of the native realization
+    /// configured (the microVM's sync semantics are model-visible, so its
+    /// declaration differs from the container's). A deployment registers
+    /// exactly these on its kinds, so the digest cannot assert an environment
+    /// this provider does not have.
+    pub fn tools(&self) -> Vec<ToolDecl> {
+        let mut tools = crate::workspace::workspace_tools();
+        tools.extend(self.run_js());
+        tools.extend(self.shell());
+        tools
+    }
+
+    /// `run_js`, once the QuickJS runner module is registered.
+    fn run_js(&self) -> Option<ToolDecl> {
+        #[cfg(feature = "compute")]
+        {
+            self.modules
+                .contains_key(crate::compute::QJS_MODULE)
+                .then(crate::compute::run_js_tool)
+        }
+        #[cfg(not(feature = "compute"))]
+        {
+            None
+        }
+    }
+
+    /// Whether this provider serves a `shell` tool. The deployment's guidance to
+    /// the model turns on it, and which tiers are configured is the provider's to
+    /// answer, not something a caller should re-derive from a declaration's name.
+    pub fn has_shell(&self) -> bool {
+        self.shell().is_some()
+    }
+
+    /// `shell`, in the declaration of the native realization configured.
+    fn shell(&self) -> Option<ToolDecl> {
+        #[cfg(feature = "firecracker")]
+        if self.firecracker.is_some() {
+            return Some(crate::firecracker::fc_shell_tool());
+        }
+        #[cfg(feature = "native")]
+        {
+            Some(crate::native::shell_tool())
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            None
+        }
+    }
 }
 
 /// The committed QuickJS runner artifact (feature `quickjs`): a hermetic
@@ -195,6 +247,16 @@ pub fn quickjs_module() -> Arc<[u8]> {
 }
 
 impl SandboxProvider for TieredSandboxes {
+    /// Open a session's environment over `workspace`, the directory the caller
+    /// owns (S1). Refused, as a [`SandboxError`], is any profile whose egress
+    /// allowlist is non-empty or whose explicit cap contains `Network`:
+    /// holding `Native` implies `Network`'s grants (sandbox spec §2.2), and
+    /// neither native realization has a dataplane (`--network none` for the
+    /// container, no network device in the microVM), so both deliver exactly
+    /// an empty allowlist, and a profile asking for more must fail loudly here
+    /// rather than have a granted capability silently withheld. The refusal
+    /// is unconditional under every feature set, so this contract does not
+    /// vary with which tiers a build compiles in (sandbox spec §3.5).
     fn open(
         &self,
         session: &SessionId,
@@ -208,14 +270,7 @@ impl SandboxProvider for TieredSandboxes {
         let limits = profile.compute;
         #[cfg(feature = "compute")]
         let modules = Arc::new(self.modules.clone());
-        // §2.2 of the sandbox spec: holding `Native` implies `Network`'s
-        // grants. Neither native realization has a dataplane (the container
-        // runs `--network none`, the microVM has no network device), so both
-        // deliver exactly an *empty* egress allowlist. A profile that names
-        // egress (or explicitly caps in `Network`) asks for a dataplane this
-        // provider does not have: fail the open loudly, never silently
-        // withhold a granted capability. Unconditional: `open`'s contract
-        // must not vary with cargo features.
+        // The `Network` refusal this method's contract states.
         if !profile.egress.is_empty()
             || profile
                 .tier_cap
@@ -325,6 +380,10 @@ struct NativeSpec {
 #[cfg(feature = "native")]
 #[derive(Clone)]
 enum NativeEnv {
+    /// The kind's profile names no image: every `Native` call fails identically,
+    /// with or without a container runtime or a hypervisor installed, and no
+    /// environment is ever provisioned.
+    Unconfigured,
     Docker(Arc<crate::native::NativeTier>),
     #[cfg(feature = "firecracker")]
     MicroVm(Arc<crate::firecracker::FirecrackerTier>),
@@ -340,6 +399,9 @@ impl NativeEnv {
         name: &str,
         stats: TierStats,
     ) -> NativeEnv {
+        if spec.image.is_empty() {
+            return NativeEnv::Unconfigured;
+        }
         #[cfg(feature = "firecracker")]
         if let Some(config) = spec.firecracker {
             return NativeEnv::MicroVm(Arc::new(crate::firecracker::FirecrackerTier::new(
@@ -360,16 +422,31 @@ impl NativeEnv {
             stats,
         )))
     }
+    /// Execute one Native call (`shell` only): the declaration's checks once,
+    /// then the configured realization runs the command.
     async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
+        if name != "shell" {
+            return Err(unknown_tool(name));
+        }
+        let command = input
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::InvalidArguments("`command` must be a string".to_string()))?;
         match self {
-            NativeEnv::Docker(tier) => tier.call(name, input).await,
+            NativeEnv::Unconfigured => Err(ToolError::Sandbox(
+                "native: the kind's SandboxProfile.image is empty; the Native tier needs an \
+                 image (a container image, or the microVM's base rootfs) and pulls no default"
+                    .to_string(),
+            )),
+            NativeEnv::Docker(tier) => tier.run(command).await,
             #[cfg(feature = "firecracker")]
-            NativeEnv::MicroVm(tier) => tier.call(name, input).await,
+            NativeEnv::MicroVm(tier) => tier.run(command).await,
         }
     }
 
     async fn release(&self) {
         match self {
+            NativeEnv::Unconfigured => {}
             NativeEnv::Docker(tier) => tier.release().await,
             #[cfg(feature = "firecracker")]
             NativeEnv::MicroVm(tier) => tier.release().await,

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use actor_core::Actor;
 use actor_core::ActorRef;
+use actor_core::Backoff;
 use actor_core::CallError;
 use actor_core::Ctx;
 use actor_core::Handler;
@@ -36,22 +37,27 @@ use entity::store::Subscription;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::future::select;
+use serde_json::Value;
 
 use crate::agent::Agent;
-use crate::agent::AttachOutcome;
 use crate::agent::Cancel;
 use crate::agent::RunCompleted;
-use crate::agent::submit_and_attach;
+use crate::agent::Submit;
+use crate::agent::SubmitReject;
+use crate::config::HarnessConfig;
 use crate::kind::Kind;
 use crate::kind::Kinds;
 use crate::model::Model;
 use crate::sandbox::SandboxProvider;
+use crate::session::ChildRef;
 use crate::session::KindId;
+use crate::session::Lineage;
 use crate::session::Record;
 use crate::session::RunOutcome;
 use crate::session::SessionId;
 use crate::session::Turn;
 use crate::session::TurnId;
+use crate::tool::ToolError;
 
 /// Interned entity-type names, keyed by kind name (entity keys purely by string,
 /// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
@@ -84,60 +90,6 @@ fn leak_entity_type(kind_id: &KindId) -> &'static str {
 pub trait HarnessSystem: EntitySystem {}
 
 impl<S: EntitySystem> HarnessSystem for S {}
-
-/// Harness tuning (agent spec §7.2, §9.1): the few knobs the spec calls
-/// configurable. Idle/snapshot/shard policy is per-kind `EntityConfig` (§7.1),
-/// not here; durability retries are the entity's.
-#[derive(Clone, Debug)]
-pub struct HarnessConfig {
-    /// Default deadline bounding a caller's wait on `prompt` (§7.3), never the
-    /// run, which continues unaffected when the caller times out.
-    pub submit_deadline: Duration,
-    /// Default per-tool execution bound (§5.3 item 3), overridable per
-    /// declaration. SHOULD default to about 5 minutes. Timed against the virtual
-    /// `Clock`, so the bound is deterministic under simulation.
-    pub tool_timeout: Duration,
-    /// The token floor below which no model call is issued (§9.1 item 2): a
-    /// near-zero `max_tokens` call still pays its full input. Defaults to the
-    /// default per-call `max_tokens` ([`ModelParams`](crate::ModelParams)), so a
-    /// run stops rather than issue a final call that cannot fit a full-size
-    /// response; set to 0 to disable the floor.
-    pub budget_floor: u64,
-    /// Floor of a delegating parent's total wait on a child run (§8.1): the
-    /// wait is this floor plus [`child_wait_per_step`](Self::child_wait_per_step)
-    /// × the child's carved `steps`, so even a zero-step carve gets a grace
-    /// window for queueing and transport.
-    pub child_wait_floor: Duration,
-    /// Per-step allowance in the child wait (§8.1). The carve's `steps` bound
-    /// the whole subtree's model calls (§9.1 item 3), so steps are the right
-    /// scale for how long a child may legitimately take; the allowance covers
-    /// one model call plus its tool round, so it SHOULD be at least the tool
-    /// timeout.
-    pub child_wait_per_step: Duration,
-}
-
-impl HarnessConfig {
-    /// A delegating parent's total wait on a child run (§8.1), scaled to the
-    /// child's carved budget: `child_wait_floor + child_wait_per_step × steps`.
-    /// Past it the delegation resolves as a `ToolError` for the parent's model;
-    /// the child run continues, its budget the backstop (§9.2 item 3).
-    pub fn child_wait(&self, budget: &crate::Budget) -> Duration {
-        self.child_wait_floor
-            .saturating_add(self.child_wait_per_step.saturating_mul(budget.steps))
-    }
-}
-
-impl Default for HarnessConfig {
-    fn default() -> Self {
-        HarnessConfig {
-            submit_deadline: Duration::from_secs(30),
-            tool_timeout: Duration::from_secs(300),
-            budget_floor: crate::ModelParams::default().max_tokens,
-            child_wait_floor: Duration::from_secs(600),
-            child_wait_per_step: Duration::from_secs(300),
-        }
-    }
-}
 
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
 /// activation it hosts (§7.4): the per-kind entity directory (for routing and
@@ -838,4 +790,152 @@ impl<S: HarnessSystem> Drop for MailboxGuard<S> {
             let _ = mailbox.tell(Discard).await;
         }));
     }
+}
+
+// ===========================================================================
+// The attach protocol (§7.4, §8.1): one submit-and-await attempt, and the two
+// loops over it.
+// ===========================================================================
+
+/// How many *consecutive* times an unreachable child is retried before a
+/// delegation gives up (§8.1): past it the child surfaces as a tool failure
+/// (§5.4), with the child's budget as the backstop (§9.2 item 3). A transport
+/// bound, backed off between tries; any successful contact resets it. Distinct
+/// from the wait on a reachable-but-slow child, which is budget-scaled config
+/// ([`HarnessConfig::child_wait`], §8.1).
+const TRANSPORT_RETRIES: u32 = 32;
+
+/// The outcome of one [`submit_and_attach`] attempt. The *policy* (when to give
+/// up, when to retry) is the caller's loop: the two callers bound it differently
+/// (§7.4, §8.1).
+pub(crate) enum AttachOutcome {
+    /// The run finished and delivered its outcome.
+    Completed(RunOutcome),
+    /// The submit was accepted but the wait lapsed (or the mailbox dropped):
+    /// re-submitting the same `TurnId` re-attaches (A7).
+    Lapsed,
+    /// The submit was permanently rejected (§7.4): never worth retrying.
+    Rejected(SubmitReject),
+    /// The entity was unreachable: a transport failure a retry might clear.
+    Unreachable(EntityError),
+}
+
+/// One submit-and-await-outcome attempt against an entity (§7.4): spawn an
+/// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
+/// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
+/// because re-submitting the same `TurnId` is idempotent (A7). The mailbox
+/// lives exactly as long as the attempt: a [`MailboxGuard`] stops it on every
+/// path that ends without an outcome (including this future being dropped),
+/// so a re-attach replaces the mailbox rather than accumulating one per
+/// attempt (§7.4).
+pub(crate) async fn submit_and_attach<S: HarnessSystem>(
+    system: &S,
+    entity: &entity::EntityRef<Agent<S>>,
+    kind: &KindId,
+    turn: &Turn,
+    parent: Option<&Lineage>,
+    within: Duration,
+) -> AttachOutcome {
+    let (tx, rx) = oneshot::channel::<RunOutcome>();
+    let mailbox = system.spawn(ReplyMailbox::new(tx));
+    let guard = MailboxGuard::new(system.clone(), mailbox.clone());
+    let submit = Submit {
+        kind: kind.clone(),
+        turn: turn.clone(),
+        parent: parent.cloned(),
+        reply_to: Some(mailbox),
+    };
+    match entity.ask_timeout(submit, within).await {
+        Ok(Ok(_accepted)) => {
+            let sleep = system.sleep(within);
+            match select(rx, sleep).await {
+                Either::Left((Ok(outcome), _)) => {
+                    // Delivered: the mailbox already stopped itself.
+                    guard.disarm();
+                    AttachOutcome::Completed(outcome)
+                }
+                Either::Left((Err(_), _)) | Either::Right(((), _)) => AttachOutcome::Lapsed,
+            }
+        }
+        Ok(Err(reject)) => AttachOutcome::Rejected(reject),
+        Err(call_error) => AttachOutcome::Unreachable(call_error),
+    }
+}
+
+/// Submit to a child and await its outcome (§8.1 step 2), with the derived
+/// `TurnId` keeping every re-attempt safe (A7). Re-attaches on the `cadence`
+/// (each lapse re-registers on whatever activation now hosts the child, §7.5)
+/// until the budget-scaled `wait` lapses; retries a consecutively unreachable
+/// child up to [`TRANSPORT_RETRIES`] with backoff. Maps the child's
+/// `RunOutcome` onto this delegation's tool outcome (§5.4). A give-up resolves
+/// the call only for the parent: the child run continues, its budget the
+/// backstop (§9.2 item 3).
+pub(crate) async fn run_child<S: HarnessSystem>(
+    system: S,
+    child_ref: entity::EntityRef<Agent<S>>,
+    child: &ChildRef,
+    prompt: String,
+    parent: Lineage,
+    cadence: Duration,
+    wait: Duration,
+) -> Result<Value, ToolError> {
+    let turn = Turn {
+        id: child.turn.clone(),
+        content: prompt,
+        budget: Some(child.budget),
+    };
+    let started = system.now();
+    let mut unreachable = 0;
+    loop {
+        let elapsed = system.now().duration_since(started);
+        let Some(remaining) = wait.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
+            return Err(ToolError::Delegation(format!(
+                "child run did not complete within its {}s budget-scaled wait",
+                wait.as_secs()
+            )));
+        };
+        match submit_and_attach(
+            &system,
+            &child_ref,
+            &child.kind,
+            &turn,
+            Some(&parent),
+            cadence.min(remaining),
+        )
+        .await
+        {
+            AttachOutcome::Completed(outcome) => {
+                return match outcome {
+                    Ok(completion) => Ok(Value::String(completion.text().to_string())),
+                    Err(run_error) => Err(ToolError::Delegation(run_error.to_string())),
+                };
+            }
+            // The child accepted: it is reachable, whatever came before.
+            AttachOutcome::Lapsed => unreachable = 0,
+            AttachOutcome::Rejected(reject) => {
+                return Err(ToolError::Delegation(format!(
+                    "child rejected the submit: {reject}"
+                )));
+            }
+            AttachOutcome::Unreachable(call_error) => {
+                unreachable += 1;
+                if unreachable >= TRANSPORT_RETRIES {
+                    return Err(ToolError::Delegation(format!(
+                        "child unreachable: {call_error:?}"
+                    )));
+                }
+                system.sleep(child_backoff(unreachable)).await;
+            }
+        }
+    }
+}
+
+/// Exponential backoff between transport retries of a child submit, capped
+/// (core §11.2).
+fn child_backoff(attempt: u32) -> Duration {
+    Backoff::Exponential {
+        base: Duration::from_millis(200),
+        max: Duration::from_secs(2),
+    }
+    .delay(attempt)
 }

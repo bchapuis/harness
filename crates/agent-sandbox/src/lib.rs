@@ -37,16 +37,9 @@
 //!   model-visible. Builds everywhere; *runs* on Linux with `/dev/kvm`,
 //!   against the assets `guest/fc-rootfs/build.sh` produces.
 //! - **`Network`**: not offered. A call carrying it fails as a `ToolError`
-//!   outcome the model reacts to (agent spec §5.4), and the
-//!   registration-time cap check makes such a call unreachable in a
-//!   correctly configured deployment (agent spec §5.3 item 4). Under every
-//!   feature set alike, a profile that *names* egress (or explicitly caps in
-//!   `Network`) fails at `open` instead, as a `SandboxError` the agent runtime
-//!   turns into a `ToolError` outcome per call that needed the sandbox:
-//!   holding `Native` implies `Network`'s grants (sandbox spec §2.2), and
-//!   neither native realization has a dataplane (`--network none` for the
-//!   container, no network device in the microVM), so both deliver exactly
-//!   an empty allowlist.
+//!   outcome the model reacts to (agent spec §5.4), and a profile that names
+//!   egress is refused at [`open`](agent::SandboxProvider::open), whose doc on
+//!   [`TieredSandboxes`] states the rule.
 //!
 //! The S-catalogue (sandbox spec §6) is machine-readable beside this crate's
 //! conformance suite, in `tests/support/mod.rs`.
@@ -76,19 +69,11 @@ mod provider;
 #[cfg(feature = "workspace")]
 mod workspace;
 
-#[cfg(feature = "compute")]
-pub use compute::run_js_tool;
 #[cfg(feature = "firecracker")]
 pub use firecracker::FirecrackerConfig;
-#[cfg(feature = "firecracker")]
-pub use firecracker::fc_shell_tool;
-#[cfg(feature = "native")]
-pub use native::shell_tool;
 #[cfg(feature = "workspace")]
 pub use provider::TierStats;
 #[cfg(feature = "workspace")]
 pub use provider::TieredSandboxes;
 #[cfg(feature = "quickjs")]
 pub use provider::quickjs_module;
-#[cfg(feature = "workspace")]
-pub use workspace::workspace_tools;

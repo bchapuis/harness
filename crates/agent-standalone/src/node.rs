@@ -35,9 +35,8 @@ use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
 use actor_runtime::TokioClock;
 use entity::Entities;
-use entity::EntityExt;
+use entity::cluster::EntityNode;
 use agent::Budget;
-use agent::FileEntityStore;
 use agent::EntityStoreFactory;
 use agent::EntityConfig;
 use agent::Harness;
@@ -48,6 +47,7 @@ use agent::Kinds;
 use agent::Model;
 use agent::ModelParams;
 use agent::SandboxProvider;
+use agent::ToolDecl;
 use agent_anthropic::AnthropicModel;
 
 use tenancy::Directory;
@@ -157,16 +157,8 @@ impl Default for NodeOptions {
     }
 }
 
-/// The most a stop waits on the shard handoff. The handoff is bounded on its
-/// own (entity's `hand_off_leadership`: a fixed number of rounds, each one
-/// transfer round trip per led shard), so this is the backstop against a
-/// transport that stops answering, sized well inside the unit's 120 s stop
-/// budget (`deploy/systemd`).
-const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a stop waits after announcing `Leaving` before releasing the
-/// transport: two SWIM rounds at the default probe interval, so the gossip
-/// carries the departure to peers and the control leader commits it.
+/// Two SWIM rounds at the default probe interval, the departure's gossip
+/// window; see [`actor_runtime::depart`].
 const LEAVE_GRACE: Duration = Duration::from_secs(2);
 
 /// Boot the node and host its entities until SIGTERM or SIGINT, then stop
@@ -238,47 +230,49 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    // One durable entity store under --data (§7.4), shared by the session kinds and
-    // the tenancy directory. Its factory caches per node, so every entity type shares
-    // one on-disk store keyed by (shard, entity), the entity analogue of the Raft WAL.
-    let entity_store = FileEntityStore::factory(opts.data.join("entities"), codec.as_ref());
-    // This node's shared entity capabilities, set once here and used for every entity
-    // type it hosts (entity §7.4, §13).
-    //
-    // The I/O pool: without it every fsync runs on the tokio worker that is also
-    // driving this node's Raft heartbeats and its shards' quorum waits, so a slow disk
-    // becomes spurious elections and a rehydration storm rather than just slow writes.
-    // The metrics registry: commit latency by outcome, rehydration cost, and the
-    // resident entity count; the signals that say whether this node's shards are
-    // healthy. Distinct from the event stream, which is shaped for the simulator's
-    // checkers, not for an operator.
-    let entity_node = system
-        .entity_node()
-        .blocking_io(Arc::new(entity::store::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(entity::store::AtomicEntityMetrics::new()));
+    // One durable node under --data (entity §7.4, §13): the store the session kinds
+    // and the tenancy directory share, the I/O pool, and the metrics registry.
+    let (entity_node, entity_store) =
+        EntityNode::durable(system.clone(), &opts.data);
     // Every mode runs over the agent entity's own workspace facet (see `SandboxMode`);
-    // the provider just opens the supplied directory.
-    let sandboxes: Arc<dyn SandboxProvider> = match &sandbox_mode {
-        SandboxMode::Docker { cli, .. } => Arc::new(
+    // the provider just opens the supplied directory. The tool declarations the
+    // kinds carry are the provider's answer, so a kind cannot declare an
+    // environment this node does not have.
+    // One match: the mode decides the provider and the profile image its kinds
+    // carry, and every other question about the environment is the provider's to
+    // answer (its tool declarations, and whether it serves a shell).
+    let (sandboxes, profile) = match &sandbox_mode {
+        SandboxMode::Docker { cli, image } => (
             agent_sandbox::TieredSandboxes::new()
                 .with_container_cli(cli.clone())
                 // The hermetic JS surface, so `run_js` runs without any
                 // language runtime in the container (sandbox spec §3.2).
                 .with_quickjs(),
+            Some(agent::SandboxProfile::image(image)),
         ),
-        SandboxMode::Firecracker { binary, kernel, .. } => Arc::new(
+        SandboxMode::Firecracker {
+            binary,
+            kernel,
+            rootfs,
+        } => (
             agent_sandbox::TieredSandboxes::new()
                 .with_firecracker(agent_sandbox::FirecrackerConfig::new(binary, kernel))
                 // The hermetic JS surface, alongside the microVM shell.
                 .with_quickjs(),
+            // The profile image carries the rootfs path, digest-covered like the
+            // container image it stands in for.
+            Some(agent::SandboxProfile::image(rootfs)),
         ),
         // No guest shell or compute: the typed file tools alone, over the
         // facet-owned workspace directory.
-        SandboxMode::Durable => Arc::new(agent_sandbox::TieredSandboxes::new()),
+        SandboxMode::Durable => (agent_sandbox::TieredSandboxes::new(), None),
     };
+    let tools = sandboxes.tools();
+    let has_shell = sandboxes.has_shell();
+    let sandboxes: Arc<dyn SandboxProvider> = Arc::new(sandboxes);
     // The handle is bound for the node's life to keep the gateway actors alive,
     // like `directory` below; both hand off their shards at the stop.
-    let node_kinds = kinds(&opts, &sandbox_mode, entity_store.clone());
+    let node_kinds = kinds(&opts, &tools, profile, has_shell, entity_store.clone());
     let harness = Harness::builder(system.clone(), &node_kinds)
         .entity_node(entity_node.clone())
         .config(harness_config())
@@ -304,97 +298,42 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         "[{node}] hosting entities; the public edge is agent-gateway (a cluster client). \
          No client-facing listener on this node."
     );
-    shutdown_signal().await;
-    // The graceful stop the systemd unit relies on (`deploy/systemd`): hand off
-    // every led shard while this node is still a full member, so the transfers
-    // are accepted, then announce the departure and release the transport in the
-    // order `leave`/`shutdown` document. Skipping the handoff is safe but turns a
-    // rolling restart into one failover per led shard.
-    eprintln!("[{node}] stop signal received; handing off shard leadership");
-    let outstanding = tokio::time::timeout(HANDOFF_TIMEOUT, async {
-        harness.hand_off_leadership().await + directory.hand_off_leadership().await
-    })
+    actor_runtime::shutdown_signal().await;
+    actor_runtime::depart(
+        &system,
+        async { harness.hand_off_leadership().await + directory.hand_off_leadership().await },
+        actor_runtime::HANDOFF_TIMEOUT,
+        LEAVE_GRACE,
+    )
     .await;
-    match outstanding {
-        Ok(0) => eprintln!("[{node}] handed off every led shard; leaving the cluster"),
-        Ok(n) => eprintln!(
-            "[{node}] {n} shard(s) kept their leader (no caught-up replica); leaving the cluster"
-        ),
-        Err(_) => eprintln!(
-            "[{node}] handoff still running after {HANDOFF_TIMEOUT:?}; leaving the cluster"
-        ),
-    }
-    system.leave();
-    tokio::time::sleep(LEAVE_GRACE).await;
-    system.shutdown();
     Ok(())
 }
 
-/// Resolve on SIGTERM or SIGINT (the unit's stop signal, and ctrl-c at a
-/// terminal). Without a SIGTERM handler the default disposition kills the
-/// process outright, and nothing above gets to run.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::SignalKind;
-        use tokio::signal::unix::signal;
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                term.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
-}
-
 /// The cluster-wide kind map (agent spec §7.1). One pure function of the
-/// node options that shape kinds (`--model`, `--sandbox`, `--sandbox-image`):
-/// every node must register byte-identical kinds (the digest is pinned by
-/// `SessionCreated`), so all nodes must run with the same values for those
-/// flags.
-fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntityStoreFactory) -> Kinds {
+/// node options that shape kinds (`--model`, `--sandbox`, `--sandbox-image`)
+/// and the tools the configured provider answers: every node must register
+/// byte-identical kinds (the digest is pinned by `SessionCreated`), so all
+/// nodes must run with the same values for those flags.
+fn kinds(
+    opts: &NodeOptions,
+    tools: &[ToolDecl],
+    profile: Option<agent::SandboxProfile>,
+    has_shell: bool,
+    entity_store: EntityStoreFactory,
+) -> Kinds {
     let params = ModelParams {
         model: opts.model.to_string(),
         max_tokens: 4096,
     };
-    // The sandbox tools per mode: the same `shell` name and shape, but distinct
-    // declarations (and a profile image in docker/firecracker mode), so the digests
-    // differ; a mixed-mode cluster fails to agree instead of silently splitting
-    // confinement. Every mode offers the typed `Workspace` file tools over the
-    // entity's own workspace facet (entity §7.11); the shell-capable modes add
-    // `shell` (the confined Native tier) and `run_js` (the hermetic QuickJS
-    // Compute tier, sandbox spec §3.2) on top, over the same workspace.
-    let with_file_tools = |kind: Kind| -> Kind {
-        agent_sandbox::workspace_tools()
-            .into_iter()
-            .fold(kind, |kind, tool| kind.tool(tool))
-    };
-    let tools = |kind: Kind| -> Kind {
-        match sandbox_mode {
-            SandboxMode::Docker { image, .. } => with_file_tools(
-                kind.tool(agent_sandbox::shell_tool())
-                    .tool(agent_sandbox::run_js_tool())
-                    .sandbox(agent::SandboxProfile::image(image)),
-            ),
-            // The microVM shell declaration differs from the docker one (sync
-            // semantics are model-visible), and the profile image carries the
-            // rootfs path; both are digest-covered.
-            SandboxMode::Firecracker { rootfs, .. } => with_file_tools(
-                kind.tool(agent_sandbox::fc_shell_tool())
-                    .tool(agent_sandbox::run_js_tool())
-                    .sandbox(agent::SandboxProfile::image(rootfs)),
-            ),
-            // No guest shell or compute: the typed file tools alone.
-            SandboxMode::Durable => with_file_tools(kind),
+    // The provider's declarations, plus the profile image the shell-capable
+    // modes run under: the one per-mode fact the digest must cover beyond the
+    // declarations themselves, so a mixed-mode cluster fails to agree instead
+    // of silently splitting confinement.
+    let equip = |kind: Kind| -> Kind {
+        let kind = tools.iter().cloned().fold(kind, Kind::tool);
+        match &profile {
+            Some(profile) => kind.sandbox(profile.clone()),
+            None => kind,
         }
     };
     // Durable entity storage under --data (§7.4): a session is an entity, so its
@@ -412,9 +351,9 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
             ..EntityConfig::default()
         })
     };
-    // Mode-aware tool guidance: `durable` has no shell and no Compute tier, so its
-    // guidance must not point at either.
-    let tool_guidance = if matches!(sandbox_mode, SandboxMode::Durable) {
+    // Tool guidance follows the declarations: without a `shell` there is no
+    // Compute tier either, so the guidance must point at neither.
+    let tool_guidance = if !has_shell {
         "Use the typed file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) to work \
          with files in your session's private workspace, which persists across your turns. \
          There is no shell in this environment."
@@ -427,7 +366,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
          JavaScript, use the `run_js` tool (hermetic QuickJS, no runtime needed) rather than a \
          `node` binary through `shell`."
     };
-    let assistant = tools(
+    let assistant = equip(
         Kind::new(format!(
             "You are the assistant agent of a small local cluster. {tool_guidance} You may \
              delegate a self-contained subtask to the `worker` kind with the `delegate` tool."
@@ -437,7 +376,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
     let assistant = entity(assistant);
-    let worker = tools(
+    let worker = equip(
         Kind::new(format!(
             "You are a worker agent. Complete the task you were delegated, then reply with a \
              concise result. {tool_guidance}"

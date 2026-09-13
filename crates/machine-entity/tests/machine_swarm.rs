@@ -46,11 +46,12 @@ use entity::testing::CommitMonotonic;
 use machine_entity::Attach;
 use machine_entity::Detach;
 use machine_entity::Machine;
+use machine_entity::MachineRuntimeProvider;
 use machine_entity::Provision;
 use machine_entity::Status;
 use machine_entity::fake::FakeRuntimeProvider;
 
-type ClusterMachine = Machine<SimNode, FakeRuntimeProvider<SimNode>>;
+type ClusterMachine = Machine<SimNode>;
 
 /// The front-door member stand-in (machine §5.1): one per node; a node crash
 /// kills it, and the machines watching it fold `Detached { FrontDoorLost }`.
@@ -123,11 +124,9 @@ impl ClusterWorkload for MachineSwarm {
             let hosts: Vec<_> = nodes
                 .iter()
                 .map(|s| {
-                    let provider = std::sync::Arc::new(FakeRuntimeProvider::new(
-                        s.clone(),
-                        Duration::from_millis(50),
-                    ));
-                    s.entities_named::<ClusterMachine>(
+                    let provider: std::sync::Arc<dyn MachineRuntimeProvider> =
+                        std::sync::Arc::new(FakeRuntimeProvider::new(s.clone(), Duration::from_millis(50)));
+                    s.entity_node().entities_named::<ClusterMachine>(
                         machine_entity::MACHINE_TYPE,
                         config.clone(),
                         std::sync::Arc::new(move || Machine::new(std::sync::Arc::clone(&provider))),

@@ -84,12 +84,11 @@ const B_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 7,
         spec: "blob §4, §5.3",
-        property: "Monotonic deletion, no resurrection: delete_namespace is set-once and commutes; no node aware of the tombstone resolves a blob of the namespace, no put into a deleted namespace leaves a resolvable blob, and reconcile never resurrects one across a partition of unbounded duration",
+        property: "Monotonic deletion, no resurrection: delete_namespace is set-once and commutes; no node aware of the tombstone resolves a blob of the namespace, no put into a deleted namespace leaves a resolvable blob, and reconcile never resurrects one across a partition of unbounded duration, because the tombstone is never reclaimed",
         verify: &[Verify::TestFn(
             "a_deleted_namespace_stays_deleted, \
              a_deleted_namespace_resolves_nowhere_and_refuses_puts, \
-             a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace, \
-             retention_survives_an_unbounded_partition",
+             a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace",
         )],
     },
 ];

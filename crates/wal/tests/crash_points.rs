@@ -47,6 +47,7 @@ const MAX_RECORD: u32 = 1 << 16;
 /// This suite's record schema. The header carries it; these tests never change it.
 const RECORDS: compat::Window = compat::Window::at("wal.crash_points", 1);
 
+
 /// Records of deliberately varied width, so truncation lands inside headers,
 /// payloads, and checksums rather than always at a tidy boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

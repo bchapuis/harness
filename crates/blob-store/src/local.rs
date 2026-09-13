@@ -46,37 +46,18 @@ use crate::blob::Namespace;
 use crate::blob::slice;
 use crate::blob::verify;
 
-/// The stamp on a tombstone file (compatibility §3, `blob.tombstone`).
+/// The tombstone file (compatibility §3, `blob.tombstone`): a `wal::Sidecar`
+/// (wal §5) carrying the deletion stamp, the same shape as the entity store's
+/// fence and seal files. Revision 1 implements no extension keys.
 ///
 /// `BSTOMB` cannot be confused with the unstamped predecessor by length alone
-/// (that form is exactly [`TOMBSTONE_LEGACY_BYTES`], and a stamped record is longer),
-/// but the magic is what lets the reader say so without depending on a width
-/// that a later revision may change.
-const TOMBSTONE: compat::Stamp =
-    compat::Stamp::new(b"BSTOMB", compat::Window::at("blob.tombstone", 1));
-
-/// Extension keys revision 1 knows. Empty: the area exists so the record can gain
-/// a field without a revision bump, and nothing has needed one yet.
-const TOMBSTONE_EXT_KNOWN: &[u16] = &[];
-
-/// A tombstone record's body, behind the stamp: the deletion stamp, a checksum
-/// over it, and the extension area (compatibility §2.1).
-///
-/// The checksum guards a torn read, though `atomic_replace` already makes the
-/// write whole-or-nothing; it covers the area as well as the value, so a change
-/// there cannot pass unnoticed.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct TombstoneBody {
-    checksum: u64,
-    deleted_at: u64,
-    ext: compat::Extensions,
-}
-
-/// Bytes of an **unstamped** tombstone record: `deleted_at` (u64 LE) followed by
-/// its checksum (u64 LE), which is the shape this format had before it carried a
-/// stamp, and the shape the entity store's fence file still has (entity
-/// `file_store`). A reader adopts it; nothing writes it.
-const TOMBSTONE_LEGACY_BYTES: usize = 16;
+/// (that form is exactly 16 bytes, and a stamped record is longer), but the magic
+/// is what lets the reader say so without depending on a width that a later
+/// revision may change.
+const TOMBSTONE: wal::Sidecar = wal::Sidecar::new(
+    compat::Stamp::new(b"BSTOMB", compat::Window::at("blob.tombstone", 1)),
+    &[],
+);
 
 /// A single-node, on-disk content-addressed store (spec §5.1).
 ///
@@ -204,8 +185,8 @@ impl LocalBlobStore {
     /// the sweep, so even a crash mid-sweep leaves the namespace gone.
     pub fn tombstone(&self, ns: &Namespace, deleted_at: u64) -> Result<(), BlobError> {
         let _guard = self.lock();
-        let record = encode_tombstone(deleted_at);
-        wal::atomic_replace(&self.inner.tombstones, &ns.to_string(), &record)
+        TOMBSTONE
+            .write(&self.inner.tombstones.join(ns.to_string()), deleted_at)
             .map_err(unavailable)?;
         self.sweep(ns);
         Ok(())
@@ -238,12 +219,7 @@ impl LocalBlobStore {
     ///
     /// [`TombstoneSet`]: crate::tombstone::TombstoneSet
     pub fn tombstoned_at(&self, ns: &Namespace) -> io::Result<Option<u64>> {
-        let path = self.inner.tombstones.join(ns.to_string());
-        match fs::read(&path) {
-            Ok(bytes) => decode_tombstone(&path, &bytes).map(Some),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
+        TOMBSTONE.read(&self.inner.tombstones.join(ns.to_string()))
     }
 
     /// Remove a namespace's blob subtree. Best-effort and re-drivable: an absent
@@ -371,63 +347,6 @@ fn unavailable(err: io::Error) -> BlobError {
     BlobError::Unavailable(err.to_string())
 }
 
-/// A tombstone record's bytes, stamped at the revision this build writes.
-fn encode_tombstone(deleted_at: u64) -> Vec<u8> {
-    let body = TombstoneBody {
-        checksum: wal::checksum(&deleted_at.to_le_bytes()),
-        deleted_at,
-        ext: compat::Extensions::new(),
-    };
-    TOMBSTONE.stamp(&postcard::to_allocvec(&body).expect("a tombstone body is plain owned data"))
-}
-
-/// The deletion stamp `bytes` carry, accepting both the stamped form and the
-/// unstamped predecessor.
-///
-/// The two questions are asked in that order and kept apart (**V2**): bytes
-/// carrying the magic are *this* format, so a revision this build does not accept
-/// is refused rather than handed to the older decoder, and only bytes without the
-/// magic are read as the predecessor.
-fn decode_tombstone(path: &Path, bytes: &[u8]) -> io::Result<u64> {
-    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
-    if TOMBSTONE.is_stamped(bytes) {
-        // Revision first, then the extension area, then the body: nothing reads a
-        // field until the bytes have been admitted as this format at all.
-        let (_, body) = TOMBSTONE
-            .unstamp(bytes)
-            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
-        let body: TombstoneBody = postcard::from_bytes(body)
-            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
-        body.ext
-            .admit(TOMBSTONE.window().boundary(), TOMBSTONE_EXT_KNOWN)
-            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
-        if body.checksum != wal::checksum(&body.deleted_at.to_le_bytes()) {
-            return Err(invalid(format!(
-                "tombstone at {}: checksum mismatch",
-                path.display()
-            )));
-        }
-        return Ok(body.deleted_at);
-    }
-    if bytes.len() == TOMBSTONE_LEGACY_BYTES {
-        let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
-        let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
-        if check != wal::checksum(&raw.to_le_bytes()) {
-            return Err(invalid(format!(
-                "unstamped tombstone at {}: checksum mismatch",
-                path.display()
-            )));
-        }
-        return Ok(raw);
-    }
-    Err(invalid(format!(
-        "tombstone at {}: neither a `BSTOMB` record nor a {TOMBSTONE_LEGACY_BYTES}-byte \
-         unstamped one ({} bytes)",
-        path.display(),
-        bytes.len(),
-    )))
-}
-
 impl BlobStore for LocalBlobStore {
     fn put(
         &self,
@@ -508,14 +427,14 @@ mod tests {
 
     /// The `blob.tombstone` fixture still decodes to the stamp it recorded
     /// (compatibility §4). A `postcard` body is positional, so a field added to
-    /// `TombstoneBody` or two of them reordered compiles cleanly and silently
+    /// the sidecar body or two of them reordered compiles cleanly and silently
     /// changes what every stored record means; nothing else in this crate (which
     /// has no in-tree consumer) would notice.
     #[test]
     fn blob_tombstone_v1_still_reads_its_stamp() {
         let (_dir, store) = store();
         let ns = ns();
-        let bytes = crate::corpus::golden("blob.tombstone", 1, || encode_tombstone(9));
+        let bytes = crate::corpus::golden("blob.tombstone", 1, || TOMBSTONE.encode(9));
 
         let path = store.inner.tombstones.join(ns.to_string());
         fs::write(&path, &bytes).expect("stage the fixture");
@@ -532,7 +451,7 @@ mod tests {
     fn an_unstamped_tombstone_is_adopted_rather_than_refused() {
         let (_dir, store) = store();
         let ns = ns();
-        let mut legacy = [0u8; TOMBSTONE_LEGACY_BYTES];
+        let mut legacy = [0u8; 16];
         legacy[..8].copy_from_slice(&42u64.to_le_bytes());
         legacy[8..].copy_from_slice(&wal::checksum(&42u64.to_le_bytes()).to_le_bytes());
 
@@ -549,7 +468,7 @@ mod tests {
     fn a_tombstone_from_another_revision_is_refused_rather_than_adopted() {
         let (_dir, store) = store();
         let ns = ns();
-        let mut bytes = encode_tombstone(9);
+        let mut bytes = TOMBSTONE.encode(9);
         bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
 
         let path = store.inner.tombstones.join(ns.to_string());

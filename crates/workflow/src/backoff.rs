@@ -74,10 +74,11 @@ struct Entry {
 }
 
 /// The per-key backoff table: ephemeral activation state, rebuilt from nothing
-/// on every activation (spec §3.4).
+/// on every activation (spec §3.4). The engine's own; a consumer sets the
+/// [`BackoffPolicy`] and sees nothing of the table.
 ///
 /// `K` is the consumer's [`Workflow::Key`](crate::Workflow::Key).
-pub struct Backoff<K: Ord> {
+pub(crate) struct Backoff<K: Ord> {
     policy: BackoffPolicy,
     entries: BTreeMap<K, Entry>,
 }
