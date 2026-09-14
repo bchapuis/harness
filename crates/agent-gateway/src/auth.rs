@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 
 /// The tenant identity a request acts as.
 ///
@@ -52,11 +53,10 @@ impl std::fmt::Display for PrincipalId {
 ///
 /// Cross-tenant isolation does not depend on this: the principal prefix already
 /// confines a client to its own namespace, whatever it sends ([`scoped_session`]).
-/// The rule protects the namespace *inside* a tenant. A delegated sub-agent is
-/// named `"{session}/{turn}/{child}"` (multi-tenant-edge design) from segments the
-/// agent mints, so a client free to send `"demo/t-1/c-2"` could address (or
-/// pre-create) one of its own sub-agents' entities: a name collision the caller
-/// was never meant to be able to cause.
+/// The rule protects the namespace *inside* a tenant, by keeping a client's ids
+/// one flat segment: a key a client supplies then splits back at the first `/`
+/// exactly as [`unscope_session`] expects, and cannot be shaped to look like a
+/// nested key of its own.
 ///
 /// Only the client-supplied segment is checked; the internally-minted child ids that
 /// legitimately contain `/` never pass through here.
@@ -67,8 +67,14 @@ pub fn is_valid_session(session: &str) -> bool {
 /// The entity session key for `session` under `principal`: the principal-prefixed
 /// namespace that isolates tenants. The gateway always supplies the prefix (a
 /// client only ever names the unprefixed `session`), so a client cannot address
-/// an entity outside its own principal. A delegated child id (`session/t-1/c-2`)
-/// inherits the prefix transitively, keeping worker entities in-tenant for free.
+/// an entity outside its own principal.
+///
+/// A delegated child's id is not a key in this shape at all: the agent derives it
+/// by netstring-framing each component (`10:alice/demo/3:t-1/5:tu_42` under the
+/// parent key `alice/demo`), which begins with digits and a `:`, characters a
+/// [`PrincipalId`] excludes. So [`unscope_session`] answers `None` for it under
+/// every principal, and no client can name one: children are reached only from
+/// inside, by the agent that minted them.
 pub fn scoped_session(principal: &PrincipalId, session: &str) -> String {
     format!("{}/{}", principal.as_str(), session)
 }
@@ -91,6 +97,18 @@ pub fn is_loopback(host: &str) -> bool {
             .parse::<IpAddr>()
             .map(|ip| ip.is_loopback())
             .unwrap_or(false)
+}
+
+/// Whether a `<host>:<port>` listen address binds a loopback interface: the
+/// bind the insecure dev mode is confined to. The address is parsed as a
+/// socket address first, so an IPv6 literal keeps its brackets together with
+/// its port (`[::1]:8080`); a host that is not an IP literal (`localhost:8080`)
+/// falls back to splitting the port off the end and testing the host.
+pub fn bind_is_loopback(bind: &str) -> bool {
+    match bind.parse::<SocketAddr>() {
+        Ok(addr) => addr.ip().is_loopback(),
+        Err(_) => is_loopback(bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind)),
+    }
 }
 
 /// Verify a bearer token, returning the principal it authenticates, or `None`
@@ -180,16 +198,32 @@ mod tests {
     fn a_client_session_id_may_not_contain_a_path_separator() {
         assert!(is_valid_session("demo"));
         assert!(is_valid_session("demo-1.2_3"));
-        // The delegated-child shape, which a client must not be able to name.
+        // A client's id stays one flat segment, so a key splits back where
+        // `unscope_session` expects.
         assert!(!is_valid_session("demo/t-1/c-2"));
         assert!(!is_valid_session(""));
+    }
+
+    #[test]
+    fn a_delegated_child_key_is_addressable_by_no_principal() {
+        // The shape `derive_child` mints under the parent key `alice/demo`:
+        // each component netstring-framed (agent spec §8.1).
+        let child = "10:alice/demo/3:t-1/5:tu_42";
+        let alice = PrincipalId::parse("alice").unwrap();
+        // Not under alice, though her name appears inside it.
+        assert_eq!(unscope_session(&alice, child), None);
+        // And no principal can be parsed from its leading segment, because the
+        // netstring length prefix carries a `:`.
+        assert!(PrincipalId::parse("10:alice").is_none());
+        // A client cannot send it either: it carries `/`.
+        assert!(!is_valid_session(child));
     }
 
     #[test]
     fn scoped_session_prefixes_with_the_principal() {
         let alice = PrincipalId::parse("alice").unwrap();
         assert_eq!(scoped_session(&alice, "demo"), "alice/demo");
-        // A delegated child id keeps the prefix.
+        // The prefix is textual: whatever the session segment holds rides under it.
         assert_eq!(scoped_session(&alice, "demo/t-1/c-2"), "alice/demo/t-1/c-2");
     }
 
@@ -248,5 +282,16 @@ mod tests {
         assert!(is_loopback("localhost"));
         assert!(!is_loopback("0.0.0.0"));
         assert!(!is_loopback("10.0.0.5"));
+    }
+
+    #[test]
+    fn a_bind_keeps_an_ipv6_literal_with_its_port() {
+        assert!(bind_is_loopback("127.0.0.1:8080"));
+        assert!(bind_is_loopback("localhost:8080"));
+        // The brackets belong to the address, not to a host/port split.
+        assert!(bind_is_loopback("[::1]:8080"));
+        assert!(!bind_is_loopback("[::]:8080"));
+        assert!(!bind_is_loopback("0.0.0.0:8080"));
+        assert!(!bind_is_loopback("10.0.0.5:8080"));
     }
 }

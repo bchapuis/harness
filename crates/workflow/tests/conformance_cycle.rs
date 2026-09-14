@@ -79,8 +79,11 @@ fn the_desired_set_dispatches_every_task_and_the_entity_finishes() {
 fn nothing_launches_before_the_record_that_wanted_it_commits() {
     // W4, intent before effect. Not enforced by a check: a tick reads
     // *committed* state, so an effect whose intent has not committed is not in
-    // `pending(state)` and there is nothing to launch (§5). The stream shows it:
-    // every `Launched` must follow the `Committed` that admitted its key.
+    // `pending(state)` and there is nothing to launch (§5). The stream shows it
+    // per key: every `Launched` follows the `Committed` that admitted *its own*
+    // key. That takes two requests to say. Under one batch the claim degrades to
+    // "some launch followed some commit", which a launch racing its own record
+    // would satisfy as soon as any earlier record had committed.
     let sim = Simulation::new(11);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
@@ -89,28 +92,48 @@ fn nothing_launches_before_the_record_that_wanted_it_commits() {
 
     ask(&sim, &fanouts, "job/1", request((0..3).map(task).collect()));
     sim.run_for(SETTLE);
+    // Where the first batch's stream ends: the first `Committed` after this
+    // point is the one that admits keys 3, 4, and 5, and no earlier commit does.
+    let boundary = recorder.events().len();
+    ask(&sim, &fanouts, "job/1", request((3..6).map(task).collect()));
+    sim.run_for(SETTLE);
 
-    let mut committed = 0usize;
-    let mut first_launch_at: Option<usize> = None;
-    let mut first_commit_at: Option<usize> = None;
-    for (i, e) in recorder.events().iter().enumerate() {
-        if let Some(EntityEvent::Committed { .. }) = e.as_app::<EntityEvent>() {
-            committed += 1;
-            first_commit_at.get_or_insert(i);
-        }
-        if let Some(WorkflowEvent::Launched { .. }) = e.as_app::<WorkflowEvent>() {
-            first_launch_at.get_or_insert(i);
-        }
+    let events = recorder.events();
+    let commit_after = |from: usize| {
+        events[from..]
+            .iter()
+            .position(|e| {
+                matches!(
+                    e.as_app::<EntityEvent>(),
+                    Some(EntityEvent::Committed { .. })
+                )
+            })
+            .map(|i| i + from)
+    };
+    let admitted = [
+        commit_after(0).expect("the first request committed"),
+        commit_after(boundary).expect("the second request committed"),
+    ];
+
+    let mut paired = 0usize;
+    for (i, e) in events.iter().enumerate() {
+        let Some(WorkflowEvent::Launched { key, .. }) = e.as_app::<WorkflowEvent>() else {
+            continue;
+        };
+        let key: TaskId = key
+            .parse()
+            .expect("the fixture keys its effects by task id");
+        let admit = admitted[usize::from(key >= 3)];
+        assert!(
+            admit < i,
+            "task {key} launched at {i}, ahead of the commit at {admit} that admitted it: \
+             an effect ran before the record that wanted it was durable (W4)"
+        );
+        paired += 1;
     }
-    assert!(committed > 0, "the request committed");
-    let (launch, commit) = (
-        first_launch_at.expect("something launched"),
-        first_commit_at.expect("something committed"),
-    );
-    assert!(
-        commit < launch,
-        "a launch at {launch} preceded the first commit at {commit}: \
-         an effect ran before the record that wanted it was durable (W4)"
+    assert_eq!(
+        paired, 6,
+        "every task launched, each paired with the commit that admitted it"
     );
 }
 

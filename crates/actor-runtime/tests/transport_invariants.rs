@@ -42,6 +42,7 @@ use actor_runtime::TcpCluster;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
@@ -300,6 +301,111 @@ async fn a_silent_peer_is_dropped_at_the_handshake_timeout() {
         res.is_ok(),
         "node must drop a silent peer at the handshake timeout, but the connection stayed open",
     );
+}
+
+// --- §7 #3: a malformed frame tears down the association, not the node -------
+
+/// Write one length-delimited record the way `wire.rs` frames every message: a
+/// `u32` big-endian length, then the bytes. Spelled out here because the test's
+/// whole point is to put bytes on the wire the transport's own writer would
+/// never produce.
+async fn write_record(sock: &mut TcpStream, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).unwrap();
+    sock.write_all(&len.to_be_bytes()).await.unwrap();
+    sock.write_all(bytes).await.unwrap();
+    sock.flush().await.unwrap();
+}
+
+/// Read one length-delimited record (the node's own `Hello`).
+async fn read_record(sock: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    sock.read_exact(&mut len).await?;
+    let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+    sock.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Dial `addr` as node `node` and complete the §7.1 handshake by hand: the JSON
+/// `Hello` preamble (announcing the wire version, identity, codec, and cluster
+/// secret), then the node's own `Hello` back. What returns is an established
+/// association, over which the caller can write whatever it likes.
+async fn handshake_raw(addr: SocketAddr, node: u64) -> TcpStream {
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let hello = serde_json::json!({
+        "version": actor_runtime::WIRE.version(),
+        "node": node,
+        // Dialed back only by endpoint gossip, and refused there: this end
+        // speaks, it is never spoken to.
+        "advertised": "127.0.0.1:1",
+        "codec_name": "json",
+        "cluster_secret": support::SECRET,
+    });
+    write_record(&mut sock, &serde_json::to_vec(&hello).unwrap()).await;
+    read_record(&mut sock)
+        .await
+        .expect("the node answers a valid Hello with its own");
+    sock
+}
+
+/// The association is gone: the node dropped its end, so a read completes at
+/// once with EOF or a reset instead of blocking on a live connection.
+async fn assert_torn_down(sock: &mut TcpStream, what: &str) {
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf))
+        .await
+        .unwrap_or_else(|_| panic!("{what}: the association stayed open"));
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "{what}: the node kept the association alive",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_frame_tears_down_its_association_not_the_node() {
+    // The §7 requirement over real wire bytes, which the simulator cannot carry:
+    // its frames are structured, so only the payload is ever encoded (§18.2).
+    // Two peers handshake for real and then write what no writer of this
+    // protocol would: a payload that does not decode, and a length past the
+    // 16 MiB cap. Each association must die alone, with the node serving its
+    // other one before and after.
+    let (la, addr_a) = support::bind_local().await;
+    let (lb, addr_b) = support::bind_local().await;
+    let node_a = NodeId::new(1);
+    let node_b = NodeId::new(2);
+    let peers: BTreeMap<NodeId, SocketAddr> = BTreeMap::from([(node_a, addr_a), (node_b, addr_b)]);
+    let sys_a = support::start_node(support::tcp_config(node_a, peers.clone()), la);
+    let sys_b = support::start_node(support::tcp_config(node_b, peers), lb);
+    sys_a.add_member(node_b);
+    sys_b.add_member(node_a);
+
+    // The association that must survive: B calls a greeter on A.
+    let greeter = sys_a.spawn(Greeter::<TcpCluster>::new("Hi"));
+    let remote = sys_b.resolve::<Greeter<TcpCluster>>(greeter.id().clone());
+    let greet = Greet {
+        name: "before".into(),
+    };
+    let before = remote.ask(greet).await;
+    assert_eq!(before, Ok("Hi, before!".to_string()));
+
+    // A frame whose payload is not a `Wire` message at all.
+    let mut bad = handshake_raw(addr_a, 3).await;
+    write_record(&mut bad, b"not a frame at all").await;
+    assert_torn_down(&mut bad, "an undecodable frame").await;
+
+    // A length prefix past the cap, refused before a byte of it is allocated.
+    let mut huge = handshake_raw(addr_a, 4).await;
+    huge.write_all(&(32u32 * 1024 * 1024).to_be_bytes())
+        .await
+        .unwrap();
+    huge.flush().await.unwrap();
+    assert_torn_down(&mut huge, "an oversized length prefix").await;
+
+    // The node itself never wavered: the other association still serves.
+    let greet = Greet {
+        name: "after".into(),
+    };
+    let after = remote.ask(greet).await;
+    assert_eq!(after, Ok("Hi, after!".to_string()));
 }
 
 // --- regression: a dial to a refused address is Unreachable, never a hang -----

@@ -192,15 +192,6 @@ pub enum Incompatible {
     },
 }
 
-impl Incompatible {
-    /// The format that refused, for a caller labelling its own error.
-    pub fn format(&self) -> &'static str {
-        match self {
-            Incompatible::Unstamped { format, .. } | Incompatible::Version { format, .. } => format,
-        }
-    }
-}
-
 impl fmt::Display for Incompatible {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -98,9 +98,12 @@ pub struct TieredSandboxes {
     /// item 2 permits: a module is code, not working state; every call
     /// still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
-    /// The container CLI binary for the native tier; `docker` by default.
+    /// The container CLI binary the native tier drives, when the deployment
+    /// names one. `None` names no container realization at all, which is how a
+    /// deployment asks for a provider without a `Native` tier: no `shell` is
+    /// declared, and every `Native` call fails as unconfigured.
     #[cfg(feature = "native")]
-    container_cli: String,
+    container_cli: Option<String>,
     /// When set, the native tier runs at the microVM grade instead of the
     /// docker fallback (sandbox spec §3.5): one Firecracker VM per
     /// activation, workspace synced over vsock.
@@ -124,7 +127,7 @@ impl TieredSandboxes {
             seed: 0,
             modules: BTreeMap::new(),
             #[cfg(feature = "native")]
-            container_cli: "docker".to_string(),
+            container_cli: None,
             #[cfg(feature = "firecracker")]
             firecracker: None,
             stats: TierStats::default(),
@@ -157,12 +160,15 @@ impl TieredSandboxes {
         self.with_module(crate::compute::QJS_MODULE, quickjs_module())
     }
 
-    /// Set the container CLI binary the native tier drives (feature
-    /// `native`); `docker` by default. Podman's docker-compatible CLI and
-    /// colima answer to the same vocabulary.
+    /// Run the native tier through this container CLI binary (feature
+    /// `native`), usually `docker`. Podman's docker-compatible CLI and colima
+    /// answer to the same vocabulary. Naming one is what configures the
+    /// container realization: a provider that names neither a CLI here nor a
+    /// Firecracker profile has no native realization, so it declares no
+    /// `shell` and fails every `Native` call.
     #[cfg(feature = "native")]
     pub fn with_container_cli(mut self, cli: impl Into<String>) -> TieredSandboxes {
-        self.container_cli = cli.into();
+        self.container_cli = Some(cli.into());
         self
     }
 
@@ -220,7 +226,11 @@ impl TieredSandboxes {
         self.shell().is_some()
     }
 
-    /// `shell`, in the declaration of the native realization configured.
+    /// `shell`, in the declaration of the native realization configured, and
+    /// `None` when none is: a provider that names neither a Firecracker
+    /// profile nor a container CLI builds an unconfigured native tier, where
+    /// every `Native` call fails, so declaring `shell` there would advertise
+    /// an environment the provider does not have.
     fn shell(&self) -> Option<ToolDecl> {
         #[cfg(feature = "firecracker")]
         if self.firecracker.is_some() {
@@ -228,7 +238,9 @@ impl TieredSandboxes {
         }
         #[cfg(feature = "native")]
         {
-            Some(crate::native::shell_tool())
+            self.container_cli
+                .as_ref()
+                .map(|_| crate::native::shell_tool())
         }
         #[cfg(not(feature = "native"))]
         {
@@ -369,7 +381,7 @@ struct TieredSandbox {
 /// into `open`'s future in one piece.
 #[cfg(feature = "native")]
 struct NativeSpec {
-    cli: String,
+    cli: Option<String>,
     image: String,
     #[cfg(feature = "firecracker")]
     firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
@@ -380,9 +392,12 @@ struct NativeSpec {
 #[cfg(feature = "native")]
 #[derive(Clone)]
 enum NativeEnv {
-    /// The kind's profile names no image: every `Native` call fails identically,
+    /// The kind's profile names no image, or the provider names no native
+    /// realization to run it under: every `Native` call fails identically,
     /// with or without a container runtime or a hypervisor installed, and no
-    /// environment is ever provisioned.
+    /// environment is ever provisioned. The provider declares no `shell` in
+    /// that second case (`TieredSandboxes::shell`), so the model is never
+    /// offered a tool that can only fail.
     Unconfigured,
     Docker(Arc<crate::native::NativeTier>),
     #[cfg(feature = "firecracker")]
@@ -414,13 +429,16 @@ impl NativeEnv {
         }
         #[cfg(not(feature = "firecracker"))]
         let _ = dir;
-        NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
-            spec.cli,
-            spec.image,
-            host_path.to_path_buf(),
-            name,
-            stats,
-        )))
+        match spec.cli {
+            Some(cli) => NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
+                cli,
+                spec.image,
+                host_path.to_path_buf(),
+                name,
+                stats,
+            ))),
+            None => NativeEnv::Unconfigured,
+        }
     }
     /// Execute one Native call (`shell` only): the declaration's checks once,
     /// then the configured realization runs the command.

@@ -103,8 +103,8 @@ pub trait Entity: Sized + Send + 'static {
 
     /// The entity type's stable identity: the namespace tag in every
     /// [`EntityName`] of this type and the key the gateway is discovered under
-    /// (§5.3). An explicit constant (e.g. `"bank.Account"`) is RECOMMENDED:
-    /// deriving one from `type_name` would not be rename-stable.
+    /// (§5.3). An explicit constant (e.g. `"bank.Account"`) is REQUIRED (there is
+    /// no default): deriving one from `type_name` would not be rename-stable.
     const ENTITY_TYPE: &'static str;
 
     /// Apply one event to state (spec §4.1). MUST be pure and deterministic: it

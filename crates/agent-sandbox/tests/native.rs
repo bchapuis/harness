@@ -106,7 +106,7 @@ fn containers(name_prefix: &str) -> Vec<String> {
 async fn shell_round_trips_through_the_bind_mounted_workspace() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "rt", &dir.path().join("rt")).await;
 
     // Container → host: a file the shell writes is visible to the
@@ -144,7 +144,7 @@ async fn confinement_smoke() {
     // grade).
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "conf", &dir.path().join("workspaces/conf")).await;
 
     for escape in [
@@ -172,7 +172,7 @@ async fn confinement_smoke() {
 async fn failures_are_outcomes_not_errors() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "fail", &dir.path().join("fail")).await;
 
     // A nonzero exit is an outcome the model reacts to, never a ToolError.
@@ -192,7 +192,7 @@ async fn failures_are_outcomes_not_errors() {
 async fn output_is_capped() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "cap", &dir.path().join("cap")).await;
 
     let out = shell(&sandbox, "head -c 100000 /dev/zero | tr '\\0' 'a'")
@@ -215,7 +215,7 @@ async fn output_is_capped() {
 async fn an_empty_image_fails_the_call_as_a_sandbox_outcome() {
     // No docker required: the check fires before any docker invocation.
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = provider
         .open(
             &SessionId::new("noimg"),
@@ -244,7 +244,7 @@ async fn an_empty_image_fails_the_call_as_a_sandbox_outcome() {
 async fn a_named_egress_allowlist_fails_open() {
     // No docker required: the validation is provider-side, at open.
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
 
     // §2.2: holding Native implies Network's grants; --network none delivers
     // an empty allowlist only, so a profile naming egress must fail loudly.
@@ -270,7 +270,7 @@ async fn a_named_egress_allowlist_fails_open() {
 async fn provisioning_is_lazy_and_counted() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "lazy", &dir.path().join("lazy")).await;
 
     // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
@@ -295,7 +295,7 @@ async fn provisioning_is_lazy_and_counted() {
 async fn release_removes_the_container_and_is_idempotent() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "rel", &dir.path().join("rel")).await;
 
     shell(&sandbox, "true").await.expect("shell");
@@ -323,7 +323,7 @@ async fn release_removes_the_container_and_is_idempotent() {
 async fn an_externally_killed_container_is_single_tier_loss() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "stl", &dir.path().join("stl")).await;
 
     shell(&sandbox, "true").await.expect("first");
@@ -356,7 +356,7 @@ async fn an_externally_killed_container_is_single_tier_loss() {
 async fn a_vanished_workspace_escalates_to_environment_lost() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new();
+    let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "lost", &dir.path().join("lost")).await;
 
     shell(&sandbox, "true").await.expect("first");

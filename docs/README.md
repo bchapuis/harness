@@ -22,7 +22,7 @@ They layer bottom-up: every spec cites the ones beneath it by a short prefix (`c
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | `entity` | E1–E21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | `blob-store` | B1–B7 |
 | consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | `workflow` | W1–W7 |
-| | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | `agent`, with `agent-anthropic` and `agent-openai` (model adapters), `agent-http`, `agent-gateway`, `agent-standalone`, `agent-tui` | A1–A8 |
+| | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | `agent`, with `agent-anthropic` and `agent-openai` (model adapters), `agent-http`, `agent-gateway`, `agent-standalone` (the `agent-tui` client has no spec: see "Elsewhere in the tree") | A1–A8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | `agent-sandbox` | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | `machine-entity`, `machine-host`, `machine-proto`, `machine-frontdoor`, `machine-standalone` | M1–M6 |
 | cross-cutting | [compatibility-spec](compatibility-spec.md) | format stamps, the format registry, refusal by name | `compat`; `spec` (the drift gate, under Testing); `tenancy` (the directory of [multi-tenant-edge](multi-tenant-edge.md)) | V1–V2 |
@@ -58,17 +58,21 @@ One layer has a design note rather than a spec:
 ## Testing
 
 The citations run downward, and the gate below holds them to it. A spec may
-still *name* a layer above it where that explains a choice: actor §9.4.3 cites entity's group-per-shard
-count to motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity
-to disclaim a sharding utility, and entity §7.17 names the agent as the steps
-facet's reference consumer. The workflow spec's *argument* runs upward: it cites
-the agent runtime as its motivation, its worked example, and its measure,
-because the agent is the layer it generalizes. The crate dependency runs the
-other way, `agent` on `workflow`, and the agent implements `Workflow` rather
-than re-deriving it, so those citations point at a worked consumer. Beside the
+still *name* a layer above it where that explains a choice: actor §9.4.3 cites
+entity's group-per-shard count to motivate heartbeat coalescing,
+cluster-utilities §4 and §7 cite entity to disclaim a sharding utility, and
+entity names the agent three times: entity §3 separates its durability tier
+from the agent's capability tiers (agent §5.6), entity §4.1 takes the agent's
+sandbox as its example of an activation-scoped resource (agent §5.3), and
+entity §7.17 names the agent runtime as the steps facet's reference consumer
+(agent §3). The workflow spec's *argument* runs upward: it cites the agent
+runtime as its motivation, its worked example, and its measure, because the
+agent is the layer it generalizes. The crate dependency runs the other way,
+`agent` on `workflow`, and the agent implements `Workflow` rather than
+re-deriving it, so those citations point at a worked consumer. Beside the
 cycle the agent keeps the environment reconciliation of agent §5.4, §5.5 and
-§5.6, activation state and so no function of any fold, run as a pre-pass ahead
-of every tick.
+§5.6, activation state, and so not a function of any fold, run as a pre-pass
+ahead of every tick.
 
 - [`../crates/spec/`](../crates/spec/), the drift gate for this directory, four
   checks over every document in its `DOCUMENTS` table (a spec is registered there

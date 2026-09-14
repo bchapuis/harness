@@ -7,7 +7,7 @@
 # Install:
 #   install -m 0755 target/release/agent-standalone /usr/local/bin/
 #   install -m 0644 deploy/systemd/agent-node.service /etc/systemd/system/
-#   install -d -m 0750 -o agent -g agent /etc/agent
+#   install -d -m 0750 -o root -g agent /etc/agent
 #   install -m 0640 -o root -g agent deploy/systemd/node.env.example /etc/agent/node.env
 #   # edit /etc/agent/node.env, then:
 #   systemctl daemon-reload && systemctl enable --now agent-node

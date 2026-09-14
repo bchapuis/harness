@@ -1,8 +1,10 @@
 #!/bin/bash
-# Bring up the three-node agent-standalone StatefulSet on whatever cluster
-# kubectl currently points at: build the image, make it reachable, create the
-# API-key secret, apply the manifest, wait for all three pods, print how to
-# attach. The manual walkthrough this automates lives in k8s/README.md.
+# Bring up the agent cluster on whatever cluster kubectl currently points at:
+# build the image, make it reachable, create the three Secrets it needs (the
+# Anthropic API key, the cluster secret, a demo tenants file), apply the
+# manifest, wait for both StatefulSets to roll out (three nodes, two gateways),
+# and print how to drive a session through the gateway. The manual walkthrough
+# this automates lives in k8s/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # build context is the whole workspace
 
@@ -88,8 +90,12 @@ fi
 echo "▸ applying manifest"
 kubectl apply -f k8s/agent.yaml
 
-# Each node blocks until it has discovered every peer before going Ready, so
-# this waits for the whole cluster to form, not just for containers to start.
+# The pods start in parallel because a node resolves every peer by its pod DNS
+# name at startup, which needs those pods to exist. This waits for the
+# containers to be running, not for the cluster to have formed: the node
+# container carries no readiness probe, and the node serves after a 15 s
+# discovery warning either way. The "Watch it form" lines printed at the end are
+# where a formed cluster shows up.
 echo "▸ waiting for the rollout (all three nodes + both gateways Ready)…"
 kubectl rollout status statefulset/agent --timeout=180s
 kubectl rollout status statefulset/agent-gw --timeout=120s

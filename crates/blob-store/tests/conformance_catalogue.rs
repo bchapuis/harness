@@ -178,10 +178,9 @@ fn no_entry_claims_a_continuous_checker() {
 /// equal to the prose one, which is the copy a reader trusts: an invariant added
 /// to one, or a defining section moved in one, is caught here.
 ///
-/// The suite axis is not compared here: the spec's column names test functions
-/// where this table names the files that hold them. This gate covers the
-/// numbering and the defining sections; the "Verified by" column stays a human's
-/// to keep true.
+/// The "Verified by" column is compared too: the blob site is registered with
+/// `Pointers::Functions` (`crates/spec/src/catalogue.rs`), so the test-function
+/// names the prose column carries must match the ones `b_catalogue()` names.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("blob");

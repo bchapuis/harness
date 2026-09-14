@@ -275,9 +275,13 @@ pub trait Workflow:
     /// that disagreed with the one it replaced about what work is outstanding
     /// would either abandon work or duplicate it. It MUST NOT perform I/O, read
     /// the clock, or use entropy, and it MUST NOT read the activation's
-    /// ephemeral state: the claims, the backoff table, and any binding are
-    /// invisible to it by construction, because a function that saw them would
-    /// no longer be a function of the journal (W1).
+    /// ephemeral state: the claims, the backoff table, and any binding, because
+    /// a function that saw them would no longer be a function of the journal
+    /// (W1). This one is the implementer's to uphold rather than the layer's to
+    /// enforce: `pending` takes `&self`, so a behavior that reached into its own
+    /// binding or asked [`Engine::quiescent`] would compile. [`Perform`] is the
+    /// contrast the layer does enforce: it hands an effect no route back to the
+    /// entity's state, journal, or facets.
     fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
 
     /// Perform one effect (§4.1). The **only** place a workflow entity performs

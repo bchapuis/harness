@@ -95,6 +95,11 @@ pub trait MachineAuthority: Send + Sync + 'static {
 
     /// Journal the attachment with its principal (M4) and boot the microVM if
     /// needed; returns the attachment id used to detach.
+    ///
+    /// An implementation MAY refuse before journaling anything: the bridge is
+    /// node-local (machine §5.1), so the production authority checks that this
+    /// node leads the machine and fails the attach when it does not, rather
+    /// than booting a guest the first channel open could never reach.
     fn attach(
         &self,
         machine: &EntityName,

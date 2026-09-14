@@ -295,3 +295,34 @@ fn truncation_never_splits_a_character() {
         "the straddling char is dropped whole"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Declarations follow what the provider is configured with
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unconfigured_provider_declares_the_file_tools_and_nothing_else() {
+    // The durable deployment's provider: no container CLI, no Firecracker
+    // profile, no compute module. `Native` and `Compute` calls under it can
+    // only fail, so declaring `shell` or `run_js` would advertise an
+    // environment this provider does not have.
+    let provider = TieredSandboxes::new();
+    let tools = provider.tools();
+    let declared: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        !provider.has_shell(),
+        "an unconfigured provider serves no shell, got {declared:?}"
+    );
+    assert!(
+        !declared.contains(&"shell"),
+        "no shell declaration without a native realization, got {declared:?}"
+    );
+    assert!(
+        !declared.contains(&"run_js"),
+        "no run_js declaration without the QuickJS runner, got {declared:?}"
+    );
+    assert!(
+        declared.contains(&"read_file") && declared.contains(&"write_file"),
+        "the workspace file tools are always declared, got {declared:?}"
+    );
+}

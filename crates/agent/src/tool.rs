@@ -148,7 +148,8 @@ impl DelegateInput {
 
 /// A tool call's failure, journaled as the call's outcome and returned to the
 /// model as the tool result (agent spec §5.4): a failing tool never fails
-/// the run; the only abnormal run endings are the four of §3.1.
+/// the run; the only abnormal run endings are the three `RunError` outcomes of
+/// §3.1.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolError {
     /// The per-tool timeout elapsed (§5.3 item 3). The call's effects may

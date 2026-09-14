@@ -58,18 +58,29 @@ over HTTP with a bearer token; the nodes have no client-facing listener.
 | File | Role |
 |------|------|
 | `agent-gateway/src/auth.rs` | The `TokenVerifier` seam: `verify(token) -> Option<PrincipalId>`, with `StaticTokens` (opaque secrets from `--auth-tokens`) and `InsecureTokens` (the token is the principal, loopback-only). Plus `scoped_session`/`unscope_session`. Runs at the edge, never in an entity (the determinism guard-rail). |
-| `agent-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`List` go through the client `Entity<Directory>`. SSE carries the live record stream. |
+| `agent-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`List` go through the client `Entities<Directory>`. SSE carries the live record stream. `/healthz` (liveness) and `/readyz` (200, then 503 once a shutdown signal starts the drain) are the two unauthenticated routes. |
 | `agent-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them, so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
-| `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entity<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
+| `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entities<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
 | `agent-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). No client-facing listener. |
 
-## Delegation inherits the prefix
+## Delegated children are unaddressable, not prefixed
 
-Delegated children get ids like `parent/t-1/tu_42`. Because the parent session is
-already `P/session`, a child becomes `P/session/t-1/tu_42`, so worker entities
-stay in-tenant with no extra logic. Only **root** sessions (the ones the client
-names) get a `Directory` `Record`; children are addressed internally by the
-agent, never by the client, so they never reach the authorization gate.
+A delegated child's id is not `P/session/t-1/tu_42`. `derive_child`
+(`agent/src/session.rs`) netstring-frames each component, so a child of the
+scoped session `alice/demo` is `10:alice/demo/3:t-1/5:tu_42`: the principal is
+inside the name but is not a prefix of it.
+
+Tenant safety does not need it to be. A key a client can reach is always
+`P/<segment>`, because the gateway supplies `P` itself and `is_valid_session`
+refuses a segment holding `/`. A framed child id instead begins with digits and a
+`:`, and `PrincipalId`'s charset excludes `:`, so `unscope_session` answers `None`
+for such a key under every principal. No client can name a child, and a listing
+never returns one. Uniqueness across tenants comes free from the same framing:
+the parent's scoped key is one of the framed components.
+
+Only **root** sessions (the ones the client names) get a `Directory` `Record`;
+children are addressed internally by the agent, never by the client, so they
+never reach the authorization gate.
 
 ## Directory enforcement (the feature layer)
 
@@ -91,8 +102,10 @@ agent, never by the client, so they never reach the authorization gate.
   The gateway refuses an insecure (no `--auth-tokens`) mode on a non-loopback
   public bind.
 - **The transport is plaintext, guarded by the cluster secret.** Fine within a
-  trusted cluster network; a deployment crossing untrusted links provisions a
-  transport cert (`TlsConfig`) on both the nodes and the gateways.
+  trusted cluster network. The transport itself supports mutual TLS
+  (`Encryption::MutualTls`), but neither binary exposes a flag for it: both name
+  `Encryption::PlaintextTrusted` in code, so a deployment crossing untrusted links
+  has to provision certificates there and rebuild.
 - **Token handling.** Prefer a Secret/file over `argv` (visible in `ps`); never
   log tokens.
 - **Determinism guard-rail.** Verification happens at the edge only;

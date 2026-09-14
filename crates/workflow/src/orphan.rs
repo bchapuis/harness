@@ -1,9 +1,10 @@
 //! First-tick classification and policy resolution (workflow spec §4.4).
 //!
 //! An effect's intent is journaled before it launches and its outcome after
-//! (§5). A crash, hibernation, or migration between the two leaves the effect
-//! **orphaned**: the journal says it was wanted, and nothing says whether it
-//! ran.
+//! (§5). A crash or a migration between the two leaves the effect **orphaned**:
+//! the journal says it was wanted, and nothing says whether it ran. Hibernation
+//! is not one of the causes: an activation holding a claim vetoes eviction (W7),
+//! so an effect in flight is never hibernated out from under.
 //!
 //! The desired set makes the recovery rule short. **The desired set computed by
 //! an activation's first tick is its orphan set**, by construction, since

@@ -24,7 +24,10 @@
 //!   `/workspace`, `--network none`, one container per activation,
 //!   provisioned lazily on the first `Native` call and removed on release.
 //!   This is shared-kernel confinement, sandbox spec §3.4's SHOULD grade and
-//!   §3.5's development fallback, not the microVM grade. Declared by
+//!   §3.5's development fallback, not the microVM grade. Configured per
+//!   provider by [`TieredSandboxes::with_container_cli`]; a provider that
+//!   names neither a container CLI nor a Firecracker profile has no `Native`
+//!   tier, and declares no `shell`. Declared by
 //!   [`shell_tool`]. Native calls require a tokio runtime
 //!   (`tokio::process`); the other tiers stay runtime-agnostic.
 //! - **`Native`, microVM grade** (feature `firecracker`): the same tier

@@ -4,9 +4,10 @@
 //! quorum append** (§7.2): the shard leader assigns each record the next `Seq` (free,
 //! since it is the single writer) and the Replicator fans it to the shard's replicas,
 //! reporting it durable once a quorum has stored it, fenced by the shard term (§8).
-//! On activation a fresh leader **recovers** each entity's head from a write quorum by
-//! read-repair (highest-term record per slot, written back under its own term), so
-//! no acknowledged write is lost across a leadership change (**E14**).
+//! On activation a fresh leader **recovers** each entity's head by read-repair: it
+//! fence-reads a **read** quorum, takes the highest-term record per slot, and writes
+//! the merged tail back to a quorum under its own term before serving, so no
+//! acknowledged write is lost across a leadership change (**E14**).
 //!
 //! This is the clustered `Quorum` tier's durability, and only that: a
 //! [`QuorumReplicator`] per shard, over a [`LeaderElection`] group and the
@@ -1690,8 +1691,9 @@ impl<R: RaftConsensus> EntityJournal for Arc<QuorumReplicator<R>> {
 
     async fn head(&self, entity: &EntityName) -> Result<Seq, EntityJournalError> {
         // On the `Quorum` tier `head` *is* the rehydration barrier (§8, §9): it
-        // recovers the entity's head from a write quorum by read-repair, so a fresh
-        // leader never folds onto a stale head.
+        // recovers the entity's head by read-repair over a read quorum, writing the
+        // merged tail back under its own term, so a fresh leader never folds onto a
+        // stale head.
         (**self).recover(entity).await
     }
 

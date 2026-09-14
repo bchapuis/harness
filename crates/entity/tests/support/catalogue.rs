@@ -66,7 +66,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 6,
         spec: "entity §5.3",
-        property: "Exactly-once activation per node: the serial gateway activates a name at most once; concurrent requests find the same host",
+        property: "Exactly-once activation per node: the serial gateway activates a name at most once; concurrent requests find the same host (a count of Activated events in entities.rs, the ActivationSingletonPerNode checker in the swarm suites)",
         verify: &[Verify::SimTest(
             "entities.rs, entity_swarm.rs, disk_swarm.rs, sql_swarm.rs",
         )],
@@ -122,7 +122,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 14,
         spec: "entity §8, §8.3",
-        property: "Lossless failover: a new shard leader recovers each entity's committed head by fence-reading a read quorum and writing the merged tail back under its own term; by quorum intersection no acknowledged write is lost across a leadership change",
+        property: "Lossless failover: a new shard leader recovers each entity's committed head by fence-reading a read quorum, taking the highest-term record per slot, and writing the merged tail back to a quorum under its own term before serving; by quorum intersection no acknowledged write is lost across a leadership change",
         verify: &[Verify::SimTest(
             "clustered_entities.rs, entity_swarm.rs, partition_safety.rs, raft_journal.rs, ws_clustered.rs, ws_swarm.rs",
         )],

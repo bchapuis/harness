@@ -255,8 +255,11 @@ impl Sidecar {
             .stamp
             .unstamp(bytes)
             .map_err(|err| named(err.to_string()))?;
-        let body: SidecarBody = postcard::from_bytes(body)
+        let (body, rest): (SidecarBody, &[u8]) = postcard::take_from_bytes(body)
             .map_err(|err| named(format!("body did not decode: {err}")))?;
+        if !rest.is_empty() {
+            return Err(named(format!("body has {} trailing bytes", rest.len())));
+        }
         if body.checksum != checksum(&body.value.to_le_bytes()) {
             return Err(named("checksum mismatch".to_string()));
         }
@@ -902,6 +905,38 @@ mod tests {
         // A second replace overwrites it whole.
         atomic_replace(dir.path(), "state", b"world!").unwrap();
         assert_eq!(fs::read(dir.path().join("state")).unwrap(), b"world!");
+    }
+
+    /// A sidecar file longer than the body this build writes is a refusal, not a
+    /// value read out of its prefix (§5 rule 4). `postcard` stops at the end of the
+    /// fields it wanted and says nothing about what follows, so a decoder that does
+    /// not check the remainder reads a foreign or half-rewritten file as a good one.
+    #[test]
+    fn a_sidecar_file_with_trailing_bytes_is_refused() {
+        const SIDECAR: Sidecar = Sidecar::new(compat::Stamp::new(
+            b"WLSIDE",
+            compat::Format::new("test.sidecar", 1),
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fence");
+        let mut bytes = SIDECAR.encode(7);
+        assert_eq!(SIDECAR.decode(&path, &bytes).unwrap(), 7);
+        bytes.extend_from_slice(b"xyz");
+
+        let err = SIDECAR
+            .decode(&path, &bytes)
+            .expect_err("a long file must not decode");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(
+            message.contains("test.sidecar") && message.contains("fence"),
+            "the refusal must name the format and the path: {message}",
+        );
+        assert!(
+            message.contains("3 trailing bytes"),
+            "the refusal must say what is wrong: {message}",
+        );
     }
 
     /// Many threads replacing *one* name at once: every call succeeds, and the file

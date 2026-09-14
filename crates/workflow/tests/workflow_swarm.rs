@@ -227,7 +227,7 @@ fn workload() -> DriveSwarm {
 }
 
 #[test]
-fn the_drive_cycle_holds_under_the_cluster_swarm() {
+fn the_workflow_cycle_holds_under_the_cluster_swarm() {
     // The safety claims, and only them: W3, W5, and W7's checkable half through
     // `workflow-cycle`, and the entity's commit monotonicity beneath it.
     let workload = workload();

@@ -26,7 +26,6 @@ use crate::budget::Usage;
 use crate::model::ModelError;
 use crate::model::ToolCall;
 use crate::sandbox::Tier;
-use crate::tool::DELEGATE;
 use crate::tool::ToolError;
 
 macro_rules! id_string {
@@ -483,9 +482,6 @@ pub struct SessionState {
     /// commit and the propagating send loses nothing: the next activation's
     /// `advance` finds the debt here and re-sends (A5).
     pub(crate) cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
-    /// Whether the journal records sandboxed activity since the last
-    /// `WorkspaceReset`: the §5.5 trigger for journaling the next one.
-    pub(crate) sandbox_activity: bool,
 }
 
 impl SessionState {
@@ -562,11 +558,6 @@ impl SessionState {
                             },
                         );
                     }
-                    if calls.iter().any(|c| c.name != DELEGATE) {
-                        // Sandboxed intent: effects may land from here on
-                        // (§5.5; intent precedes effect).
-                        self.sandbox_activity = true;
-                    }
                     Arc::make_mut(&mut self.transcript).push(Entry::Assistant {
                         content: content.clone(),
                         calls: calls.clone(),
@@ -608,7 +599,6 @@ impl SessionState {
                 }
             }
             RecordBody::WorkspaceReset => {
-                self.sandbox_activity = false;
                 Arc::make_mut(&mut self.transcript).push(Entry::WorkspaceReset);
             }
             RecordBody::TierAcquired { .. } => {
@@ -693,6 +683,7 @@ pub(crate) fn derive_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::DELEGATE;
 
     fn rec(body: RecordBody) -> Record {
         Record { at_nanos: 7, body }
@@ -733,7 +724,6 @@ mod tests {
         let live = state.live.as_ref().expect("run live");
         assert_eq!(live.spend.own_tokens, 15);
         assert_eq!(live.pending.len(), 1);
-        assert!(state.sandbox_activity);
 
         state.apply(&rec(RecordBody::ToolOutcome {
             turn: TurnId::new("t1"),

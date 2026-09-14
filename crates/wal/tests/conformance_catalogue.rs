@@ -171,7 +171,7 @@ fn every_crash_point_test_is_claimed_by_an_invariant() {
         }
         assert!(
             claimed.contains(&name),
-            "crash_points.rs defines test {name:?}, which no W-invariant claims; \
+            "crash_points.rs defines test {name:?}, which no L-invariant claims; \
              either record it in the catalogue or say why it verifies nothing",
         );
     }

@@ -481,7 +481,6 @@ dependencies = [
  "blake3",
  "compat",
  "futures",
- "postcard",
  "serde",
  "serde_bytes",
  "serde_json",

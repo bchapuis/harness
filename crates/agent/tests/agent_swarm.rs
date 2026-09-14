@@ -2,10 +2,10 @@
 //!
 //! Two claims over the same faulted workload. **Determinism:** the same
 //! `(workload, seed)` reproduces the full event stream byte-for-byte
-//! (agent *and* entity events) with model and sandbox faults firing under seed
-//! control. **Invariants:** the A-invariants hold across a seed sweep while
-//! those faults flow. The journal, the fence, and resume are the entity's, so
-//! simulating the agent runtime runs entity's real consensus/rehydration code.
+//! (agent *and* entity events) with model faults firing under seed control.
+//! **Invariants:** the A-invariants hold across a seed sweep while those faults
+//! flow. The journal, the fence, and resume are the entity's, so simulating the
+//! agent runtime runs entity's real consensus/rehydration code.
 //!
 //! Named `*swarm.rs` because both are sweeps, and a sweep fails by naming a
 //! seed rather than a sequence (docs/simulation-testing.md). The agent runtime has one
@@ -153,7 +153,7 @@ fn the_event_stream_reproduces_byte_for_byte_per_seed() {
 }
 
 #[test]
-fn the_h_invariants_hold_across_a_faulted_seed_sweep() {
+fn the_a_invariants_hold_across_a_faulted_seed_sweep() {
     let workload = FaultyWorkload::new("agent-swarm", 4, 1);
     run_swarm(&workload, sweep_seeds(1..26)).expect("every seed upholds the A-invariant");
     // Coverage accounting (§11): a green sweep proves model faults actually fired

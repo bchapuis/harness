@@ -28,6 +28,7 @@ ExecStart=/usr/local/bin/agent-gateway \
     --node-id ${AGENT_NODE_ID} \
     --nodes ${AGENT_NODES} \
     --bind-host ${AGENT_BIND_HOST} \
+    --port-base ${AGENT_PORT_BASE} \
     --advertise-host ${AGENT_ADVERTISE_HOST} \
     --auth-tokens /etc/agent/tenants \
     --secret ${AGENT_SECRET} \

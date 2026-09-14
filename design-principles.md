@@ -177,7 +177,11 @@ consistency cuts cognitive load.
 ```rust
 // ✗ supervise(true, 5, false)
 // ✓ A named directive states intent (§11.2).
-SupervisionDirective::Restart { max: 5, within: Duration::from_secs(30), backoff: Backoff::exponential() }
+SupervisionDirective::Restart {
+    max: 5,
+    within: Duration::from_secs(30),
+    backoff: Backoff::Exponential { base: Duration::from_millis(100), max: Duration::from_secs(10) },
+}
 ```
 
 ## Weigh trends and performance by complexity

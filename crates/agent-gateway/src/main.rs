@@ -21,7 +21,7 @@ use agent_gateway::Limits;
 use agent_gateway::auth::InsecureTokens;
 use agent_gateway::auth::StaticTokens;
 use agent_gateway::auth::TokenVerifier;
-use agent_gateway::auth::is_loopback;
+use agent_gateway::auth::bind_is_loopback;
 use agent_gateway::cluster::ClusterOptions;
 
 const USAGE: &str = "\
@@ -136,8 +136,7 @@ async fn run(args: &[String]) -> Result<(), String> {
             // The bearer token is taken as the tenant, unverified. Confine it to a
             // loopback public bind, so an unauthenticated multi-tenant edge can
             // never face the network.
-            let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(&bind);
-            if !is_loopback(host) {
+            if !bind_is_loopback(&bind) {
                 return Err(format!(
                     "--auth-tokens is required when --bind is {bind} (not loopback): an \
                      unauthenticated multi-tenant edge must not face the network"

@@ -3,11 +3,11 @@
 Three nodes as `agent-node.service`, fronted by one or more `agent-gateway.service`. The counterpart to [`k8s/`](../../k8s/), which is the same topology as a StatefulSet; the sizing, timeout, and failure-domain guidance behind both lives in [`docs/standalone-deployment.md`](../../docs/standalone-deployment.md), and the machine it is all derived from in [`docs/hardware-envelope.md`](../../docs/hardware-envelope.md).
 
 ```
-   HTTPS  ─►  gw-1 : agent-gateway  ─┐  actor transport (cluster secret)
+   HTTP   ─►  gw-1 : agent-gateway  ─┐  actor transport (cluster secret)
                                        │  node ids 100+, non-voting clients
         ┌──────────────────────────────┴──────────┐
    ┌────┴─────┐      ┌──────────┐      ┌──────────┴┐
-   │  node-1  │◄────►│  node-2  │◄────►│  node-3   │   transport 7401
+   │  node-1  │◄────►│  node-2  │◄────►│  node-3   │   transport 7401/7402/7403
    │ /var/lib │      │ /var/lib │      │ /var/lib  │   no client-facing listener
    │  own NVMe│      │  own NVMe│      │  own NVMe │   share nothing on disk
    └──────────┘      └──────────┘      └───────────┘
@@ -22,7 +22,8 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/agent`. Not sha
 ```
 /usr/local/bin/agent-standalone      the node binary
 /usr/local/bin/agent-gateway         the gateway binary
-/etc/agent/node.env                  0640 root:agent   config + secrets
+/etc/agent/node.env                  0640 root:agent   a node's config + secrets
+/etc/agent/gateway.env               0640 root:agent   a gateway's config + secret
 /etc/agent/tenants                   0640 root:agent   "<principal> <token>" per line
 /var/lib/agent/                      the mount point; one filesystem, this node's only state
 └── node/                              --data
@@ -88,6 +89,7 @@ These are worth checking before the first boot, because a mismatch is not always
 | `AGENT_NODES` and the `--peer` roster | how each node knows it has discovered enough peers to serve |
 | `AGENT_MODEL` | covered by the kind digest `SessionCreated` pins; a cluster running two models fails to agree rather than splitting silently |
 | `AGENT_SANDBOX` | also digest-covered, so a mixed-mode cluster fails to agree instead of silently splitting confinement |
+| `AGENT_PORT_BASE` | member i binds base + i - 1, so it is how any member computes the port for an id it has only a hostname for; a gateway on another base dials the wrong ports and discovers nothing |
 
 Node ids are the opposite: unique per machine, and stable across restarts.
 

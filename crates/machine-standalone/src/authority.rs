@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use actor_core::ActorId;
+use actor_core::NodeId;
 use actor_runtime::TcpCluster;
 use entity::EntityName;
 use entity::Entities;
@@ -34,6 +35,9 @@ pub struct EntityAuthority {
     /// death-watch target, so a front door that dies without detaching has
     /// its attachments reaped (`Detached { FrontDoorLost }`).
     door: ActorId,
+    /// This node, so [`attach`](EntityAuthority::attach) can refuse a machine
+    /// this node does not lead before journaling anything (machine §5.1).
+    node: NodeId,
     /// How long a front-door command waits. A machine mid-failover redirects
     /// within entity's bounded retry; past this the connection is refused
     /// rather than hung, and the client reconnects (machine §6).
@@ -41,10 +45,16 @@ pub struct EntityAuthority {
 }
 
 impl EntityAuthority {
-    pub fn new(machines: Entities<NodeMachine>, door: ActorId, timeout: Duration) -> EntityAuthority {
+    pub fn new(
+        machines: Entities<NodeMachine>,
+        door: ActorId,
+        node: NodeId,
+        timeout: Duration,
+    ) -> EntityAuthority {
         EntityAuthority {
             machines,
             door,
+            node,
             timeout,
         }
     }
@@ -81,6 +91,23 @@ impl MachineAuthority for EntityAuthority {
     }
 
     async fn attach(&self, machine: &EntityName, principal: &str) -> Result<u64, FrontDoorError> {
+        // The bridge is node-local (machine §5.1): a channel ends at a guest
+        // this node holds, so a door that does not lead the machine cannot
+        // serve it whatever the entity replies. Refuse here, before the
+        // `Attach` journals an attachment and boots a guest on the leader that
+        // the first channel open would then have to abandon. A routing
+        // observation, not a guarantee (leadership can move a moment later),
+        // which is why the channel backend still reports the loss; `None` is a
+        // shard mid-election, left to the ordinary bounded retry below.
+        if let Some(leader) = self.machines.leader(machine.key())
+            && leader != self.node
+        {
+            return Err(FrontDoorError(format!(
+                "{machine}: led by {leader}, and a front door bridges only the machines its own \
+                 node leads (machine §8's cross-node relay is not built). Reconnect to that \
+                 node's door."
+            )));
+        }
         self.machines
             .entity(machine.key())
             .ask_timeout(

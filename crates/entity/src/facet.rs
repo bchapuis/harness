@@ -495,8 +495,10 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Form, FacetError>> + Send;
 
     /// Every blob the form references (**F3**): the facet's contribution to the
-    /// entity's unioned live set (§7.12). Only the host sweeps; a facet never
-    /// issues `retain_blobs` itself, so one facet's GC can never drop another's.
+    /// entity's unioned live set (§7.12). A facet never sweeps: the one sweep above
+    /// the seam is [`EntityBlobs::gc`](crate::facet::EntityBlobs::gc), which the
+    /// application calls with its own roots, over a handle the host built with this
+    /// union folded in, so one facet's GC can never drop another's.
     fn roots(form: &Self::Form) -> BTreeSet<BlobId>;
 
     /// The runtime hook for durable alarms (spec §7.16): the pending deadline this

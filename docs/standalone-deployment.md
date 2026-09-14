@@ -160,9 +160,12 @@ The gateway is the public edge. It joins the same cluster as a non-voting client
 agent-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
 ```
 
-It logs `joined the cluster (client of nodes 1..=3)` once it discovers a host
-gateway through the receptionist gossip. With no `--auth-tokens`, the bearer
-token is taken as the tenant, unverified: loopback dev mode.
+It logs `[gateway 100] joined the cluster (client of nodes 1..=3)` as soon as it
+is on the transport, before it has discovered anything. Discovery finishes later,
+and the line that says so is `gateway listening on 127.0.0.1:8080`: the HTTP
+listener is bound only after a host gateway has been resolved through the
+receptionist gossip. With no `--auth-tokens`, the bearer token is taken as the
+tenant, unverified: loopback dev mode.
 
 ## Talk to it
 
@@ -191,13 +194,17 @@ as JSON (`{"outcome":{"Ok":{…}}}`). The endpoints:
 | `GET  /v1/{kind}/{session}/stream?turn=&from=`  | observe a run live (SSE) |
 | `POST /v1/{kind}/{session}/cancel?turn=`        | cancel a run (idempotent) |
 | `GET  /v1/sessions?kind=`                       | this tenant's sessions |
+| `GET  /healthz`                                 | liveness; 200 while the process runs, no auth |
+| `GET  /readyz`                                  | readiness; 200, and 503 from the moment a shutdown signal starts the drain, so a load balancer deregisters the replica before axum finishes the in-flight requests |
 
 Re-issuing the **same** `turn` id is the resume primitive: a completed run
 returns its recorded outcome, a live run re-attaches, never run twice (A7).
 
-The records *are* the session: each is a line in that session's own segment under
-`./agent-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
-any node reconstructs it; there is no other session state. The entity type comes
+The records *are* the session: each is one `postcard`-encoded, length-framed,
+checksummed entry in that session's own segment under
+`./agent-data/entities/<entity_type>/<node>/segments/` (not a text line: the file
+is an append-only binary log), and folding them back is how any node
+reconstructs it; there is no other session state. The entity type comes
 first because a store is per hosted type: its fence is keyed by shard index, and
 the same index is a different leader-election group under each type (entity
 §8.2).
@@ -207,8 +214,10 @@ replica, any node) and it resumes the same transcript.
 
 Ask the assistant to farm something out and it calls the `delegate` tool; the
 child runs as its own session of the `worker` kind, possibly on a different
-node, with a budget carved from the parent's, and the records show the
-`delegated to …` entry.
+node, with a budget carved from the parent's, and the parent's records carry a
+`ChildRun` entry naming the child's kind, session, turn, and carved budget. What
+the child produced comes back separately, as the `delegate` call's own
+`ToolOutcome`.
 
 ## The failure drill
 
@@ -285,7 +294,9 @@ near a millisecond and reverses an assumption the storage layer is built on
 ### Timeouts by topology
 
 `quorum_timeout` and `recover_timeout` (`EntityConfig`) default to 2 s, which
-is safe everywhere and derived for nowhere. Set them from the p99.9 commit
+is safe everywhere and derived for nowhere. No flag reaches them: `agent-standalone`
+builds its `EntityConfig` in `node.rs`, so tuning them is an edit there and a
+rebuild, not something an operator sets at launch. Set them from the p99.9 commit
 latency you measure, never from a median; the tail is what they exist for. As
 starting points, against the round trips in hardware-envelope §2:
 
@@ -310,12 +321,14 @@ unavailable shard on a cluster that still looks healthy.
 
 There are no availability zones on dedicated hardware: the domains are racks
 and datacenter sites. Supply the mapping from whatever static metadata you
-already have per host: the site, or the rack if your provider exposes it:
+already have per host: the site, or the rack if your provider exposes it. A
+closure is not a command-line value, so this too is an edit to the `EntityConfig`
+`node.rs` builds, not a flag:
 
 ```rust
-// `FailureDomains` is `Arc<dyn Fn(NodeId) -> u64>`, and the mapping MUST be a
-// pure function every node evaluates identically: static deployment metadata,
-// never anything read from the local host.
+// `FailureDomains` is `Arc<dyn Fn(NodeId) -> u64 + Send + Sync>`, and the mapping
+// MUST be a pure function every node evaluates identically: static deployment
+// metadata, never anything read from the local host.
 let racks: entity::FailureDomains = std::sync::Arc::new(|node: NodeId| match node.uid() {
     1 | 2 => 0, // site A, rack 1
     3 | 4 => 1, // site A, rack 2

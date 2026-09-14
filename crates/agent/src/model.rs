@@ -1,9 +1,10 @@
 //! The model seam (agent spec §4): one inference request, one response.
 //!
-//! The agent runtime core depends only on the [`Model`] trait: `agent-anthropic`
-//! implements it over the Anthropic Messages API in production, and the
-//! simulator supplies a scripted model; a deterministic function of the request
-//! and the run's seed (§12.2). A completion request is side-effect-free, so an
+//! The agent runtime core depends only on the [`Model`] trait: in production
+//! `agent-anthropic` implements it over the Anthropic Messages API and
+//! `agent-openai` over OpenAI-compatible Chat Completions, and the simulator
+//! supplies a scripted model; a deterministic function of the request and the
+//! run's seed (§12.2). A completion request is side-effect-free, so an
 //! implementation MAY retry internally with backoff from `Clock`/`Entropy`
 //! without violating the core no-transparent-retry rule (core spec §1.2); a
 //! failure that survives the policy ends the run as `RunError::Model` (§4.3),

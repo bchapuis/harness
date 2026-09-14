@@ -74,8 +74,9 @@ const REPLAY_BATCH: usize = 256;
 
 /// The internal command carrying a typed message to the host. Its reply is
 /// `Result<M::Reply, EntityError>`: the durability outcome wraps the user's
-/// application reply, keeping the two failure layers distinct (§4.2, §12). Not in
-/// the host's network `register` list, so it travels only by a local `ask`.
+/// application reply, keeping the two failure layers distinct (§4.2, §12). It is the
+/// host's network surface for commands (§5.5): the wrapper is transparent and borrows
+/// the inner manifest, so the wire key is the command's own.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct RunTyped<M>(pub(crate) M);

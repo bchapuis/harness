@@ -177,7 +177,7 @@ impl ReceptionistState {
     }
 
     /// Subscribe to `key`, delivering the current snapshot immediately (spec §13
-    /// rule 4) and then on every change.
+    /// requirement 5) and then on every change.
     fn subscribe(&self, key: &str) -> async_channel::Receiver<Vec<ActorId>> {
         let (tx, rx) = async_channel::unbounded();
         let _ = tx.try_send(self.snapshot(key));

@@ -1414,11 +1414,18 @@ mod tests {
         let mut bare = 7u64.to_le_bytes().to_vec();
         bare.extend_from_slice(&wal::checksum(&7u64.to_le_bytes()).to_le_bytes());
 
+        // A good fence with something after it: the body this build writes ends where
+        // its fields end, so a decoder that ignores the remainder reads a foreign or
+        // half-rewritten file as a fence of its own.
+        let mut long = stamped_sidecar(&FENCE, 7);
+        long.extend_from_slice(b"appended");
+
         for (what, bytes) in [
             ("a version this build does not accept", future),
             ("a stamped record whose body is damaged", torn),
             ("a bare value with no stamp", bare),
             ("a file of no recognized shape", vec![0u8; 20]),
+            ("a stamped record with bytes appended", long),
         ] {
             let dir = tempfile::tempdir().unwrap();
             drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));

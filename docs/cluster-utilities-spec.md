@@ -52,10 +52,11 @@ A group router spreads calls over the actors registered under one receptionist `
 
 1. A router is a **node-local, typed view** over a receptionist `Key`. It MUST NOT replicate state of its own or introduce wire frames; the receptionist's replication is the only cluster state involved.
 2. Every routing decision MUST draw from the **current serving listing** (core §13 req 4) at decision time, so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and a `resume` restores it without re-registration.
-3. Strategies:
+3. Strategies and keyed routing. A router's `RouteStrategy` is one of two **keyless** choices, and it is what an unkeyed route uses:
    - **Round-robin** MUST cycle the listing in its deterministic order (the registry is an ordered set), so the cycle is reproducible under a fixed seed (core §18.1).
    - **Random** MUST draw from the system's seeded entropy (core §4.6, §18.1), never an ambient RNG.
-   - **Rendezvous-hashed** routing selects by a **caller-supplied key**: routees are ranked by the §2 weight function over the routee's actor tag (owner-node tag ‖ path ‖ incarnation), ties to the lower `ActorId`. The same key over the same listing MUST select the same routee on every node.
+
+   **Rendezvous-hashed** selection is not a third `RouteStrategy`. It is a per-call choice every router offers whichever strategy it carries (the `route_by`/`ask_by`/`tell_by` family), and it bypasses the strategy for that call: routees are ranked by the §2 weight function over the routee's actor tag (owner-node tag ‖ path ‖ incarnation), ties to the lower `ActorId`, against a **caller-supplied key**. The same key over the same listing MUST select the same routee on every node.
 4. A route over an **empty listing** MUST fail fast with `DeadLetter`; the router MUST NOT buffer, queue, or retry (core §1.2, §14.2).
 5. Routing adds **no delivery guarantee** beyond the underlying `ask`/`tell` (core §7.2), and no failure handling beyond theirs: a stale listing entry MAY still route to an actor that just terminated, and the call then fails like any direct call would.
 

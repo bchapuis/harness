@@ -1144,11 +1144,19 @@ async fn handle_envelope<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    // Authorization gate (spec §15). An `ask` gets the rejection as its reply;
-    // a `tell` is dropped.
+    // Authorization gate (spec §15). An `ask` gets the rejection as its reply; a
+    // one-way `tell` has no reply, so the refusal is recorded on the event stream,
+    // its only trace (spec §6 rule 4, §16), exactly as the host records the
+    // refusals it decides itself (`LocalHost::deliver`).
     if let Some(authorizer) = &system.inner.authorizer
         && !authorizer.authorize(from, &recipient, &manifest)
     {
+        let refusal = CallError::System("unauthorized".into());
+        system.inner.events.emit(actor_core::Event::Undelivered {
+            actor: recipient.clone(),
+            manifest: manifest.clone(),
+            error: refusal.clone(),
+        });
         if let Some(call) = correlation {
             let _ = system
                 .inner
@@ -1157,7 +1165,7 @@ async fn handle_envelope<C, E, S, T>(
                     from,
                     Frame::Reply {
                         correlation: call,
-                        outcome: Err(CallError::System("unauthorized".into())),
+                        outcome: Err(refusal),
                     },
                 )
                 .await;

@@ -25,8 +25,11 @@ const W_CATALOGUE: &[CatalogueEntry] = &[
         spec: "workflow §3.1",
         property: "Desired-set purity: pending is a pure, deterministic function of committed state; two activations folding the same journal prefix compute the same desired set, and no ephemeral state is reachable from it",
         verify: &[
-            Verify::Differential("conformance_cycle.rs, conformance_resume.rs"),
-            Verify::SimTest("workflow_swarm.rs"),
+            // The three-way differential (live, successor, offline fold) is
+            // `conformance_resume.rs`; `conformance_cycle.rs` pins re-derivation
+            // across an eviction, and the swarm sweeps seeds.
+            Verify::Differential("conformance_resume.rs"),
+            Verify::SimTest("conformance_cycle.rs, workflow_swarm.rs"),
         ],
     },
     CatalogueEntry {

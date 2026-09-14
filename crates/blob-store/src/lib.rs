@@ -41,7 +41,7 @@ pub use tombstone::{Tombstone, TombstoneSet};
 
 /// Open (creating if absent) the single-node, on-disk `Local` tier rooted at
 /// `path` (spec §5.1): the embedded, test, and simulator tier. The
-/// free-function spelling of Appendix A's `BlobStore::local`.
+/// free-function spelling of Appendix A's `blob_store::local`.
 pub fn local(path: impl AsRef<Path>) -> io::Result<LocalBlobStore> {
     LocalBlobStore::open(path.as_ref())
 }

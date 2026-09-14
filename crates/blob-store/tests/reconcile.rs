@@ -1,6 +1,6 @@
 //! The reconcile loop across a real multi-node cluster (blob-store spec §7, §5.3,
-//! §8): re-replication after a departure (**B6**) and tombstone reclamation
-//! (**B7** liveness).
+//! §8): re-replication after a departure, and the additive-only rule that
+//! rebalancing never drops a copy (both **B6**).
 //!
 //! The harness mirrors `tests/clustered.rs` (SWIM gossip membership), sized to
 //! whatever node set a test needs.

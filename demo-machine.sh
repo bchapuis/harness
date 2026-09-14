@@ -4,7 +4,7 @@
 #
 # This boots a three-node cluster (three OS processes on your machine, each with
 # its own journal, replicated over the transport), provisions a machine, and
-# opens an SSH front door on each node. The machine is a *entity*: its whole
+# opens an SSH front door on each node. The machine is an *entity*: its whole
 # rootfs is durable state, so it survives disconnection, idle hibernation, and
 # the death of the node it was running on. See docs/machine-spec.md.
 #

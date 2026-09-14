@@ -118,9 +118,11 @@ kubectl logs agent-0 | tail                   # "cluster ready (leader elected)"
 kubectl logs agent-gw-0 | tail                # "joined the cluster (client of nodes 1..=3)"
 ```
 
-All node and gateway pods start at once (`podManagementPolicy: Parallel`): each
-waits to discover its peers before reporting ready, so a one-at-a-time rollout
-would deadlock.
+All node and gateway pods start at once (`podManagementPolicy: Parallel`): a node
+resolves every peer by its pod DNS name at startup, which needs those pods to
+exist, so a one-at-a-time rollout would deadlock. `rollout status` returns once
+the containers are running; the node container carries no readiness probe, so
+the log lines above, not the rollout, are where the formed cluster shows up.
 
 ## 4. Talk to it
 
@@ -206,9 +208,10 @@ right boundary.
   there.
 - **The transport is plaintext, guarded by the cluster secret** (`agent-cluster`).
   The gateway joins it inside the trust boundary, so it must be a trusted
-  component, which it is: tenant auth terminates there. Fine within a trusted
-  cluster network; provision transport TLS (`TlsConfig`, on both the nodes and
-  the gateways) before crossing untrusted links.
+  component, which it is: tenant auth terminates there. The transport itself
+  supports mutual TLS (`Encryption::MutualTls`), but neither binary exposes a
+  flag for it: both name `Encryption::PlaintextTrusted` in code, so a deployment
+  crossing untrusted links has to provision certificates there and rebuild.
 - **`storage: 1Gi` per pod** is arbitrary; size it to your sessions.
 
 ## Tear down

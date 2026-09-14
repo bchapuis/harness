@@ -595,7 +595,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
             return events;
         }
 
-        // Quiescent point 3 (machine §4): the mid-session checkpoint. Every
+        // Quiescent point 2 (machine §4): the mid-session checkpoint. Every
         // fire re-arms, which is the session lease's fenced append (M5), even
         // when no capture is due.
         ctx.alarm().set_after(state.alarm_cadence());

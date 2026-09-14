@@ -11,8 +11,9 @@
 //!   namespace's blobs scatter cluster-wide, which is why deletion fans out to
 //!   every node rather than to `R` (spec §5.3).
 //! - [`key_ns`] hashes the **namespace alone**, giving a namespace's tombstone a
-//!   stable home (its [`tombstone_owners`]) independent of any blob, where the
-//!   durable tombstone is anchored and sweep completion is reported (spec §5.3).
+//!   stable home (its [`tombstone_owners`]) independent of any blob: the anchors
+//!   are where the durable tombstone lives, and a delete succeeds once `W` of them
+//!   have acked it (spec §5.3).
 //!
 //! Both are pure functions of their inputs, and [`placement::top`] reassigns only
 //! the keys whose owner set actually changed when membership changes (utilities
@@ -53,7 +54,7 @@ pub fn owners(members: &[NodeId], ns: &Namespace, id: &BlobId, r: usize) -> Vec<
 
 /// The `R` tombstone-anchor owners of `ns`: the `R` highest-ranked `members`
 /// under rendezvous hashing of [`key_ns`] (spec §5.3). `delete_namespace` anchors
-/// the tombstone on `W` of these and they track each node's sweep completion.
+/// the tombstone on `W` of these: they count acks and keep no other bookkeeping.
 pub fn tombstone_owners(members: &[NodeId], ns: &Namespace, r: usize) -> Vec<NodeId> {
     placement::top(members, &key_ns(ns), r)
 }

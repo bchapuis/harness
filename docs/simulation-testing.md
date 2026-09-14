@@ -16,7 +16,8 @@ Three principles govern the strategy.
   not chosen outputs and not a pile of example assertions.
 - **Fault injection.** Bugs hide in the failure paths. Inject partitions,
   crashes, loss, duplication, delay, and reordering under seed control (§18.3),
-  and prove the injection actually fired.
+  plus the external registry's own faults (`RegistryFaultPolicy`: a slow, stale,
+  or unavailable sync), and prove the injection actually fired.
 
 ## The simulator is owned, not imported
 
@@ -164,17 +165,23 @@ not a prerequisite, and is not currently wired in.
 in-memory simulator carries *structured* frames (only the payload is
 codec-encoded, §18.2), so it has nothing to bit-flip; the "malformed frame tears
 down the association, not the node" requirement (§7) belongs to the
-**production** TCP transport's framing, tested against real wire bytes. Not
+**production** TCP transport's framing, tested against real wire bytes in
+`actor-runtime/tests/transport_invariants.rs`
+(`a_malformed_frame_tears_down_its_association_not_the_node`, where a handshaken
+peer writes an undecodable payload and an over-cap length prefix). Not
 implemented: a `cargo-fuzz` target over that framing and the codec.
 
 **Exhaustive enumeration, where the state space allows it.** A seeded sweep is a
 *sample*; where the space is small enough to enumerate, enumerate instead.
 `wal`'s `tests/crash_points.rs` is the case: a log of a few records is a few
 hundred bytes, so recovery is checked at every truncation offset and against
-every single-byte corruption, for four properties (the recovered records are a
+every single-byte corruption, for five properties (the recovered records are a
 prefix of what was appended; truncating further never recovers more; the torn
 tail is dropped durably so a reopen agrees; the recovered log still accepts an
-append that lands after the prefix). A sweep would be strictly weaker there.
+append that lands after the prefix; and, refused rather than recovered, damage to
+any of the twelve header bytes makes `open` refuse, which is also what proves the
+header validates all of itself and not just its magic). A sweep would be strictly
+weaker there.
 
 ## The shapes
 
@@ -207,7 +214,9 @@ if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
 
 Use this when the property should hold under *every* interleaving, not one. The
 workload says what traffic to generate and which invariants must hold; the
-runner varies scheduling, seeded transport faults, and the nemesis per seed.
+runner varies scheduling, the seeded transport faults of `FaultPolicy`, the
+seeded registry faults of `RegistryFaultPolicy` (latency, and a stale snapshot
+bounded by `max_staleness`), and the nemesis per seed.
 
 Each round the nemesis draws one action: a symmetric partition, a one-way
 partition, a crash (isolation: the process keeps running), a bounded process
@@ -249,8 +258,9 @@ assert!(stats.dropped > 0 && stats.duplicated > 0, ...);
 
 A sweep that *configures* faults but never *triggers* one gives false
 confidence. `FaultStats` tallies the faults a run actually exercised (dropped,
-duplicated, delayed, blocked), so a green sweep provably covered loss,
-duplication, reordering, and partition/crash, not just the happy path. Because
+duplicated, delayed, blocked, registry_outages, registry_stale), so a green sweep
+provably covered loss, duplication, reordering, partition/crash, and a registry
+that went away or answered from behind, not just the happy path. Because
 the assertion is about the whole declared range, `coverage_seeds` never narrows
 it (see below).
 
@@ -289,15 +299,16 @@ reproducibility sweeps as well as a name. Reach for this when it does not.
 
 ## Where things live
 
-**Sweeps go in `*swarm.rs`; scenarios go everywhere else.** Three clauses, all
-checked by `tests/corpus_keys.rs`:
+**Sweeps go in `*swarm.rs`; scenarios go everywhere else.** Three clauses, the
+first two checked by `tests/corpus_keys.rs`:
 
 1. A file that calls `run_swarm`, `run_cluster_swarm`, or
    `run_cluster_swarm_coverage` is named `*swarm.rs`.
 2. A file that calls `replay_swarm`, `replay_cluster_swarm`,
    `check_reproducible`, or `check_cluster_reproducible` is named `*swarm.rs`
    **or** `*determinism.rs`.
-3. `scenario_sweep` is unconstrained; it lives with the scenarios it sweeps.
+3. `scenario_sweep` is unconstrained; it lives with the scenarios it sweeps. The
+   checker leaves it out for exactly that reason: there is nothing to enforce.
 
 The two kinds fail differently: a scenario failure names a sequence you can read,
 a sweep failure names a seed you have to replay. Separate binaries keep that

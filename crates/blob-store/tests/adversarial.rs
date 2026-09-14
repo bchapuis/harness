@@ -89,9 +89,11 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
     // partition (the node returns with its disk, only `unreachable`, never downed,
     // under the conservative policy). The healed node MUST NOT resolve the deleted
     // namespace: a `get`/`has` issued *on* it must not serve the swept blob, and it
-    // must not push a stale copy back. The tombstone must reach it (re-sync/gossip)
-    // before it resumes serving (spec §5.3 "re-syncs the set from the anchor owners
-    // on rejoin, before it resumes accepting StoreBlobs or reconciling ns").
+    // must not push a stale copy back. The healed node serves before it has pulled
+    // any tombstone (spec §5.3): its first reconcile pass pushes before it pulls, so
+    // what stops the stale copy is the receiving owner rejecting a `StoreBlob` whose
+    // namespace is tombstoned, and the same pass's pull then teaches the holder the
+    // tombstone, which sweeps its own copy.
     let sim = Simulation::new(7);
     let (net, stores, _dirs) = cluster(&sim);
     let store_of = |n: NodeId| {

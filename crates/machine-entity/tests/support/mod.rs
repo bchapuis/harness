@@ -36,7 +36,7 @@ const M_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 2,
         spec: "machine §4, §6",
-        property: "Lossless across graceful boundaries: a machine hibernated when idle, or migrated cooperatively, re-activates with the disk as of its final capture command; no write preceding a graceful boundary is lost",
+        property: "Lossless across idle hibernation: a machine that goes idle re-activates with the disk as of the final capture command the idle path runs when the last attachment goes; a cooperative handoff runs no capture of its own, so it is lossless only for a machine already captured",
         verify: &[Verify::TestFn(
             "attach_capture_detach_hibernate_reattach_round_trips, \
              workspace_files_survive_boot_capture_and_hibernation",
@@ -54,7 +54,7 @@ const M_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 4,
         spec: "machine §5.1",
-        property: "Authenticated, attributable, isolated ingress: a session is bridged only on possession of a key the machine's journaled policy authorizes; each attachment and detachment is journaled with its principal; a bridged session reaches only its own machine's guest",
+        property: "Authenticated, attributable, isolated ingress: a session is bridged only on possession of a key the machine's journaled policy authorizes; each attachment and detachment is journaled with its principal; a bridged session reaches only its own machine's guest, by construction rather than by a test of its own",
         verify: &[Verify::TestFn(
             "an_authorized_key_attaches_and_bridges_an_exec_channel, \
              an_unauthorized_key_is_rejected, \

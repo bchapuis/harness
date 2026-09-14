@@ -303,7 +303,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // so a machine death-watches it and reaps the attachment if this process
     // dies without detaching (machine §5.1).
     let door = system.spawn(FrontDoor).id().clone();
-    let authority = Arc::new(EntityAuthority::new(machines.clone(), door, DOOR_TIMEOUT));
+    let authority = Arc::new(EntityAuthority::new(machines.clone(), door, node, DOOR_TIMEOUT));
     for (port, name) in &opts.doors {
         let addr: SocketAddr = format!("{}:{port}", opts.bind_host)
             .parse()

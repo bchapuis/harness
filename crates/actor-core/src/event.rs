@@ -52,7 +52,8 @@ pub enum Event {
     Enqueue { actor: ActorId, manifest: Manifest },
     /// An inbound remote message was refused at delivery to `actor` with
     /// `error` (spec §6 rule 4, §8): no live actor, no registration for the
-    /// manifest, an undecodable payload, or a full mailbox. An `ask` also sees
+    /// manifest, an undecodable payload, a full mailbox, or a sender the
+    /// authorizer refuses (spec §15). An `ask` also sees
     /// the error as its reply; a one-way `tell` has no reply, so this event is
     /// the only trace that its message was not accepted. `manifest` is the
     /// claim the frame carried: untrusted wire text, so not a [`Manifest`].

@@ -12,10 +12,12 @@
 #
 # Build from the repository root:  docker build -t agent-standalone:latest .
 
-FROM rust:1.88-bookworm AS build
+FROM rust:1.97.1-bookworm AS build
 WORKDIR /src
 COPY . .
-# edition 2024 needs Rust ≥ 1.85, but the tree uses let-chains (stable in 1.88).
+# The toolchain rust-toolchain.toml pins, so the image builds what a checkout
+# builds. The MSRV is lower (workspace.package.rust-version), but a release
+# image has no reason to differ from the pinned development toolchain.
 RUN cargo build --release -p agent-standalone -p agent-gateway
 
 FROM python:3.12-slim

@@ -51,7 +51,7 @@ Every format in the tree, its name, and where its layout is specified. A new dur
 |---|---|---|---|
 | `actor.wire` | 1 | The version announced in the `Hello` preamble | [actor](distributed-actor-spec.md) §7.1 |
 | `entity.record` | 1 | The envelope's leading byte, whose high bit marks another version | [entity](entity-spec.md) §9 |
-| `entity.snapshot` | 1 | `GRSNAP` and a `u16`, ahead of the composite's body | [entity](entity-spec.md) §7.12 |
+| `entity.snapshot` | 1 | `GRSNAP` and a `u16`, ahead of the composite's body | [entity](entity-spec.md) §9 |
 | `entity.store` | 1 | `GRSTOR` and a `u16`, in the store directory's `store` file | [entity](entity-spec.md) §7.4 |
 | `wal.frame` | 1 | The log file header's magic and frame version | [wal](wal-spec.md) §2.1 |
 | `actor.raft.log` | 1 | The record-schema field of its log's header | actor §9.4.3 |
@@ -67,7 +67,7 @@ Every format in the tree, its name, and where its layout is specified. A new dur
 
 `entity.shardmap` and `actor.membership` are payloads riding the already-stamped `actor.raft.log`, whose version covers the envelope and not them, so each carries a stamp of its own.
 
-**Two durable formats are deliberately unstamped**: a blob file (`blob-store` `local.rs`) and an entity-colocated blob (`entity` `file_store.rs`) are named by the BLAKE3 hash of their own bytes. A prefix would make the path disagree with what it addresses, and the reader that re-hashes on every read would refuse what the writer wrote. There the stamp *is* the name, and it is checked on every read rather than once per format change.
+**Two durable formats are deliberately unstamped**: a blob file (`blob-store` `local.rs`) and an entity-colocated blob (`entity` `file_store.rs`) are named by the BLAKE3 hash of their own bytes. A prefix would make the path disagree with what it addresses, and the reader that re-hashes on every read would refuse what the writer wrote. There the stamp *is* the name, and it is checked on every read rather than once per format change. **V1** does not reach rebuildable node-local materializations (the facet scratch files `entity` writes in `sql.rs` and `ws.rs`) or process control files (a microvm's `config.json`, pid, and console files in `machine-host`): each belongs to one activation or one process on one node and is rebuilt rather than carried across a format change, so neither is a durable byte sequence.
 
 **Granularity is a cost decision.** A stamp should be the coarsest one that still catches the error, because its cost is paid per stamped item and its value once per mistake. An association is stamped once for its whole lifetime; a snapshot is large and cold, so eight bytes and a codec name are noise; a journal record is the hottest durable path in the tree and is stamped for **zero bytes** by reserving a bit of a byte it already carries. A fence file keeps a stamp of its own rather than borrowing the store directory's, because a fence restored from a backup or copied between directories is a durable byte sequence in its own right (**V1**), and one file per shard, rewritten only when the term advances, rounds the cost to nothing.
 

@@ -169,6 +169,8 @@ pub trait Model: Send + Sync + 'static {
 }
 ```
 
+This document writes the seams' methods as `async fn` for readability; the crate spells them as methods returning `BoxFuture`, here and at the sandbox seam (§5.3), because every seam is held behind a trait object (`Arc<dyn Model>`, `Arc<dyn SandboxProvider>`, `Arc<dyn Sandbox>`) and `async fn` in a trait is not object-safe.
+
 `ModelRequest` carries the kind's system prompt, model parameters, the tool declarations (name, description, input schema) of the kind's toolset, the folded transcript, and `max_tokens`. `ModelResponse` carries the assistant content, zero or more requested tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
 
 The model is a seam exactly like `Transport` (core §7) and the `EntityJournal` (entity §7.3): the agent runtime core depends only on the trait. In production `ProtocolModel` implements it over an injected `HttpPost` (§12.1), with `agent-anthropic` supplying the Anthropic Messages protocol and `agent-openai` the OpenAI-compatible Chat Completions protocol; the simulator supplies a **scripted model**, a deterministic function of the request and the run's seed (§12.2).
@@ -200,7 +202,7 @@ Above the boundary, the loop touches the world only through the three seams; it 
 
 **Why the boundary cuts here.** Three other placements lose: with **no sandbox**, one session's `rm -rf` or runaway build takes the node (a shard leader hosting many entities, entity §5.2) and every co-located session with it; with the **loop inside the sandbox**, every session pays for an isolated environment to host control flow that is mostly waiting, and the entity's discipline becomes as opaque to the runtime as the tools are; with **a sandbox per tool call**, consecutive calls share nothing, though the checkout, build cache, or running server one step produced is what the next step needs.
 
-Hence one sandbox **per session**, opened lazily per activation (§5.3) and colocated with the shard leader where the activation already runs (entity §5.2): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. The workspace directory the sandbox runs over is the session entity's own **workspace facet** (entity §7.11): each tool call's file delta commits atomically with its `ToolOutcome` record, and every activation, including one on a new leader after a migration, rematerializes the directory from the journal. What remains working state is the *environment*: running processes, containers, held tiers, and regenerable excluded trees; when that is lost mid-activation, §5.5 puts the loss on the record rather than papering over it.
+Hence one sandbox **per session**, opened lazily per activation (§5.3) and colocated with the shard leader where the activation already runs (entity §5.2): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. The workspace directory the sandbox runs over is the session entity's own **workspace facet** (entity §7.11): each tool call's file delta commits atomically with its `ToolOutcome` record, and every activation, including one on a new leader after a migration, rematerializes the directory from the journal. What remains working state is the *environment*: running processes, containers, held tiers, and regenerable excluded trees; when that is lost mid-activation, §5.5 puts the loss on the record rather than papering over it. The facet's durable cap (64 MiB, the entity's `MAX_TREE_BYTES`) bounds that capture: a call whose post-call capture exceeds the cap is reported to the model as that call's `ToolError::Sandbox` (§5.4) with its file delta unpersisted, so an oversized tree is an application outcome the model trims rather than a failure of the run.
 
 ### 5.2 Declarations and the registry
 
@@ -210,7 +212,7 @@ Every tool is **declared** to the agent runtime; the model and the loop need its
 pub struct ToolDecl {
     pub name: String,           // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
     pub description: String,
-    pub input_schema: Schema,
+    pub input_schema: Value,     // the tool's JSON Schema, as a `serde_json::Value` the model is shown (§4.1)
     pub tier: Tier,              // the capability set the call requires (§5.6); part of the kind's digest (§7.1)
     pub on_orphan: OnOrphan, // the declared recovery policy for an orphaned call (§5.5)
     pub timeout: Option<Duration>, // per-call bound; the agent runtime default applies when absent (§5.3)
@@ -263,6 +265,8 @@ pub trait Sandbox: Send + Sync + 'static {
 }
 ```
 
+`open`, `call`, and `release` are written `async fn` above and spelled as `BoxFuture`-returning methods in the crate, for the object safety §4.1 states.
+
 1. **Lazy, per tier.** An activation opens its sandbox on its first sandboxed call; a session that never needs one never pays for one. Tiers are provisioned the same way: the agent runtime passes each call's declared tier (the provider holds no registry and cannot derive it), and the provider builds a tier's environment on the first call carrying it (§5.6).
 2. **Bound per activation.** At most one live sandbox per activation, and deactivation MUST release it (invariant A8), whether the deactivation is a shard-leadership move (migration), a hibernation, or a forced step-down on a non-contiguous commit (entity §6). The sandbox lives on the activation's current leader node and never migrates; a new leader opens a fresh one (§5.5).
 3. **Launched, never awaited inline** (§3.2): outcomes return as messages, bounded by a per-tool timeout from `Clock`: the call's declared `timeout` (§5.2), or, when it declares none, a configurable runtime default (SHOULD default to about **5 minutes**). The timeout bounds the *outcome*, not the effect: the sandbox-side process MAY still be running, and still writing, when the `Timeout` outcome is journaled, so the workspace capture that commits with it (§5.1, entity §7.11) can be **torn**, holding files the straggler had half-written. The journal stays consistent (it records what the directory held at capture), the next call's capture diffs against the last committed index and folds in whatever the straggler finished, and the model, told of the timeout, reacts with that transcript in view.
@@ -279,6 +283,8 @@ A tool call's **intent** is journaled before execution and its **outcome** after
 
 - an orphaned call declared `OnOrphan::Reexecute` MUST be re-executed, in a fresh sandbox if the old one is gone; the re-execution may fail for exactly that reason, surfacing per §5.4;
 - an orphaned call declared `Interrupt` MUST be resolved as `ToolError::Interrupted`, fed to the model like any tool failure (§5.4), so the *model* decides whether to retry the side effect.
+
+The same settling path carries the workflow's other effect failures into the transcript as tool outcomes: `EffectError::Timeout`, `Lost`, and `Failed` become `ToolError::Timeout`, `EnvironmentLost`, and `Sandbox` (§5.4).
 
 An orphaned call is not always dead. The entity's single-writer fence guarantees one *transcript* (entity §8), but it cannot recall a launched effect. A leader deposed but not yet aware of it (the read-your-leader window, entity §7.5) may still be *executing* a slow call when the new leader resolves it: a `Reexecute` re-execution may then run concurrently with the original, and a model answering `ToolError::Interrupted` with a retry may duplicate a side effect the old leader is still producing. The window is the duration of the in-flight call, not a message round-trip. This is the cost entity itemizes for a deposed leader (entity §11) made concrete for effects: the fence guards the record, not the world. (`delegate` is the one call the architecture itself rescues: its re-execution is a child `Submit` carrying the same `TurnId`, which dedups into an attach rather than a second run, §7.4, §8.1.)
 
@@ -342,7 +348,7 @@ A session's cluster life is the entity's life cycle (entity §10), and the journ
 
 ### 7.1 Kinds
 
-Each node's agent runtime is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). A `KindId` is an `entity_type` (entity §5.1); the kind is the entity type's configuration (its `EntityConfig`: shard count, replication factor, idle window, snapshot policy; entity Appendix A). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); the digest covers, among the definition's fields, each tool's declared tier and the profile's tier cap (§5.6). A node cannot activate a kind it lacks: the per-kind factory captures the kind's definition, so an activation of a hosted entity type resolves its kind without a lookup; `HarnessBuilder::host` panics at build for a kind the registry does not hold, and `Harness::session` returns `UnknownKind` for a kind the node's directory neither hosts nor routes (§7.4). A missing kind is a deployment error surfaced before any run starts (nothing journaled, no `RunStarted`), never a silent fallback.
+Each node's agent runtime is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). A `KindId` is an `entity_type` (entity §5.1); the kind is the entity type's configuration (its `EntityConfig`: shard count, replication factor, idle window, snapshot policy; entity Appendix A). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); the digest covers, among the definition's fields, each tool's declared tier and the profile's tier cap (§5.6). A node cannot activate a kind it lacks: the per-kind factory captures the kind's definition, so an activation of a hosted entity type resolves its kind without a lookup; `HarnessBuilder::host` panics in the call itself for a kind the registry does not hold (the builder resolves the definition there, so the error surfaces at the line that names the kind, not at `build`), and `Harness::session` returns `UnknownKind` for a kind the node's directory neither hosts nor routes (§7.4). A missing kind is a deployment error surfaced before any run starts (nothing journaled, no `RunStarted`), never a silent fallback.
 
 Registration is knowledge; a node's **directory**, the kinds it *hosts* (entity types it serves, seams injected) plus the kinds it only *routes to* (the cluster-client path, entity §5.3), is per-node deployment shape. Harness construction MUST reject a directory that does not close over delegation: every hosted kind's delegation allowlist (§8.1) must be contained in the directory, because the parent's own node launches the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its route for the child's kind. Uncovered, every delegation to that kind would fail per-call, and an owed cancel would wait on a better-configured node leading the shard (A5's liveness). The rejection is at build, as loud as a duplicate tool name (§5.2), so the gap is a deployment error, never a mid-run discovery.
 
@@ -390,7 +396,7 @@ A read (`tail`, and any future query that emits no record) commits nothing (enti
 ### 7.4 The client view (`SessionRef`) and idempotent submission
 
 ```rust
-let h = Harness::cluster(system, kinds, model, sandboxes);
+let h = Harness::cluster(system, &kinds, model, sandboxes);
 //   per node: registers each kind's gateway and injects the model and sandbox seams (§4, §5.3);
 //   the journal is the entity's, configured per kind (§7.1), not an agent-runtime seam.
 let s = h.session("researcher", SESSION_ID)?;      // an EntityRef<Agent>; name→shard is a pure local hash,
@@ -511,11 +517,11 @@ These events deliberately restate information the journal already holds (a `RunS
 | `RunStarted` | `session`, `turn`, `parent?` | A run began: the turn's `TurnStarted` committed (§3.1). |
 | `ModelCompleted` | `session`, `turn`, `node`, `usage` | One model call finished; `usage` feeds the A4 checker, scoped to journaled spend (below). |
 | `RunEnded` | `session`, `turn`, `outcome` | The run's exactly-one terminal outcome was journaled. |
-| `ToolCompleted` | `session`, `turn`, `node` | One sandboxed tool call resolved on `node` (§5.3). |
+| `ToolCompleted` | `session`, `turn`, `node` | One tool call's `ToolOutcome` committed on a live activation on `node` (§5.4). |
 | `SandboxBound` | `session`, `node` | The activation opened its sandbox (first sandboxed call, §5.3). |
 | `SandboxReleased` | `session`, `node` | That sandbox was torn down (hibernation, migration, loss, or step-down). |
 
-The sandbox pair is *not* derivable from records, because the sandbox is not session state (§5.5). Run boundaries (`RunStarted`/`RunEnded`) and per-call `usage` (`ModelCompleted`) are the minimum needed to check A3/A4/A7 on the stream, and `ToolCompleted` carries the node a sandboxed call resolved on, which lets the A8 checker place each call inside a `SandboxBound`/`SandboxReleased` window; everything else about a session's lifecycle is read from the entity's events.
+The sandbox pair is *not* derivable from records, because the sandbox is not session state (§5.5). Run boundaries (`RunStarted`/`RunEnded`) and per-call `usage` (`ModelCompleted`) are the minimum needed to check A3/A4/A7 on the stream, and `ToolCompleted` marks one call's outcome landing in the journal, which the run-discipline checker reads to reject a straggler committing after its run ended (§3.2); everything else about a session's lifecycle is read from the entity's events.
 
 Session activation, deactivation, and the single-writer fence are observed through the **entity's** events, not duplicated here: `Activated`/`Deactivated` mark the activation lifecycle (entity §13), `LeaderChanged` marks a migration, and the absence of a forked log is E1, checked over the entity stream (entity §14). The agent runtime's `SandboxBound`/`SandboxReleased` MUST alternate within the entity's `Activated`/`Deactivated` window for that session and node (the A8 effect-containment check), and a bound sandbox's `SandboxReleased` MUST precede that activation's `Deactivated`: the entity host runs the agent's `on_deactivate`, which releases the sandbox and emits the event, before it emits `Deactivated`, and the checker rejects a `Deactivated` that arrives with the sandbox still bound.
 
@@ -541,9 +547,9 @@ The agent runtime catalogue mirrors the entity, core, and utilities catalogues a
 | A5 | **Cancellation.** After a cancel is journaled, the run and, once faults cease, every descendant run end `Cancelled` within bounded logical time, issuing no further model calls. | §9.2 | scenario and swarm tests (`conformance_cancel.rs`); crash-window scenario (`cluster.rs`: leader crash between the terminal commit and the propagating send); checker (`agent-run-discipline`) for post-cancel `ModelCompleted` | (none) |
 | A6 | **Single autonomous activation.** A node never runs two concurrent activations of one session; on a converged cluster, at most one activation per session is live; an addressed session activates within bounded logical time of a message reaching its shard leader. | §7.2, §7.5 | continuous checker (`agent-event-grammar`, the per-node half: no model completion outside an activation), inherited entity checker (E6), and the converged and liveness halves of the cluster scenario (`cluster.rs`) | E6, entity §8 |
 | A7 | **Idempotent submission.** A re-submitted `TurnId` never starts a second run: it registers the caller's reply-to for notification, or `tell`s the recorded outcome if the run already ended, under any injected duplication or caller retry. | §7.4 | continuous checker (`agent-run-discipline`, one `RunStarted` per `(session, turn)`); retry scenarios (`conformance_run.rs`) | E1 (one commit) |
-| A8 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces in the journal (`ToolError` outcomes, a `WorkspaceReset` record, §5.5), never as silent corruption. | §5.3, §5.5 | continuous checker (`agent-event-grammar`: `SandboxBound`/`SandboxReleased` within the entity's activation window, calls within the bind window); crash/loss scenarios (`conformance_sandbox.rs`); cross-session isolation by construction | entity §5.2 (colocation) |
+| A8 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces in the journal (`ToolError` outcomes, a `WorkspaceReset` record, §5.5), never as silent corruption. | §5.3, §5.5 | continuous checker (`agent-event-grammar`: `SandboxBound`/`SandboxReleased` within the entity's activation window); crash/loss scenarios (`conformance_sandbox.rs`); cross-session isolation by construction | entity §5.2 (colocation) |
 
-The tier obligations of the sandbox seam carry their own catalogue, **S1–S5** (sandbox §6). The agent runtime is also held to the core and entity testing contracts (core §18.1, §18.3; entity §14): seed-reproducibility of the full event stream including agent events, and fault-coverage accounting proving that model faults, sandbox faults, and the entity's own faults (leader crash mid-write, shard quorum loss, eviction mid-command) actually fired while agent traffic flowed.
+The tier obligations of the sandbox seam carry their own catalogue, **S1–S5** (sandbox §6). The agent runtime is also held to the core and entity testing contracts (core §18.1, §18.3; entity §14): seed-reproducibility of the full event stream including agent events, and fault-coverage accounting proving that model faults actually fired while agent traffic flowed; the entity's own faults (leader crash mid-write, shard quorum loss, eviction mid-command) are accounted for by the entity's own suite (entity §14).
 
 ---
 
@@ -556,7 +562,7 @@ The agent runtime adds **two** rows to the table the entity already virtualizes 
 | Seam | Production | Simulation |
 |---|---|---|
 | `Model` (§4) | `ProtocolModel` over an injected `HttpPost`, bound to `agent-anthropic`'s Messages protocol or `agent-openai`'s Chat Completions protocol; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
-| `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, environment loss, and tier-provisioning failure |
+| `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: outcomes scripted per call by a closure over the tool's name and input; a toggled open failure, a fixed per-call latency, and crash and environment-loss shapes the script returns as the call's `ToolError` |
 | *(journal)* | *the `EntityJournal` (entity §7.3, §7.4): the single-node or sharded-Raft durability tier* | *the entity's simulation seam (entity §14); the agent runtime drives the real consensus code, not a model of it* |
 
 The `agent` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). The agent runtime's `http` module owns the HTTP seam the production adapters share: `HttpPost`, the one socket operation a deployment implements over its HTTP stack; the `Protocol` trait, what an adapter decides for its wire format; and `ProtocolModel`, the shared shell with a bounded, jittered retry (see `agent::http` for the policy). `HttpPost`'s production implementation (the standalone deployment's, built on the separate `agent-http` substrate) is injected at construction. Each production `Model` crate (`agent-anthropic`, `agent-openai`) is a `Protocol` impl plus a `ProtocolModel` alias, the single home of its own wire protocol and nothing else; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the entity's, simulating the agent runtime *runs the real entity host, gateway, shard, and rehydration code* (entity §14) under the same seed. The agent's loop is the only new code on the simulated path.
@@ -566,7 +572,7 @@ The `agent` crate itself MUST satisfy core §18.1: no wall clock, no OS threads,
 Under seed control, a simulated agent run MUST be able to inject at least, on top of the core and entity faults (core §18.3, entity §14):
 
 - **Model:** latency, `RateLimited`/`Overloaded` bursts, `ContextOverflow`, unknown tool names, malformed or schema-violating arguments (rejected by the loop and the executing tool respectively, §5.4), pathological tool-call loops (exercising budgets).
-- **Sandbox:** open failure, execution latency, a crash mid-call (orphaned calls, §5.5), loss of the environment between steps (forcing a fresh sandbox and `WorkspaceReset`), and provisioning failure at an acquired tier.
+- **Sandbox:** a toggled open failure, a fixed execution latency (a call outliving its timeout, §5.3 item 3), a crash mid-call (orphaned calls, §5.5), and loss of the environment between steps (forcing a fresh sandbox and `WorkspaceReset`). These are scripted per scenario, not drawn from the seed: the script is a function of the call, and the outcomes it returns carry the crash and loss shapes.
 - **Entity (inherited):** shard-leader crash and election mid-write (the fence, E1; a run resuming on the new leader, §7.5), shard quorum loss (`Unavailable`, §6.4), eviction mid-command (rehydration and the output gate), and a shard split under concurrent writes (entity §7.7).
 - **Topology:** leadership moves under partition and heal (the orphaned-effect race, §5.5), cancellation racing completion across the tree.
 
@@ -614,8 +620,8 @@ let researcher = Kind::new("You are a research agent.")
 
 // --- Per node: one Harness over the clustered actor system + entity; the model and
 // --- sandbox seams injected here, the journal supplied by entity per kind (§7.4, §12.1).
-let h = Harness::cluster(system, Kinds::new().register("researcher", researcher),
-                         model, sandboxes);
+let kinds = Kinds::new().register("researcher", researcher);
+let h = Harness::cluster(system, &kinds, model, sandboxes);
 
 // --- Any node: address the session by name; the shard leader hosts it (§7.2) ---
 let s = h.session("researcher", SessionId::new("report-42"))?;  // EntityRef<Agent>; Err ⇔ the kind
@@ -679,6 +685,16 @@ agent-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-s
                         #   handle, Compute by hermetic wasmtime guests (raw modules, or
                         #   JavaScript via embedded QuickJS, feature-gated), Native by an OCI
                         #   container or a Firecracker microVM (feature-gated); ships s_catalogue()
+
+agent-gateway/        # the public multi-tenant HTTP/SSE edge: a routing-only cluster
+                        #   client that terminates tenant auth and addresses each session's
+                        #   entity directly (§7.4)
+
+agent-standalone/     # the node binary: a cluster member hosting the kinds and voting in
+                        #   Raft, with no client-facing protocol of its own
+
+agent-tui/            # the terminal client: drives one session over a gateway's HTTP/SSE
+                        #   surface and renders the run's records as a transcript
 ```
 
 `agent` depends on `entity` (the entity: identity, journal, fence, placement, activation, hibernation), and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, no placement function, no fence, and no resume protocol** of its own; each is consumed from entity. The single durable thing the agent runtime names is the `Record` type (the entity's event) and its `apply` fold. Test-only pieces (the scripted model, the scripted sandbox, `a_catalogue()`, the conformance suites) live with the agent runtime's tests, dev-depending on `actor-simulation` and entity's simulation seam; the continuous checkers are the exception, shipping in `testing.rs` behind the `testing` feature because they are claims about the *agent runtime's* contract that any consumer's swarm can mount, as entity's own `testing.rs` does for the entity. The crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

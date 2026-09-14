@@ -20,8 +20,9 @@
 //!
 //! # The two shapes, and four vocabularies
 //!
-//! Seven catalogues are markdown tables with a `Verified by` column. The core
-//! catalogue (actor §18.5) is a numbered list instead ([`Shape`]).
+//! Eight catalogues are markdown tables with a `Verified by` column. The core
+//! catalogue (actor §18.5) is a numbered list instead ([`Shape`]), for nine
+//! sites in all.
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
 //! trusting one: entity, utilities, sandbox, workflow, and agent name test
@@ -62,7 +63,7 @@ pub enum Shape {
 /// What the `Verified by` column names, and so what can be compared against the
 /// Rust catalogue's `verify` entries.
 ///
-/// The columns are not written in one vocabulary. One of the eight cannot be
+/// The columns are not written in one vocabulary. One of the nine cannot be
 /// compared at all, and [`Prose`](Pointers::Prose) says so at the site rather than
 /// leaving the comparison quietly empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
