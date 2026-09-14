@@ -135,7 +135,7 @@ Rules (MUST hold):
 1. `handle` takes `&mut self`. Exclusive mutation is sound because the executor is serial (§6).
 2. `M` and `M::Reply` MUST satisfy [`SerializationRequirement`](#5-serialization) (§5). This is an ordinary trait bound, checked at compile time.
 3. `M` MUST be concrete at the point of the `Handler` impl (§1.2).
-3a. `M::MANIFEST` MUST be a stable, author-chosen identity, unique among the message types a given actor accepts (§4.4). A local-only actor still declares it; the local fast path (§4.3) never reads it.
+3a. `M::MANIFEST` MUST be a stable, author-chosen identity, unique among the message types a given actor accepts (§4.4). A local-only actor still declares it; the local fast path (§4.3) never matches it against the registry, and it appears there only as the label on the §16 events.
 4. **Application errors live in the reply.** A handler that can fail uses `type Reply = Result<T, E>` where `T, E: SerializationRequirement`. An application failure is a value, distinct from a transport failure (`CallError`, §14).
 5. An actor accepts exactly the set of `M` for which it implements `Handler<M>`. Anything else is a compile error at the call site (§3.3), or `CallError::Unhandled` on the wire (§4.4).
 
@@ -251,7 +251,7 @@ One trait has two faces. A layer above it (an entity host, a workflow engine, an
 pub trait ActorSystem: Clone + Send + Sync + 'static {
     // ---- What a layer above calls ----
     fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;        // §4.2: assign_id → register mailbox → actor_ready
-    fn spawn_with<A, F: FnMut() -> A>(&self, factory: F) -> ActorRef<A>;      // restartable (§11.2); `Ctx` has the child forms
+    fn spawn_with<A, F: FnMut() -> A + Send + 'static>(&self, factory: F) -> ActorRef<A>; // restartable (§11.2); `Ctx` has the child forms
     /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed
     /// and locality-classifiable (§3.6), so resolution never fails.
     fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
@@ -260,7 +260,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     type Clock: Clock;                                                         // §4.6: the one source of time
     fn clock(&self) -> &Self::Clock;
     fn now(&self) -> Instant;
-    fn sleep(&self, d: Duration) -> impl Future<Output = ()>;
+    fn sleep(&self, d: Duration) -> BoxFuture<'static, ()>;                    // detachable: a `'static` future `launch` can run
     fn launch(&self, task: BoxFuture<'static, ()>);                            // §4.6: the one spawner
     fn emit(&self, event: Event);                                              // §16: the one observability stream
     fn next_random(&self) -> u64;                                              // §4.6: the one source of randomness
@@ -269,18 +269,20 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn spawn_factory<A: Actor<System = Self>>(&self, factory: ActorFactory<A>, parent: Option<ActorId>) -> ActorRef<A>;
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>>;
     fn is_local(&self, id: &ActorId) -> bool;                                  // §4.3, from the id alone
-    fn is_serving(&self, node: NodeId) -> bool;                                // §9.4, §13
+    fn is_serving(&self, node: NodeId) -> bool;                                // §9.4, §13; defaults to `true`
     fn codec(&self) -> Arc<dyn Codec>;                                         // §5
-    async fn remote_ask(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration) -> Result<Vec<u8>, CallError>;
-    async fn remote_tell(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>) -> Result<(), CallError>;
+    fn remote_ask(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration)
+        -> impl Future<Output = Result<Vec<u8>, CallError>> + Send;
+    fn remote_tell(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>)
+        -> impl Future<Output = Result<(), CallError>> + Send;
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery); // §12
     fn unwatch(&self, target: &ActorId, watcher: &ActorId);
     fn receptionist_state(&self) -> Arc<ReceptionistState>;                    // §13
-    fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId);  // §13; a single node does nothing
+    fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId);  // §13; defaults to a no-op
 }
 ```
 
-The provided forms (`spawn`, `spawn_with`, `resolve`, `now`, `sleep`) are defined in terms of the supplied ones, so an implementation writes the second group and gets the first. On the transport boundary the wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as callable API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
+The provided forms (`spawn`, `spawn_with`, `resolve`, `now`, `sleep`, `receptionist`) are defined in terms of the supplied ones, and `is_serving` and `replicate_registration` carry the single-node defaults (every node serves; nothing to replicate), so an implementation writes the second group and gets the first. On the transport boundary the wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as callable API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
 ### 4.2 Lifecycle ordering
 
@@ -339,7 +341,7 @@ A message's `MANIFEST` and an actor's `register` body are mechanical, so an opti
 **Outbound, `ActorRef::ask<M>` (typed layer above the trait):**
 1. Resolve the locality of `self.id`.
 2. **Local:** enqueue `msg` *by value* on the mailbox; await the typed reply. No serialization occurs.
-3. **Remote:** `payload = codec.serialize(&msg)`; `bytes = system.remote_ask(&self.id, M::MANIFEST, payload, deadline).await?`; return `codec.deserialize::<M::Reply>(&bytes)?`.
+3. **Remote:** `payload = encode(codec, &msg)?`; `bytes = system.remote_ask(&self.id, M::MANIFEST, payload, deadline).await?`; return `decode::<M::Reply>(codec, &bytes)?`.
 
 `tell<M>` is identical but expects no reply (`remote_tell`); for a local target it enqueues without a reply channel.
 
@@ -439,6 +441,8 @@ A transport is pluggable behind a trait; the default is TCP with length-delimite
 1. **Associations.** Before exchanging actor traffic, two nodes MUST complete a handshake that establishes an association: a wire-version check, a node-identity exchange, codec agreement, and optional authentication (§15).
 
    Each end announces the wire version it speaks, and a peer at any other version MUST be refused, naming both ([compatibility](compatibility-spec.md) **V2**), before its codec, secret, or identity is examined, so a version skew is never reported as a security failure. A build speaks exactly one version, and a wire-format change is a new version every node takes at once.
+
+   A transport MAY carry its own address-discovery table over an association beside the two message families of §7.1 (`Wire::Endpoints` in the reference TCP transport, a `(node, address)` list), consumed by the transport itself below the frame vocabulary and never handed up to the system.
 2. **Multiplexing.** Many actor conversations share one association. Each request carries a correlation id, and each response references it.
 3. **Framing.** Messages are length-delimited; a malformed frame MUST tear down the association, not the node.
 4. **Failure detection.** The transport never decides liveness. Wherever a detector runs (§9.4), SWIM (§10) probes members independently of connection state, so a node whose association merely blipped is never mistaken for a failed one; in static mode without its optional detector (§9.4.1), liveness surfaces only as failed sends (§8). A transport is not required to report association loss. It MAY surface establishment/loss as an *optimization hint* to speed detection (e.g. mark a peer `suspect` early), but such a hint MUST feed only the detector's refutable `suspect` state, never the terminal `down` decision (§9.4).
@@ -702,6 +706,7 @@ impl Supervision {
 
 - The **default** directive MUST be `Stop`. For transient faults, `Restart` is usually the better choice.
 - **Restart** MUST construct a fresh actor value (state is not preserved by default) while the actor keeps its `ActorId` and mailbox. Constructing a fresh value requires a *factory*: an actor spawned this way (`spawn_with` for a root, `Ctx::spawn_with` for a child) is restartable. An actor spawned **by value** (`spawn`/`Ctx::spawn`) consumes the only instance, so it cannot be reconstructed; for it a `Restart` directive MAY degrade to `Stop`. Exceeding `max` restarts `within` the window MUST escalate to `Stop`.
+- **Resume** drops the failed message and keeps the actor. A failed `started` has no message to drop and the actor is not yet ready (§4.2 step 3), so for `Fault::Started` `Resume` MUST degrade to `Stop`, reported as the effective decision (§16).
 - **Backoff** between restarts MUST be supported (exponential with jitter RECOMMENDED) to avoid hot-restart loops.
 - A `restart` re-runs `A::started`; the prior value's `A::stopped` runs with `StopReason::Failed`.
 - `Fault` is a small `Copy` enum identifying the fault kind, so the per-actor decider MAY return a different directive per kind.
@@ -834,7 +839,7 @@ A conforming system SHOULD expose:
 - **Tracing:** propagate a trace/correlation context through envelopes, so a logical request can be followed across nodes.
 - **Lifecycle logging:** spawn and resign, membership transitions, downing decisions, and supervision actions, each at a defined, filterable level.
 
-The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), `Terminated` deliveries (§12), and inbound remote messages refused at delivery, with the refusing `CallError` (§6, §8), the authorization gate's refusals among them (§15), the only trace a refused one-way `tell` leaves. Metrics and cross-node trace propagation are RECOMMENDED, not REQUIRED.
+The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11) and restarts (§11.2), `Terminated` deliveries (§12), and inbound remote messages refused at delivery, with the refusing `CallError` (§6, §8), the authorization gate's refusals among them (§15), the only trace a refused one-way `tell` leaves. Metrics and cross-node trace propagation are RECOMMENDED, not REQUIRED.
 
 ---
 

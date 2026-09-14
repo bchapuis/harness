@@ -400,6 +400,11 @@ fn draining_a_node_routes_service_discovery_away_from_it() {
         0,
         "a drained node is routed around: its actors are not handed out",
     );
+    assert_eq!(
+        b.receptionist().lookup(ECHOES).len(),
+        0,
+        "the drained node omits its own actors from its own listing too",
+    );
 
     registry.resume(B);
     sim.run_for(Duration::from_secs(1));
@@ -407,6 +412,11 @@ fn draining_a_node_routes_service_discovery_away_from_it() {
         a.receptionist().lookup(ECHOES).len(),
         1,
         "resume restores B to rotation; the registration was never lost",
+    );
+    assert_eq!(
+        b.receptionist().lookup(ECHOES).len(),
+        1,
+        "resume restores B's own listing as well",
     );
 }
 

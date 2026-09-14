@@ -702,9 +702,10 @@ where
             })
     }
 
-    /// Fold a finished capture into the committed form (interior mutability; a
-    /// non-committed outcome discards the whole materialization, E20, so no
-    /// rollback is needed), and stage its manifest into the command's batch.
+    /// Fold a finished capture into the committed form (interior mutability; every
+    /// non-committed outcome, an event that will not encode included, discards the
+    /// whole materialization, E20, so no rollback is needed), and stage its
+    /// manifest into the command's batch.
     /// `coverage` is [`DiskState::apply`]'s, shared with the replay/restore path.
     fn commit_staged_op(&self, image: &Arc<DiskImage>, manifest: DiskManifest, coverage: Coverage) {
         image.state().apply(&manifest, coverage);

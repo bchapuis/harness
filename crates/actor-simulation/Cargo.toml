@@ -21,5 +21,6 @@ rand_chacha.workspace = true
 
 [dev-dependencies]
 spec.workspace = true
+erased-serde.workspace = true
 futures.workspace = true
 serde = { workspace = true }

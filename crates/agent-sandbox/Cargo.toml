@@ -38,7 +38,6 @@ firecracker = ["native", "machine-host/ws", "tokio/fs"]
 [dependencies]
 actor-core.workspace = true
 agent.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }

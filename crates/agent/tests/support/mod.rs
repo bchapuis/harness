@@ -418,6 +418,7 @@ pub struct ScriptedSandboxes {
     behavior: SandboxScript,
     fail_open: Arc<AtomicBool>,
     delay: Option<(SimClock, Duration)>,
+    open_delay: Option<(SimClock, Duration)>,
     pub stats: SandboxStats,
 }
 
@@ -429,12 +430,21 @@ impl ScriptedSandboxes {
             behavior: Arc::new(behavior),
             fail_open: Arc::new(AtomicBool::new(false)),
             delay: None,
+            open_delay: None,
             stats: SandboxStats::default(),
         }
     }
 
     pub fn with_delay(mut self, clock: SimClock, delay: Duration) -> ScriptedSandboxes {
         self.delay = Some((clock, delay));
+        self
+    }
+
+    /// Hold every open in flight for `delay` of virtual time. While an open is
+    /// in flight the activation launches nothing (§5.3 item 1), so this is how
+    /// a test holds a journaled intent without its outcome across a crash.
+    pub fn with_open_delay(mut self, clock: SimClock, delay: Duration) -> ScriptedSandboxes {
+        self.open_delay = Some((clock, delay));
         self
     }
 
@@ -500,7 +510,13 @@ impl SandboxProvider for ScriptedSandboxes {
                     stats: self.stats.clone(),
                 }))
             };
-        Box::pin(async move { result })
+        let open_delay = self.open_delay.clone();
+        Box::pin(async move {
+            if let Some((clock, delay)) = open_delay {
+                clock.sleep(delay).await;
+            }
+            result
+        })
     }
 }
 

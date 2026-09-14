@@ -68,6 +68,7 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
             "atomic_replace_round_trips_a_sidecar",
             "concurrent_replaces_of_one_name_all_succeed_and_none_tears",
             "rewrite_restamps_the_replacement",
+            "a_scratch_file_left_by_a_crash_mid_rewrite_leaves_the_prior_log_whole",
         ],
     },
     CatalogueEntry {

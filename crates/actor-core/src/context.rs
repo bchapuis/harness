@@ -12,6 +12,8 @@ use crate::actor::Actor;
 use crate::actor::Handler;
 use crate::actor::Terminated;
 use crate::host::WatchDelivery;
+use crate::host::always;
+use crate::host::once;
 use crate::id::ActorId;
 use crate::refs::ActorRef;
 use crate::system::ActorSystem;
@@ -55,7 +57,8 @@ impl<A: Actor> Ctx<A> {
     /// (it cannot be reconstructed). For a restartable child, use
     /// [`spawn_with`](Self::spawn_with).
     pub fn spawn<C: Actor<System = A::System>>(&self, child: C) -> ActorRef<C> {
-        self.system.spawn_child(child, self.id.clone())
+        self.system
+            .spawn_factory(once(child), Some(self.id.clone()))
     }
 
     /// Spawn a child actor from a `factory` (spec §3.4, §11.1), parented to this
@@ -67,7 +70,8 @@ impl<A: Actor> Ctx<A> {
         C: Actor<System = A::System>,
         F: FnMut() -> C + Send + 'static,
     {
-        self.system.spawn_child_with(factory, self.id.clone())
+        self.system
+            .spawn_factory(always(factory), Some(self.id.clone()))
     }
 
     /// Request that this actor stop after the current message completes (spec

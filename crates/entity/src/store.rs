@@ -342,6 +342,19 @@ pub trait EntityStore: Send + Sync + 'static {
     #[must_use = "the answer is the whole point of the call"]
     fn read_from(&self, shard: u32, entity: &EntityName, from: Seq, limit: usize) -> RecordPage;
 
+    /// Whether this store's storage has failed (§11), so that its unfenced reads
+    /// ([`read`](EntityStore::read), [`head`](EntityStore::head),
+    /// [`snapshot`](EntityStore::snapshot), [`read_from`](EntityStore::read_from))
+    /// no longer describe the entity. Those reads have no refusal of their own, so a
+    /// journal consults this before answering from them: without it a failed store
+    /// reads as an entity with no history, and the next activation rehydrates from
+    /// nothing and serves a fresh default state as truth (invention, which §7.5
+    /// forbids; the budget is staleness). A store that cannot fail keeps the default.
+    #[must_use = "a failed store's reads are not answers; check before trusting them (§11)"]
+    fn failed(&self) -> bool {
+        false
+    }
+
     /// A **fenced** read for recovery (§8): promise not to accept a shard term below
     /// `term` (so a deposed leader cannot commit on this replica once a new leader
     /// has read it), then return this replica's slots and snapshot. Refuses with

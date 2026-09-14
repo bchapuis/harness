@@ -245,7 +245,7 @@ impl std::fmt::Display for Linearization {
 /// The largest history the bitmask-based linearizer accepts. Wing & Gong is
 /// worst-case exponential, so a workload should keep a single checked history
 /// within this bound and check long ones in chunks.
-pub const MAX_HISTORY: usize = 128;
+pub(crate) const MAX_HISTORY: usize = 128;
 
 /// Decide whether `history` is linearizable with respect to model `M`, by the
 /// Wing & Gong search (spec §18.4). Returns [`Linearization::Ok`] with a

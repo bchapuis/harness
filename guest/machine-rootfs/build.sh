@@ -19,7 +19,8 @@
 # from it diverges by dirty blocks as its guest writes.
 #
 # Docker is the only requirement, so this runs on macOS too, building needs
-# no KVM. *Running* the assets (tests/firecracker_e2e.rs) needs Linux + /dev/kvm.
+# no KVM. *Running* the assets (crates/machine-entity/tests/hosted_e2e.rs) needs
+# Linux + /dev/kvm for the microVM half; the container half runs wherever docker does.
 #
 # Knobs (env):
 #   ARCH        x86_64 | aarch64   (default: the docker engine's arch)

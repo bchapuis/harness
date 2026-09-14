@@ -33,12 +33,12 @@ use serde_json::json;
 
 /// The API path every completion posts to. It carries the `/v1` prefix, so a
 /// host's [`HttpPost`] points at a base URL *without* one; see [`base_url`].
-pub const COMPLETIONS_PATH: &str = "/v1/chat/completions";
+const COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Base URLs of well-known OpenAI-compatible endpoints, for a host to point its
 /// [`HttpPost`] at. Each is the origin (plus any provider-specific prefix) that
-/// [`COMPLETIONS_PATH`] appends to; none ends in `/v1`, because the path already
-/// carries it. The base URL is the deployment's to choose (§12.1); these are
+/// the protocol's path (`/v1/chat/completions`) appends to; none ends in `/v1`,
+/// because the path already carries it. The base URL is the deployment's to choose (§12.1); these are
 /// convenience data, and self-hosted servers supply their own.
 pub mod base_url {
     /// OpenAI: `https://api.openai.com/v1/chat/completions`.
@@ -83,14 +83,14 @@ pub type OpenAiModel<C, E> = ProtocolModel<ChatCompletions, C, E>;
 // Request encoding (agent Entry → Chat Completions API)
 // ---------------------------------------------------------------------------
 
-/// Encode a [`ModelRequest`] as a Chat Completions request body. Public for
-/// golden tests; the encoding is part of this crate's contract.
+/// Encode a [`ModelRequest`] as a Chat Completions request body. The encoding
+/// is part of this crate's contract, pinned by the golden tests below.
 ///
 /// Unlike the Messages API, Chat Completions carries the system prompt as the
 /// first message, folds an assistant turn's text and tool calls into one
 /// message (arguments as a JSON *string*), and answers a call with a distinct
 /// `role: "tool"` message keyed by `tool_call_id`.
-pub fn encode_request(req: &ModelRequest) -> Value {
+fn encode_request(req: &ModelRequest) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if !req.system_prompt.is_empty() {
         messages.push(json!({"role": "system", "content": req.system_prompt}));

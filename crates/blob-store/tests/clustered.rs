@@ -20,6 +20,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
+use actor_core::ActorSystem;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::SimNetwork;
@@ -33,6 +34,8 @@ use blob_store::BlobStore;
 use blob_store::ClusteredBlobStore;
 use blob_store::LocalBlobStore;
 use blob_store::Namespace;
+use blob_store::SyncTombstones;
+use blob_store::blob_replica_key;
 use blob_store::placement;
 
 const A: NodeId = NodeId::new(1);
@@ -68,8 +71,8 @@ fn drive<T: Send + 'static>(
 }
 
 /// Bring up a 3-node gossip cluster, each node hosting the `Clustered` tier over
-/// its own on-disk store. Returns the network (for fault injection), the per-node
-/// stores, and the tempdirs (kept alive for the test's duration).
+/// its own fresh on-disk store. Returns the network (for fault injection), the
+/// per-node stores, and the tempdirs (kept alive for the test's duration).
 fn cluster(
     sim: &Simulation,
 ) -> (
@@ -77,22 +80,39 @@ fn cluster(
     Vec<ClusteredBlobStore<SimNode>>,
     Vec<tempfile::TempDir>,
 ) {
+    let dirs = (0..3)
+        .map(|_| tempfile::tempdir().expect("tempdir"))
+        .collect();
+    let (net, _systems, stores, dirs) = cluster_over(sim, dirs);
+    (net, stores, dirs)
+}
+
+/// [`cluster`] over existing directories, one per node in `[A, B, C]` order: how
+/// a test restarts every node over the disk it had. Also returns the node
+/// systems, for reaching a replica directly.
+fn cluster_over(
+    sim: &Simulation,
+    dirs: Vec<tempfile::TempDir>,
+) -> (
+    SimNetwork,
+    Vec<SimNode>,
+    Vec<ClusteredBlobStore<SimNode>>,
+    Vec<tempfile::TempDir>,
+) {
     let net = SimNetwork::new(sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let systems: Vec<SimNode> = [A, B, C].iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2)); // let SWIM converge on the serving set
 
-    let mut dirs = Vec::new();
     let stores: Vec<ClusteredBlobStore<SimNode>> = systems
-        .into_iter()
-        .map(|system| {
-            let dir = tempfile::tempdir().expect("tempdir");
+        .iter()
+        .zip(&dirs)
+        .map(|(system, dir)| {
             let local = LocalBlobStore::open(dir.path()).expect("open");
-            dirs.push(dir);
-            ClusteredBlobStore::start(system, config(), local)
+            ClusteredBlobStore::start(system.clone(), config(), local)
         })
         .collect();
     sim.run_for(Duration::from_secs(1)); // let every node register its replica
-    (net, stores, dirs)
+    (net, systems, stores, dirs)
 }
 
 #[test]
@@ -311,6 +331,71 @@ fn a_deleted_namespace_resolves_nowhere_and_refuses_puts() {
             refused,
             Err(BlobError::Deleted(ns.clone())),
             "node {index} refuses a put into a deleted namespace",
+        );
+    }
+}
+
+#[test]
+fn a_restarted_node_still_knows_every_tombstone_on_its_disk() {
+    // B7 liveness across a process restart (spec §5.3; §8's node returning with
+    // its disk): the tombstone record is durable on every node that learned it,
+    // and the awareness set is rebuilt from those records at start. Every node
+    // restarts here, so no peer could teach another: whatever a node knows after
+    // the restart, it read back from its own disk. A `get` that short-circuits to
+    // `Deleted` proves the set (an empty set would end in `Unavailable`, every
+    // owner answering `None`), and the pull reply is what a peer with a fresh disk
+    // would learn from it.
+    let sim = Simulation::new(11);
+    let (net, stores, dirs) = cluster(&sim);
+    let ns = Namespace::new(b"workspace-restart".to_vec());
+
+    let id = drive(&sim, Duration::from_secs(5), {
+        let (store, ns) = (stores[0].clone(), ns.clone());
+        async move { store.put(&ns, b"gone before the restart".to_vec()).await }
+    })
+    .expect("put");
+    drive(&sim, Duration::from_secs(5), {
+        let (store, ns) = (stores[0].clone(), ns.clone());
+        async move { store.delete_namespace(&ns).await }
+    })
+    .expect("delete acked at W anchors");
+    sim.run_for(Duration::from_secs(1)); // the fan-out reaches every node's disk
+    drop(stores);
+    drop(net);
+
+    // Restart every node over the disk it had.
+    let sim = Simulation::new(11);
+    let (_net, systems, stores, _dirs) = cluster_over(&sim, dirs);
+
+    for (index, store) in stores.iter().enumerate() {
+        let got = drive(&sim, Duration::from_secs(5), {
+            let (store, ns) = (store.clone(), ns.clone());
+            async move { store.get(&ns, &id, None).await }
+        });
+        assert_eq!(
+            got,
+            Err(BlobError::Deleted(ns.clone())),
+            "node {index} short-circuits on the set rebuilt from its disk",
+        );
+    }
+
+    for (index, system) in systems.iter().enumerate() {
+        let replica = system
+            .receptionist()
+            .lookup(blob_replica_key::<SimNode>())
+            .into_vec()
+            .into_iter()
+            .find(|replica| replica.id().node() == system.node())
+            .expect("the node's own replica is registered");
+        let learned = drive(&sim, Duration::from_secs(5), async move {
+            replica
+                .ask_timeout(SyncTombstones, Duration::from_secs(2))
+                .await
+        })
+        .expect("the pull is answered");
+        assert!(
+            learned.iter().any(|tombstone| tombstone.ns == ns),
+            "node {index}'s pull reply carries the tombstone, got {learned:?}",
         );
     }
 }

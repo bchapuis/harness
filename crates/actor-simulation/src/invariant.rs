@@ -384,9 +384,9 @@ impl Invariant for OneLeaderPerTerm {
 /// divergence is legal (cross-node "exactly one" holds only at view convergence)
 /// and not flagged here; `conformance_singleton.rs` and the singleton swarm
 /// workload verify the other halves. Vacuously green for workloads that host no
-/// singleton, so it is safe in [`default_invariants`]. Not restart-safe: a
-/// `SimNetwork::restart` of a hosting node abandons its manager without a
-/// `SingletonStopped`, so singleton workloads use crash/partition nemeses.
+/// singleton, so it is safe in [`default_invariants`]. A `SimNetwork::restart`
+/// of a hosting node abandons its manager without a `SingletonStopped`, so
+/// `forget_node` drops that host's slots.
 #[derive(Default)]
 pub struct SingletonAtMostOnePerNode {
     live: BTreeMap<(&'static str, NodeId), ActorId>,
@@ -438,7 +438,7 @@ impl Invariant for SingletonAtMostOnePerNode {
 // emergent on the event stream, and "depth 0 at quiescence" is unsound for the
 // time-bounded cluster runs (`run_for`) that stop mid-flight.
 //
-// Both are verified by targeted tests (`actor.rs`, `conformance_messaging.rs`).
+// Both are verified by targeted tests (`conformance_messaging.rs`).
 
 #[cfg(test)]
 mod tests {

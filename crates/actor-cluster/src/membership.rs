@@ -80,7 +80,6 @@ pub struct MemberDigest {
     /// (leader-based, spec §9.4.3); `0` in static and gossip-based mode. The
     /// mode's stamps come from a single logical writer, so they totally order its
     /// decisions (see [`Membership::merge`]).
-    #[serde(default)]
     pub stamp: u64,
 }
 
@@ -361,8 +360,8 @@ pub struct GossipMode {
 pub enum MembershipMode {
     /// Fixed roster, no lifecycle transitions ever (spec §9.4.1). By default no
     /// detector runs and no membership traffic flows; `detector` MAY enable the
-    /// SWIM loop **observe-only** (reachability events, early `Unreachable`
-    /// completion, discovery routing) with still no down authority.
+    /// SWIM loop **observe-only** (reachability events on the stream, spec §16)
+    /// with still no down authority.
     Static { detector: Option<SwimConfig> },
     /// An external registry is the authority (spec §9.4.2).
     Registry(RegistryMode),
@@ -656,7 +655,7 @@ impl Membership {
     pub(crate) fn mark_suspect(&self, node: NodeId, now: Instant) {
         let mut members = self.members.lock().expect("members mutex poisoned");
         if let Some(m) = members.get_mut(&node) {
-            if m.status == MemberStatus::Down {
+            if m.status.is_terminal() {
                 return;
             }
             if m.reachability == Reachability::Reachable {
@@ -703,11 +702,6 @@ impl Membership {
     pub fn coordinator(&self) -> Option<NodeId> {
         let members = self.members.lock().expect("members mutex poisoned");
         self.compute_coordinator(&members)
-    }
-
-    /// Whether this node is the coordinator (spec §9.4.4).
-    pub fn is_coordinator(&self) -> bool {
-        self.coordinator() == Some(self.node)
     }
 
     /// Fold one status observation `(stamp, status)` into an existing member:
@@ -1222,6 +1216,21 @@ impl Membership {
             .expect("members mutex poisoned")
             .get(&node)
             .map(|m| m.status)
+    }
+
+    /// Whether `node` is in rotation for service discovery (spec §9.4, §13
+    /// requirement 4): neither terminal nor drained for maintenance. A drained
+    /// node keeps its registrations and still answers direct calls; it is just
+    /// not handed out to new callers. This node never sits in its own roster, so
+    /// its own status is read from `self_status`: a drained node omits its own
+    /// actors from its own listings like every other node does.
+    pub fn is_serving(&self, node: NodeId) -> bool {
+        let status = if node == self.node {
+            Some(self.self_status())
+        } else {
+            self.status(node)
+        };
+        status.is_none_or(|status| !status.is_terminal() && status != MemberStatus::Draining)
     }
 
     /// The members the Raft leader should propose for admission (leader-based

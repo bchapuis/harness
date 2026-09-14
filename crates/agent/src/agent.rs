@@ -231,8 +231,9 @@ impl Message for RunCompleted {
 ///
 /// A tool failure is an ordinary value in the `Ok` arm, because a failing tool
 /// never fails the run (§5.4). The workflow's own [`EffectError`] reaches this
-/// entity only as `Interrupted`, for an orphaned call the fold resolves without
-/// launching (§5.5).
+/// entity as `Interrupted`, for an orphaned call the fold resolves without
+/// launching (§5.5), and as `Failed`, for a `perform` that panicked (workflow
+/// §4.3) or a cancel this entity's own `perform` could not send (§9.2).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StepOutcome {
     /// A model call's result (§3.1 step 2).
@@ -423,18 +424,25 @@ impl<S: HarnessSystem> Agent<S> {
         self.rec(ctx, RecordBody::RunEnded { turn, outcome })
     }
 
-    /// Launch a self-`tell` of the workflow's [`Tick`] (workflow §3.2 item 4):
-    /// runs after the current handler's records commit, so launching effects
-    /// from the resulting cycle honors the write-ahead discipline (§6.4).
-    ///
-    /// The plain re-entry, for the paths that hold no state to classify from:
-    /// a task reporting back, or a caller nudging a session that may be owed
-    /// work. A handler with state in hand calls [`Engine::tick`] instead.
-    fn retick(&self, ctx: &EntityCtx<Agent<S>>) {
-        let this = ctx.this();
-        ctx.system().launch(Box::pin(async move {
-            let _ = this.tell(Tick).await;
-        }));
+    /// Fail every desired sandboxed call with one reason (§5.4): what a sandbox
+    /// the activation could not open owes the calls that needed it. One batch,
+    /// so no commit lands between two of them and starts an open the rest
+    /// would then wait on.
+    fn fail_sandboxed(
+        &self,
+        ctx: &EntityCtx<Agent<S>>,
+        turn: &TurnId,
+        desired: &[Pending<StepKey, Effect>],
+        error: &str,
+    ) -> Vec<Record> {
+        desired
+            .iter()
+            .filter_map(|p| match &p.effect {
+                Effect::Tool { call, .. } => Some(call),
+                _ => None,
+            })
+            .map(|call| self.fail_call(ctx, turn, call, ToolError::Sandbox(error.to_string())))
+            .collect()
     }
 
     // -- handler bodies ------------------------------------------------------
@@ -647,7 +655,6 @@ impl<S: HarnessSystem> Agent<S> {
                     session: Self::session(ctx),
                     turn: turn.clone(),
                     node: ctx.system().node(),
-                    usage: response.usage.total(),
                 });
                 // No requested tool calls ⇒ this assistant message ends the run
                 // (§3.1 step 3).
@@ -701,14 +708,17 @@ impl<S: HarnessSystem> Agent<S> {
     ) -> Vec<Record> {
         let outcome = match outcome {
             Ok(StepOutcome::Tool(outcome)) => outcome,
-            // The one `EffectError` this entity expects: an orphaned call whose
-            // declaration said `Interrupt`, resolved by the workflow without a
-            // launch (§5.5, workflow §4.4). The model decides whether to retry
-            // the side effect.
+            // An orphaned call whose declaration said `Interrupt`, resolved by
+            // the workflow without a launch (§5.5, workflow §4.4). The model
+            // decides whether to retry the side effect.
             Err(EffectError::Interrupted) => Err(ToolError::Interrupted),
+            // A `perform` that panicked, caught by the workflow (workflow §4.3).
+            Err(EffectError::Failed(why)) => Err(ToolError::Sandbox(why)),
+            // Never produced under a call key: a tool's own bound and a lost
+            // environment come back as the `ToolError` the call returns. Mapped
+            // rather than folded into the arm above so the type stays total.
             Err(EffectError::Timeout) => Err(ToolError::Timeout),
             Err(EffectError::Lost(why)) => Err(ToolError::EnvironmentLost(why)),
-            Err(EffectError::Failed(why)) => Err(ToolError::Sandbox(why)),
             // Unreachable: the effect under a `Call` key is a tool call.
             Ok(StepOutcome::Model(_) | StepOutcome::Cancelled) => Err(ToolError::Sandbox(
                 "a model response was settled under a tool call's key".into(),
@@ -978,21 +988,11 @@ impl<S: HarnessSystem> Agent<S> {
             }
         }
 
-        // A failed sandbox open fails the calls that needed it in one batch
-        // (§5.4), then resets to `Closed` so a later call retries the open.
-        // Batched rather than settled one by one, because the reset must not
-        // land between two of them and start an open the rest would then wait
-        // on.
-        if let Some(error) = act.env.slot.failure().map(str::to_owned) {
-            act.env.slot.clear_failure();
-            let events: Vec<Record> = desired
-                .iter()
-                .filter_map(|p| match &p.effect {
-                    Effect::Tool { call, .. } => Some(call.clone()),
-                    _ => None,
-                })
-                .map(|call| self.fail_call(ctx, turn, &call, ToolError::Sandbox(error.clone())))
-                .collect();
+        // A failed sandbox open fails the calls that needed it (§5.4); taking
+        // the failure resets the slot to `Closed`, so a later call retries the
+        // open.
+        if let Some(error) = act.env.slot.take_failure() {
+            let events = self.fail_sandboxed(ctx, turn, desired, &error);
             if !events.is_empty() {
                 return Reconciled::Records(events);
             }
@@ -1050,12 +1050,18 @@ impl<S: HarnessSystem> Agent<S> {
             if act.env.slot.begin_open() {
                 match ctx.ws().dir_path() {
                     Ok(workspace) => self.launch_open(ctx, kind.profile.clone(), workspace),
-                    // No workspace to run over: the next round's failure pass
-                    // turns this into a `ToolError::Sandbox` outcome for every
-                    // call that needed it, so the tick has to come back.
+                    // No workspace to run over, so nothing to open: give the
+                    // claim back and fail the calls that needed it, the same
+                    // batch a failed open produces. The set holds at least one
+                    // sandboxed call, so the batch is never empty.
                     Err(e) => {
-                        act.env.slot.failed(format!("workspace: {e}"));
-                        self.retick(ctx);
+                        act.env.slot.take();
+                        return Reconciled::Records(self.fail_sandboxed(
+                            ctx,
+                            turn,
+                            desired,
+                            &format!("workspace: {e}"),
+                        ));
                     }
                 }
             }

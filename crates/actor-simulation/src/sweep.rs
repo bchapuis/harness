@@ -33,8 +33,8 @@
 //! - `SWARM_CONTINUE=1`; do not stop at the first failing seed; run the whole
 //!   sweep and report every seed that failed. See [`collect_all_failures`].
 //!
-//! Unset, a run under `CI` takes the declared width and a local run takes its
-//! cost class's width.
+//! Unset, a run takes its cost class's width; CI pins `SWARM_SEEDS=full` in its
+//! workflow.
 
 use std::ops::Range;
 use std::sync::Once;
@@ -87,7 +87,6 @@ fn resolve(declared: Range<u64>, local: u64) -> Range<u64> {
     let width = match width_request() {
         Width::Explicit(n) => n,
         Width::Declared => declared_width,
-        Width::Unset if is_ci() => declared_width,
         Width::Unset => local.min(declared_width),
     };
     offset(declared.start, width)
@@ -100,8 +99,8 @@ fn offset(start: u64, width: u64) -> Range<u64> {
 }
 
 /// What `SWARM_SEEDS` asked for. `Declared` and `Unset` are distinct: naming
-/// `full` pins the corpus width everywhere; saying nothing leaves the choice to
-/// the run, the cost class locally and the corpus under CI.
+/// `full` pins the corpus width everywhere; saying nothing takes the cost
+/// class's width, except for a coverage sweep.
 enum Width {
     Explicit(u64),
     Declared,
@@ -130,10 +129,6 @@ fn base_offset() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_ci() -> bool {
-    std::env::var_os("CI").is_some_and(|value| !value.is_empty())
-}
-
 /// Whether a sweep runs to the end and reports **every** failing seed, rather
 /// than stopping at the first.
 ///
@@ -142,7 +137,7 @@ fn is_ci() -> bool {
 /// one throws away the rest of the run.
 ///
 /// Off by default (stop at the first failure); `soak.yml` turns it on.
-pub fn collect_all_failures() -> bool {
+pub(crate) fn collect_all_failures() -> bool {
     match std::env::var(ENV_CONTINUE) {
         Ok(raw) => !matches!(raw.trim(), "" | "0" | "false" | "no"),
         Err(_) => false,
@@ -192,7 +187,6 @@ fn announce_once() {
         let sizing = match width_request() {
             Width::Explicit(n) => format!("{n} seed(s) per sweep"),
             Width::Declared => "the declared width".to_string(),
-            Width::Unset if is_ci() => "the declared width".to_string(),
             Width::Unset => {
                 format!("{LOCAL_SEEDS} seed(s) per sweep, {LOCAL_SLOW_SEEDS} for slow ones")
             }

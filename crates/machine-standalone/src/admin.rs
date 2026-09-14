@@ -173,9 +173,12 @@ async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> Ad
     }
 }
 
-fn reply_of<E: std::fmt::Display>(outcome: Result<(), E>) -> AdminReply {
+/// One reply shape for the two ways a policy command fails: the call did not
+/// land, or the machine refused it (unprovisioned, machine §3).
+fn reply_of<E: std::fmt::Display>(outcome: Result<Result<(), MachineError>, E>) -> AdminReply {
     match outcome {
-        Ok(()) => AdminReply::Done,
+        Ok(Ok(())) => AdminReply::Done,
+        Ok(Err(e)) => AdminReply::Error(e.to_string()),
         Err(e) => AdminReply::Error(e.to_string()),
     }
 }

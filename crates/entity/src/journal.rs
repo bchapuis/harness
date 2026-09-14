@@ -89,8 +89,8 @@ pub enum AppendOutcome {
     /// This node no longer leads the shard; redirect to the hinted leader (§8).
     /// Never produced by the `Local` single-node journal.
     NotLeader(actor_core::NodeId),
-    /// The shard cannot reach a quorum; the entity pauses writes (§11). Never
-    /// produced by the `Local` single-node journal.
+    /// The shard cannot reach a quorum; the entity pauses writes (§11). The
+    /// `Local` single-node journal produces it only when its one store has failed.
     Unavailable(String),
 }
 
@@ -135,7 +135,8 @@ impl std::error::Error for EntityJournalError {}
 /// always equals the entity's known head.
 pub trait EntityJournal: Clone + Send + Sync + 'static {
     /// Append `events` for one entity immediately after `after`, as one atomic
-    /// entry. Commits on a Raft quorum (the `Quorum` tier) or a local store (the `Local` tier).
+    /// entry. Commits on a write quorum of the shard's replicas (the `Quorum` tier)
+    /// or a local store (the `Local` tier).
     fn append(
         &self,
         entity: &EntityName,

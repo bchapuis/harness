@@ -39,16 +39,14 @@ pub fn swim_config() -> SwimConfig {
     }
 }
 
-/// The election timeout a simulated control group runs with.
-///
-/// Exposed because [`ClusterModeSpec::Leader`](crate::ClusterModeSpec) takes the
-/// two timings as fields rather than a whole [`RaftConfig`], so a swarm and a
-/// hand-built network must be able to name the same numbers.
-pub const ELECTION_TIMEOUT: Duration = Duration::from_millis(500);
+/// The election timeout a simulated control group runs with. Named so
+/// [`raft_config`] and [`ClusterModeSpec::leader`](crate::ClusterModeSpec::leader)
+/// cannot drift apart.
+pub(crate) const ELECTION_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The leader heartbeat cadence a simulated control group runs with. See
 /// [`ELECTION_TIMEOUT`].
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Raft timings for a simulated control group over `voters`: [`ELECTION_TIMEOUT`]
 /// and [`HEARTBEAT_INTERVAL`], over the in-memory storage [`RaftConfig::new`]

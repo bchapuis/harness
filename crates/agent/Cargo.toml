@@ -17,7 +17,6 @@ entity.workspace = true
 # stays here is the agentic half plus the environment no fold can express.
 workflow.workspace = true
 actor-core.workspace = true
-actor-cluster.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
@@ -27,6 +26,7 @@ spec.workspace = true
 # Its own `testing` module, for this crate's swarm suites.
 agent = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
+actor-cluster.workspace = true
 tempfile.workspace = true
 
 [features]

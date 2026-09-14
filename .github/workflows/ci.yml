@@ -26,8 +26,8 @@ env:
   # seeds for an ordinary sweep, one for a sweep whose seeds cost seconds;
   # coverage sweeps run their declared width everywhere; see
   # actor-simulation/src/sweep.rs, which bans sizing by wall clock). `full`
-  # states this job's contract in the workflow rather than leaving it to the
-  # runner's own `CI` variable.
+  # states this job's contract in the workflow; nothing reads the runner's
+  # own `CI` variable.
   SWARM_SEEDS: full
 
 jobs:

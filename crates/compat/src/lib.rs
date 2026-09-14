@@ -32,15 +32,10 @@ use serde::Serialize;
 /// Formats are versioned independently, so a bare `Version` says nothing: a wire
 /// version 3 and a snapshot version 3 are unrelated. It is meaningful only
 /// alongside the [`Format`] that names it, which is why every refusal in this
-/// crate carries that name.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+/// crate carries that name. It is compared for equality only: `admit` accepts one
+/// version and refuses every other, so no ordering between versions is defined.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Version(pub u16);
-
-impl From<u16> for Version {
-    fn from(n: u16) -> Version {
-        Version(n)
-    }
-}
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -75,8 +75,14 @@ pub fn nft_ruleset(
     let chain = egress_table(machine);
     let mut out = String::new();
     out.push_str(&format!("table inet {chain} {{\n"));
+    // The base chain accepts by default and decides only this machine's
+    // tap-originated packets, which `_out` always ends with a terminal
+    // verdict. A drop in any base chain is final in nftables, so a drop
+    // policy here would also drop the uplink's reply packets (no handshake
+    // could complete under any policy) and every other machine's packets,
+    // which their own tables decide.
     out.push_str("  chain forward {\n");
-    out.push_str("    type filter hook forward priority 0; policy drop;\n");
+    out.push_str("    type filter hook forward priority 0; policy accept;\n");
     out.push_str(&format!("    iifname \"{tap}\" jump {chain}_out\n"));
     out.push_str("  }\n");
     out.push_str(&format!("  chain {chain}_out {{\n"));
@@ -154,18 +160,16 @@ pub struct EgressConfig {
 
 /// One machine's realized guest addressing (machine §5.2), carved from the
 /// node's [`EgressConfig`] pool: the tap the guest's virtio-net binds to, the
-/// /30 the tap is addressed from, and the guest's own address, gateway, and MAC.
+/// two addresses of its /30, and the guest's MAC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestNet {
     /// The tap device name: the stable per-machine attribution key ([`tap_name`]).
     pub tap: String,
-    /// The tap's host-side address with prefix, e.g. `172.31.0.1/30`; what
-    /// [`apply::install`] assigns to the tap and the guest's default gateway.
-    pub host_cidr: String,
-    /// The guest's default gateway (the tap's host address), e.g. `172.31.0.1`.
-    pub gateway: String,
+    /// The tap's host-side address, e.g. `172.31.0.1`: what [`apply::install`]
+    /// assigns to the tap (with the /30 prefix) and the guest's default gateway.
+    pub host: Ipv4Addr,
     /// The guest's own address, e.g. `172.31.0.2`.
-    pub guest_ip: String,
+    pub guest: Ipv4Addr,
     /// A stable, locally-administered MAC for the guest NIC (derived from the
     /// machine name, so it survives reboots: attribution stability, M6).
     pub guest_mac: String,
@@ -190,13 +194,10 @@ pub fn guest_mac(machine: &EntityName) -> String {
 pub fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> GuestNet {
     // Each /30 is four addresses; `index * 4` steps to this machine's block.
     let network = u32::from(pool_base).wrapping_add(index.wrapping_mul(4));
-    let gateway = Ipv4Addr::from(network.wrapping_add(1));
-    let guest = Ipv4Addr::from(network.wrapping_add(2));
     GuestNet {
         tap: tap_name(machine),
-        host_cidr: format!("{gateway}/30"),
-        gateway: gateway.to_string(),
-        guest_ip: guest.to_string(),
+        host: Ipv4Addr::from(network.wrapping_add(1)),
+        guest: Ipv4Addr::from(network.wrapping_add(2)),
         guest_mac: guest_mac(machine),
     }
 }
@@ -206,10 +207,7 @@ pub fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> Guest
 /// DHCP client: `ip=<guest>::<gateway>:<netmask>::eth0:off`. Appended to the
 /// boot args when a machine boots with a NIC.
 pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
-    format!(
-        "ip={}::{}:255.255.255.252::eth0:off",
-        net.guest_ip, net.gateway
-    )
+    format!("ip={}::{}:255.255.255.252::eth0:off", net.guest, net.host)
 }
 
 /// A node-local allocator for per-machine guest /30 slots (machine §5.2). One
@@ -244,25 +242,28 @@ impl GuestPool {
 }
 
 /// Apply a machine's egress plumbing (machine §5.2): create the tap device,
-/// address it, and load the nftables ruleset. Linux + `CAP_NET_ADMIN` only;
-/// shells out to `ip` and `nft`. Returns an error the caller logs and degrades
-/// on, booting the machine without a NIC rather than failing it.
+/// address it, enable forwarding, and load the nftables ruleset. Linux +
+/// `CAP_NET_ADMIN` only; shells out to `ip`, `sysctl`, and `nft`. Returns an
+/// error the caller logs and degrades on, booting the machine without a NIC
+/// rather than failing it.
 #[cfg(all(feature = "net", target_os = "linux"))]
 pub mod apply {
     use super::*;
     use std::process::Command;
 
-    /// Bring up `tap` and load `ruleset` via `nft -f -`. `guest_cidr` is the
-    /// /30 the guest addresses from (a node-local pool allocates it).
+    /// Bring up the machine's tap at `host/30` and load `ruleset` via
+    /// `nft -f -`. Forwarding is enabled node-wide: without it the kernel
+    /// never consults the forward hook and no guest packet leaves the tap.
     pub fn install(
         machine: &EntityName,
         ruleset: &str,
-        guest_cidr: &str,
+        host: Ipv4Addr,
     ) -> Result<(), std::io::Error> {
         let tap = tap_name(machine);
         run(Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]))?;
-        run(Command::new("ip").args(["addr", "add", guest_cidr, "dev", &tap]))?;
+        run(Command::new("ip").args(["addr", "add", &format!("{host}/30"), "dev", &tap]))?;
         run(Command::new("ip").args(["link", "set", &tap, "up"]))?;
+        run(Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]))?;
         use std::io::Write;
         let mut child = Command::new("nft")
             .args(["-f", "-"])
@@ -300,6 +301,24 @@ pub mod apply {
     }
 }
 
+/// The same seam where the plumbing cannot be realized (no `feature = "net"`,
+/// or not Linux): every install fails, so a configured egress degrades to the
+/// documented "booting without a NIC" path, and there is nothing to remove.
+#[cfg(not(all(feature = "net", target_os = "linux")))]
+pub mod apply {
+    use super::*;
+
+    pub fn install(
+        _machine: &EntityName,
+        _ruleset: &str,
+        _host: Ipv4Addr,
+    ) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("egress needs feature `net` on linux"))
+    }
+
+    pub fn remove(_machine: &EntityName) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,7 +344,8 @@ mod tests {
 
     #[test]
     fn every_forbidden_class_is_dropped_regardless_of_policy() {
-        // M6: isolation holds under the most permissive policy.
+        // M6: isolation holds under the most permissive policy. Each class is
+        // its own terminal drop rule, not a drop somewhere in the ruleset.
         let rules = nft_ruleset(&machine(), &EgressPolicy::Open, CLUSTER, "eth0");
         for forbidden in [
             "10.0.0.0/8", // RFC1918 (other taps, host services)
@@ -333,12 +353,44 @@ mod tests {
             "192.168.0.0/16",
             "169.254.0.0/16", // link-local + metadata 169.254.169.254
             "127.0.0.0/8",    // host loopback
-            "fe80::/10",      // v6 link-local
             "10.100.0.0/16",  // the cluster's own range
         ] {
             assert!(
-                rules.contains(&format!("daddr {forbidden}")) && rules.contains("drop"),
+                rules.contains(&format!("\n    ip daddr {forbidden} counter drop")),
                 "egress must drop {forbidden} (M6 no lateral movement)",
+            );
+        }
+        for forbidden in ["fe80::/10", "fc00::/7", "::1/128"] {
+            assert!(
+                rules.contains(&format!("\n    ip6 daddr {forbidden} counter drop")),
+                "egress must drop {forbidden} (M6 no lateral movement)",
+            );
+        }
+    }
+
+    #[test]
+    fn the_base_chain_accepts_and_only_the_tap_is_judged() {
+        // The base chain must not drop by policy: a base-chain drop is final,
+        // so it would drop the uplink's replies (no connection could complete)
+        // and every other machine's packets. Isolation comes from the tap's
+        // own chain, whose every path ends in a terminal verdict.
+        let rules = nft_ruleset(&machine(), &EgressPolicy::Open, CLUSTER, "eth0");
+        let tap = tap_name(&machine());
+        assert!(rules.contains("type filter hook forward priority 0; policy accept;"));
+        let chain = tap.replace('-', "_");
+        assert!(rules.contains(&format!("iifname \"{tap}\" jump egress_{chain}_out")));
+        for policy in [
+            EgressPolicy::Open,
+            EgressPolicy::Allowlist(vec!["93.184.216.0/24".into()]),
+            EgressPolicy::None,
+        ] {
+            let rules = nft_ruleset(&machine(), &policy, CLUSTER, "eth0");
+            let out = rules.split("_out {\n").nth(1).expect("the tap's chain");
+            let body = out.split("\n  }").next().expect("chain body");
+            let last = body.lines().last().expect("a rule");
+            assert!(
+                last.contains("counter accept") || last.contains("counter drop"),
+                "the tap's chain must end in a terminal verdict, got {last:?}",
             );
         }
     }
@@ -376,9 +428,8 @@ mod tests {
     fn guest_net_carves_a_distinct_thirty_from_the_pool_per_slot() {
         let base: Ipv4Addr = "172.31.0.0".parse().unwrap();
         let a = guest_net(&machine(), base, 0);
-        assert_eq!(a.host_cidr, "172.31.0.1/30");
-        assert_eq!(a.gateway, "172.31.0.1");
-        assert_eq!(a.guest_ip, "172.31.0.2");
+        assert_eq!(a.host, Ipv4Addr::new(172, 31, 0, 1));
+        assert_eq!(a.guest, Ipv4Addr::new(172, 31, 0, 2));
         assert_eq!(
             a.tap,
             tap_name(&machine()),
@@ -387,8 +438,8 @@ mod tests {
 
         // The next slot is the next /30: four addresses on.
         let b = guest_net(&machine(), base, 1);
-        assert_eq!(b.gateway, "172.31.0.5");
-        assert_eq!(b.guest_ip, "172.31.0.6");
+        assert_eq!(b.host, Ipv4Addr::new(172, 31, 0, 5));
+        assert_eq!(b.guest, Ipv4Addr::new(172, 31, 0, 6));
 
         // Same machine + slot is stable; the MAC is stable regardless of slot.
         assert_eq!(a, guest_net(&machine(), base, 0));

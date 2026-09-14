@@ -1,8 +1,9 @@
 //! Shared simulation invariants over agent events (agent spec §11).
 //!
 //! The continuous A-checkers: the event grammar that bounds effects to a live
-//! activation (A6/A8), and run discipline over `(session, turn)` (A3/A7). Test
-//! support behind the `testing` feature, not part of the agent runtime API.
+//! activation (A6/A8), and run discipline over `(session, turn)` (A3/A4/A5/A7).
+//! Test support behind the `testing` feature, not part of the agent runtime
+//! API.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -113,11 +114,13 @@ impl Invariant for AgentEventGrammar {
     }
 }
 
-/// **Run discipline** (A3 pairing, A7): per `(session, turn)` exactly one
-/// `RunStarted` and at most one `RunEnded`, never an end without a start. A
-/// resume emits no second `RunStarted` (§10.4), and `ModelCompleted` is scoped to
-/// journaled spend (emitted only after the response commits, §9.1 item 4), so no
-/// completion follows a run's end.
+/// **Run discipline** (A3 pairing, A7; the stream half of A4 and A5): per
+/// `(session, turn)` exactly one `RunStarted` and at most one `RunEnded`, never
+/// an end without a start. A resume emits no second `RunStarted` (§10.4), and
+/// `ModelCompleted` is scoped to journaled spend (emitted only after the
+/// response commits, §9.1 item 4), so no completion follows a run's end. The
+/// spend bound itself is a journal audit (`conformance_budget.rs`), since the
+/// budget and the carve-outs are records, not stream events.
 #[derive(Default)]
 pub struct RunDiscipline {
     started: BTreeSet<(SessionId, TurnId)>,

@@ -222,7 +222,7 @@ impl SimNetwork {
     }
 
     /// The [`Transport`] handle `node`'s system sends through: the same one
-    /// [`bring_up`](SimNetwork::join) hands it.
+    /// [`join`](SimNetwork::join) hands it.
     pub fn transport(&self, node: NodeId) -> SimTransport {
         SimTransport {
             net: self.clone(),

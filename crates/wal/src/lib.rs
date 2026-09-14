@@ -515,19 +515,19 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             Err(err) => return Err(err),
         };
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let version = records.version();
 
-        // A file whose bytes are a *prefix* of the header we would write holds no
-        // frames (the header is written and fsynced before any append can follow it),
-        // so stamping it in place is lossless. This covers a missing file, an empty
-        // one, and a header torn by a crash between creating the file and syncing it,
-        // which would otherwise turn a benign crash into a log that can never be
-        // opened again.
-        //
-        // The prefix test bounds that: a short file that is *not* heading toward this
-        // header falls through to the refusal below instead of being silently
-        // truncated.
-        let fresh = header(records.version());
-        if bytes.len() < HEADER_LEN {
+        let (recovered, offsets, end) = if bytes.len() < HEADER_LEN {
+            // A file whose bytes are a *prefix* of the header we would write holds no
+            // frames (the header is written and fsynced before any append can follow
+            // it), so stamping it in place is lossless. This covers a missing file, an
+            // empty one, and a header torn by a crash between creating the file and
+            // syncing it, which would otherwise turn a benign crash into a log that
+            // can never be opened again.
+            //
+            // The prefix test bounds that: a short file that is *not* heading toward
+            // this header is refused instead of being silently truncated.
+            let fresh = header(version);
             if !fresh.starts_with(&bytes) {
                 return Err(refused(compat::Incompatible::Unstamped {
                     format: FRAME.format().name(),
@@ -546,42 +546,30 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
                 // acknowledged.
                 sync_dir(parent_dir(&path))?;
             }
-            return Ok((
-                Wal {
-                    path,
-                    file,
-                    offsets: Vec::new(),
-                    end: HEADER_LEN as u64,
-                    scratch: Vec::new(),
-                    staged: Vec::new(),
-                    max_record,
-                    records: records.version(),
-                    _marker: PhantomData,
-                },
-                Vec::new(),
-            ));
-        }
-
-        // The header is admitted whole before a single frame is scanned (**V2**).
-        let frames = admit_header(&bytes, records).map_err(refused)?;
-        let (recovered, offsets, valid_body) = scan::<T>(frames, max_record, HEADER_LEN as u64);
-        let valid_end = HEADER_LEN as u64 + valid_body;
-        if (valid_end as usize) < bytes.len() {
-            // A torn tail: the write never returned, so the record was never
-            // acknowledged. Truncate it away before anything is appended.
-            file.set_len(valid_end)?;
-            file.sync_all()?;
-        }
+            (Vec::new(), Vec::new(), HEADER_LEN as u64)
+        } else {
+            // The header is admitted whole before a single frame is scanned (**V2**).
+            let frames = admit_header(&bytes, records).map_err(refused)?;
+            let (recovered, offsets, valid_body) = scan::<T>(frames, max_record, HEADER_LEN as u64);
+            let valid_end = HEADER_LEN as u64 + valid_body;
+            if (valid_end as usize) < bytes.len() {
+                // A torn tail: the write never returned, so the record was never
+                // acknowledged. Truncate it away before anything is appended.
+                file.set_len(valid_end)?;
+                file.sync_all()?;
+            }
+            (recovered, offsets, valid_end)
+        };
         Ok((
             Wal {
                 path,
                 file,
                 offsets,
-                end: valid_end,
+                end,
                 scratch: Vec::new(),
                 staged: Vec::new(),
                 max_record,
-                records: records.version(),
+                records: version,
                 _marker: PhantomData,
             },
             recovered,
@@ -1093,6 +1081,46 @@ mod tests {
         assert!(fs::read(&path).unwrap().starts_with(MAGIC));
         let (_wal, recovered) = open(&path);
         assert_eq!(recovered, vec![rec(9, b"z")]);
+    }
+
+    /// The one crash point the replace discipline leaves visible: a crash between
+    /// creating the scratch file and renaming it (§5 rule 1). The scratch file is
+    /// a whole or partial *replacement* that never landed, so the log a reopen
+    /// finds is the whole prior file, and the stray is left where it is rather
+    /// than adopted or removed (a caller that enumerates the directory skips it).
+    #[test]
+    fn a_scratch_file_left_by_a_crash_mid_rewrite_leaves_the_prior_log_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        {
+            let (mut wal, _) = open(&path);
+            wal.append_batch(&[rec(1, b"a"), rec(2, b"b")]).unwrap();
+        }
+        let prior = fs::read(&path).unwrap();
+
+        // Stage what a `rewrite(&[rec(9, b"z")])` had written when the crash hit:
+        // a fully framed replacement under the scratch name, never renamed.
+        let mut replacement = header(RECORDS.version());
+        replacement = frame_onto(replacement, &rec(9, b"z"), MAX);
+        let stray = dir.path().join(temp_name("log"));
+        fs::write(&stray, &replacement).unwrap();
+
+        let (_wal, recovered) = open(&path);
+        assert_eq!(
+            recovered,
+            vec![rec(1, b"a"), rec(2, b"b")],
+            "the prior file is the log; the replacement that never landed is not"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            prior,
+            "the prior file is untouched"
+        );
+        assert_eq!(
+            fs::read(&stray).unwrap(),
+            replacement,
+            "the stray is neither adopted nor removed"
+        );
     }
 
     #[test]

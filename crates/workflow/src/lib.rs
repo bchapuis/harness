@@ -83,7 +83,6 @@ use entity::EntityName;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub use backoff::BackoffPolicy;
 pub use binding::Binding;
 pub use binding::BindingState;
 pub use cycle::Engine;
@@ -119,17 +118,6 @@ impl<K, E> Pending<K, E> {
             on_orphan: OnOrphan::Reexecute,
         }
     }
-
-    /// A pending effect whose repetition the consumer will not risk blindly: an
-    /// orphaned one resolves as [`EffectError::Interrupted`] and the consumer
-    /// decides (§4.4).
-    pub fn interrupt(key: K, effect: E) -> Self {
-        Pending {
-            key,
-            effect,
-            on_orphan: OnOrphan::Interrupt,
-        }
-    }
 }
 
 /// Resume's policy for an **orphaned** effect: one whose intent committed and
@@ -155,11 +143,12 @@ pub enum OnOrphan {
 /// the entity: the workflow settles it as a value the consumer's fold records and
 /// reacts to.
 ///
-/// **Only [`Interrupted`](EffectError::Interrupted) is the workflow's to mint**
-/// (§4.4). The other three are what a consumer's [`Workflow::perform`] returns:
-/// the workflow neither bounds an effect nor interprets its failure. A consumer
-/// wanting a per-effect timeout takes it from the [`Clock`](actor_core::Clock)
-/// on [`Perform`].
+/// **Two variants are the workflow's to mint**: [`Interrupted`](EffectError::Interrupted)
+/// for an orphan resolved on resume (§4.4) and [`Failed`](EffectError::Failed) for a
+/// panic caught at the boundary of the task running the effect (§4.3). The other
+/// two are what a consumer's [`Workflow::perform`] returns: the workflow neither
+/// bounds an effect nor interprets its failure. A consumer wanting a per-effect
+/// timeout takes it from the [`Clock`](actor_core::Clock) on [`Perform`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectError {
     /// A bound the consumer's `perform` set on itself elapsed. Its effects MAY

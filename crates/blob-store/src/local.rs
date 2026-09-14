@@ -45,6 +45,7 @@ use crate::blob::BlobStore;
 use crate::blob::Namespace;
 use crate::blob::slice;
 use crate::blob::verify;
+use crate::tombstone::Tombstone;
 
 /// The tombstone file (compatibility §3, `blob.tombstone`): a `wal::Sidecar`
 /// (wal §5) carrying the deletion stamp, the same shape as the entity store's
@@ -175,14 +176,17 @@ impl LocalBlobStore {
     }
 
     /// Record a tombstone for `ns` (durable) and sweep its blobs (spec §5.3).
-    /// Idempotent and monotonic: re-tombstoning a namespace overwrites with the
-    /// same meaning and re-sweeps harmlessly. The tombstone is written *before*
-    /// the sweep, so even a crash mid-sweep leaves the namespace gone.
+    /// Idempotent and monotonic: re-tombstoning a namespace keeps the record
+    /// already on disk (so the stamp it carries never drifts from the one the
+    /// in-memory set converged on, and a redelivered delete costs no fsync) and
+    /// re-sweeps harmlessly. The tombstone is written *before* the sweep, so even
+    /// a crash mid-sweep leaves the namespace gone.
     pub fn tombstone(&self, ns: &Namespace, deleted_at: u64) -> Result<(), BlobError> {
         let _guard = self.lock();
-        TOMBSTONE
-            .write(&self.inner.tombstones.join(ns.to_string()), deleted_at)
-            .map_err(unavailable)?;
+        let path = self.inner.tombstones.join(ns.to_string());
+        if !path.exists() {
+            TOMBSTONE.write(&path, deleted_at).map_err(unavailable)?;
+        }
         self.sweep(ns);
         Ok(())
     }
@@ -201,10 +205,10 @@ impl LocalBlobStore {
 
     /// The stamp recorded when `ns` was tombstoned, or `None` if it was not.
     ///
-    /// The value is the anchor a rejoining node's [`TombstoneSet`] converges on:
+    /// The value is the anchor a restarted node's [`TombstoneSet`] converges on:
     /// `insert` keeps the **minimum** of two stamps for one namespace (spec §5.3),
-    /// so a set rebuilt from these files merges commutatively with one gossiped
-    /// from a peer.
+    /// so the set [`tombstones`](Self::tombstones) rebuilds from these files
+    /// merges commutatively with one gossiped from a peer.
     ///
     /// # Errors
     ///
@@ -214,6 +218,30 @@ impl LocalBlobStore {
     /// [`TombstoneSet`]: crate::tombstone::TombstoneSet
     pub fn tombstoned_at(&self, ns: &Namespace) -> io::Result<Option<u64>> {
         TOMBSTONE.read(&self.inner.tombstones.join(ns.to_string()))
+    }
+
+    /// Every tombstone this node holds on disk: what a restarted node seeds its
+    /// awareness set from, so a process restart forgets no delete it learned (spec
+    /// §5.3, **B7**). Membership is the file's presence, as for
+    /// [`is_tombstoned`](Self::is_tombstoned); a record whose stamp this build
+    /// cannot read is carried at `u64::MAX`, so any peer's real stamp wins the
+    /// minimum the set converges on. Names that do not decode (a stray temp file)
+    /// are skipped. Best-effort: an I/O error mid-walk truncates the listing, since
+    /// the anti-entropy pull re-learns whatever a peer still holds.
+    pub fn tombstones(&self) -> Vec<Tombstone> {
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.inner.tombstones) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let Some(ns_bytes) = entry.file_name().to_str().and_then(decode_hex) else {
+                continue;
+            };
+            let ns = Namespace::new(ns_bytes);
+            let deleted_at = self.tombstoned_at(&ns).ok().flatten().unwrap_or(u64::MAX);
+            out.push(Tombstone { ns, deleted_at });
+        }
+        out
     }
 
     /// Remove a namespace's blob subtree. Best-effort and re-drivable: an absent
@@ -290,7 +318,8 @@ fn fanout(id: &BlobId) -> String {
 /// Decode a lowercase-hex string to bytes, the inverse of the [`Namespace`] and
 /// [`BlobId`] `Display` used for on-disk path components. `None` on any non-hex or
 /// odd-length input, so a stray file (e.g. a leftover temp) is skipped by
-/// [`LocalBlobStore::blobs`] rather than mis-parsed.
+/// [`LocalBlobStore::blobs`] and [`LocalBlobStore::tombstones`] rather than
+/// mis-parsed.
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;

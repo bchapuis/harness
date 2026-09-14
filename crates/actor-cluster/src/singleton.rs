@@ -65,7 +65,7 @@ where
         M: Message + Clone,
         F: FnMut() -> A + Send + 'static,
     {
-        self.launch_task(manager(self.clone(), name, factory, stop));
+        self.launch(Box::pin(manager(self.clone(), name, factory, stop)));
         self.singleton_proxy(name)
     }
 

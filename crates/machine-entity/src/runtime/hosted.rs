@@ -143,7 +143,8 @@ pub struct HostedRuntimeConfig {
     /// The node's egress configuration (machine §5.2, M6). `None` (the default)
     /// boots machines with no NIC; set it to wire the per-machine tap, node
     /// NAT, and guest addressing. Realized only behind `feature = "net"` on
-    /// Linux and only at [`MachineIsolation::MicroVm`]; anything else degrades to no NIC.
+    /// Linux and only at `machine_host::MachineIsolation::MicroVm`; anything
+    /// else degrades to no NIC.
     pub egress: Option<crate::net::EgressConfig>,
 }
 
@@ -165,7 +166,6 @@ pub struct HostedRuntimeProvider {
     /// The node-local guest-address pool (machine §5.2), `Some` iff the config
     /// wired egress *and* the mechanism can realize it. Shared into each booted
     /// guest so a kill returns its slot.
-    #[cfg_attr(not(all(feature = "net", target_os = "linux")), allow(dead_code))]
     pool: Option<Arc<std::sync::Mutex<crate::net::GuestPool>>>,
 }
 
@@ -195,7 +195,6 @@ impl HostedRuntimeProvider {
     /// the mechanism cannot take a NIC, the pool is full, or the plumbing could
     /// not be installed, in which case the machine boots with no NIC rather
     /// than failing the boot over egress.
-    #[cfg(all(feature = "net", target_os = "linux"))]
     fn wire_egress(&self, spec: &BootSpec) -> (Network, Option<EgressHandle>) {
         let none = (Network::None, None);
         let (Some(pool), Some(egress)) = (self.pool.as_ref(), self.config.egress.as_ref()) else {
@@ -214,7 +213,7 @@ impl HostedRuntimeProvider {
         let net = crate::net::guest_net(&spec.machine, egress.guest_pool_base, index);
         let cidrs: Vec<&str> = egress.cluster_cidrs.iter().map(String::as_str).collect();
         let ruleset = crate::net::nft_ruleset(&spec.machine, &spec.egress, &cidrs, &egress.uplink);
-        if let Err(e) = crate::net::apply::install(&spec.machine, &ruleset, &net.host_cidr) {
+        if let Err(e) = crate::net::apply::install(&spec.machine, &ruleset, net.host) {
             eprintln!(
                 "machine egress: install failed for {} ({e}), booting without a NIC",
                 spec.machine
@@ -238,13 +237,6 @@ impl HostedRuntimeProvider {
                 index,
             )),
         )
-    }
-
-    /// Egress is a Linux + `CAP_NET_ADMIN` realization behind `feature = "net"`
-    /// (net.rs); without it a machine boots with no NIC and no handle.
-    #[cfg(not(all(feature = "net", target_os = "linux")))]
-    fn wire_egress(&self, _spec: &BootSpec) -> (Network, Option<EgressHandle>) {
-        (Network::None, None)
     }
 }
 
@@ -302,8 +294,6 @@ impl MachineRuntimeProvider for HostedRuntimeProvider {
 /// remove and the pool slot to return when the guest is killed. Held only for
 /// machines that booted with a NIC.
 struct EgressHandle {
-    /// Read only by `apply::remove` in the Linux + `net` realization.
-    #[cfg_attr(not(all(feature = "net", target_os = "linux")), allow(dead_code))]
     machine: EntityName,
     pool: Arc<std::sync::Mutex<crate::net::GuestPool>>,
     index: u32,
@@ -314,7 +304,6 @@ struct EgressHandle {
 }
 
 impl EgressHandle {
-    #[cfg_attr(not(all(feature = "net", target_os = "linux")), allow(dead_code))]
     fn new(
         machine: EntityName,
         pool: Arc<std::sync::Mutex<crate::net::GuestPool>>,
@@ -335,7 +324,6 @@ impl EgressHandle {
         if self.done.swap(true, Ordering::SeqCst) {
             return;
         }
-        #[cfg(all(feature = "net", target_os = "linux"))]
         crate::net::apply::remove(&self.machine);
         self.pool.lock().expect("guest pool").free(self.index);
     }

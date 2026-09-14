@@ -424,15 +424,6 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .sets()
     }
 
-    /// The target set of an in-flight migration, if any (§7.7).
-    pub(crate) fn migration_target(&self) -> Option<Vec<NodeId>> {
-        self.allocation
-            .lock()
-            .expect("shard allocation poisoned")
-            .target()
-            .map(<[NodeId]>::to_vec)
-    }
-
     fn not_leader(&self) -> AppendOutcome {
         AppendOutcome::NotLeader(self.election.leader_hint())
     }
@@ -605,10 +596,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
 
         // Merge: highest-term record per slot, and the best snapshot. When a quorum
-        // was reached this is the authoritative head; otherwise it is just this node's
-        // local view: a read-your-leader fallback (§7.5) that may be stale but cannot
-        // fork a write, since a write from it still needs a quorum and a stale-head
-        // append is rejected by an up-to-date replica's optimistic check (§8).
+        // was reached this is the authoritative head; otherwise it is the merge of
+        // whatever replied short of a quorum: a read-your-leader fallback (§7.5) that
+        // may be stale but cannot fork a write, since a write from it still needs a
+        // quorum and a stale-head append is rejected by an up-to-date replica's
+        // optimistic check (§8).
         //
         // One read anomaly beyond staleness is possible in this fallback: a crash
         // after a failed append's local write but before its rollback truncate can
@@ -822,6 +814,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         from: Seq,
         limit: usize,
     ) -> Result<RecordPage, EntityJournalError> {
+        self.local_usable()?;
         Ok(self.local.read_from(self.shard, entity, from, limit))
     }
 
@@ -829,7 +822,22 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         &self,
         entity: &EntityName,
     ) -> Result<Option<(Seq, Vec<u8>)>, EntityJournalError> {
+        self.local_usable()?;
         Ok(self.local.snapshot(self.shard, entity))
+    }
+
+    /// The §11 gate on the local reads above: a failed store answers them as an
+    /// entity with no history. `recover` already refuses at `prepare`, so an
+    /// activation never gets this far; the gateway's non-activating read (§7.5) does,
+    /// and without the gate it would serve an empty page as the entity's history.
+    fn local_usable(&self) -> Result<(), EntityJournalError> {
+        if self.local.failed() {
+            return Err(EntityJournalError::Unavailable(format!(
+                "local store for shard {} is unusable",
+                self.shard
+            )));
+        }
+        Ok(())
     }
 
     // --- The entity-native content-addressed blob store (clustered) ----------------

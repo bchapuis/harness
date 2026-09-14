@@ -54,15 +54,6 @@ impl NodeCapabilities {
     }
 }
 
-impl std::fmt::Debug for NodeCapabilities {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NodeCapabilities")
-            .field("blocking_io", &"<seam>")
-            .field("metrics", &"<sink>")
-            .finish()
-    }
-}
-
 /// A node's entity hosting, carrying the capabilities every type it hosts shares
 /// (spec §7.4, §13).
 ///
@@ -100,8 +91,9 @@ impl<S: EntitySystem> EntityNode<S> {
     /// operator metrics registry (§13), the three node-scoped choices a deployment
     /// otherwise makes one by one. Returns the store factory beside the node because
     /// hosting is per type ([`EntityConfig::entity_store`]) while the store is per
-    /// node: its factory caches per `(type, node)`, so every type shares one on-disk
-    /// store keyed by shard and entity, the entity analogue of the Raft WAL.
+    /// node: its factory caches per `(type, node)`, so each type hosted on the node
+    /// has one on-disk store of its own, keyed by shard and entity, and the fence of
+    /// one type never touches another's shards (§8).
     ///
     /// The store stamps the codec's name and refuses to open under another (§7.4),
     /// and the codec is read off `system`, so the stamp cannot name a value other
@@ -150,7 +142,7 @@ impl<S: EntitySystem> EntityNode<S> {
 
     /// Host entities of type `G` under its own `G::ENTITY_TYPE`, building each
     /// activation with `G::default`: this node's form of
-    /// [`EntityExt::entity`](crate::EntityExt::entity).
+    /// [`EntityExt::entities`](crate::EntityExt::entities).
     pub fn entities<G>(&self, config: EntityConfig) -> Entities<G>
     where
         G: Entity<System = S> + Default,

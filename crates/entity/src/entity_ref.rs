@@ -175,7 +175,7 @@ impl<V: Clone> Generations<V> {
 ///
 /// It is deliberately not sharded anyway, because the absolute number is the one that
 /// decides. 8.6 M lookups/s is the floor under contention, and the deployment's
-/// binding constraint is a 1 Gbps uplink (hw §3.3): a request that does one lookup and
+/// binding constraint is a 1 Gbps uplink (hw §1): a request that does one lookup and
 /// then any real work cannot arrive within three orders of magnitude of that rate.
 /// Sharding would buy throughput this deployment has no way to ask for, at the cost of
 /// a partitioned generation policy. Revisit if a gateway is ever expected to sustain
@@ -584,6 +584,7 @@ impl<G: Entity> EntityRef<G> {
         M: Message<Reply = Result<T, EntityError>>,
         Gateway<G>: actor_core::Handler<M>,
     {
+        let mut hint = target.id().node();
         for _ in 0..RESOLVE_ATTEMPTS {
             let remaining = deadline.duration_since(self.system.now());
             if remaining.is_zero() {
@@ -595,7 +596,8 @@ impl<G: Entity> EntityRef<G> {
                 // Follow the leader hint. If that gateway is not (yet) discoverable,
                 // keep the current target and back off: the shard is still electing
                 // or the gateway has not gossiped in.
-                Ok(Err(EntityError::NotLeader(hint))) => {
+                Ok(Err(EntityError::NotLeader(h))) => {
+                    hint = h;
                     if let Some(gateway) = self.gateway_on(hint) {
                         *target = gateway;
                     }
@@ -612,8 +614,8 @@ impl<G: Entity> EntityRef<G> {
             }
             self.system.sleep(RESOLVE_BACKOFF).await;
         }
-        // Deadline or attempt bound exhausted: surface the best hint (§12).
-        Err(EntityError::NotLeader(self.system.node()))
+        // Deadline or attempt bound exhausted: surface the last hint seen (§12).
+        Err(EntityError::NotLeader(hint))
     }
 
     /// Every gateway discovered for this entity type (§5.3), one per node.
@@ -749,7 +751,7 @@ fn is_retriable(call: &CallError) -> bool {
 }
 
 /// A handle to a hosted entity type (spec Appendix A): address an entity by key and
-/// `ask`/`tell` it. Obtained from [`EntityExt::entity`].
+/// `ask`/`tell` it. Obtained from [`EntityExt::entities`].
 pub struct Entities<G: Entity> {
     gateway: ActorRef<Gateway<G>>,
     /// The shared routing state (§5.4): the system handle, the runtime type name

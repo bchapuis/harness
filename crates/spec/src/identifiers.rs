@@ -23,8 +23,10 @@
 //! Only backticked tokens of a shape the tree would own:
 //!
 //! - a type-like `Foo`, at least two characters, so a generic `T` is not a claim;
+//! - a generic `Foo<T>`, checked on its head;
 //! - `Foo::bar`, checked on the member;
 //! - `some_crate::Foo`, checked on the type;
+//! - `some_crate::item` or `some_crate::item()`, checked on the item;
 //! - `foo_bar()`, checked on the name.
 //!
 //! Everything else in backticks (flags, paths, shell, JSON, prose in code voice)
@@ -399,7 +401,13 @@ pub fn claimed(token: &str) -> Option<(&str, &str)> {
     {
         return Some((token, name));
     }
+    // A generic, `Wal<T>` or `ClusterSystem<C, E, S, T>`: the head is the claim,
+    // and the parameters are the citing spec's own letters.
+    if let Some((head, _)) = token.split_once('<') {
+        return type_like(head).then_some((token, head));
+    }
     if let Some((left, right)) = token.split_once("::") {
+        let right = right.trim_end_matches("()");
         if !is_ident(left) || !is_ident(right) {
             return None;
         }
@@ -408,23 +416,29 @@ pub fn claimed(token: &str) -> Option<(&str, &str)> {
         if left.len() < 2 {
             return None;
         }
-        let right = right.trim_end_matches("()");
         return match (
             left.starts_with(|c: char| c.is_ascii_uppercase()),
             right.starts_with(|c: char| c.is_ascii_uppercase()),
         ) {
             // `ReadReply::head`: the member is the part that moves.
-            (true, false) => is_ident(right).then_some((token, right)),
+            (true, false) => Some((token, right)),
             // `compat::Stamp`: a crate path; the type is the part that moves.
             (false, true) => Some((token, right)),
-            _ => None,
+            // `entity::store`, `wal::checksum()`: a crate's module or function;
+            // the item is the part that moves.
+            (false, false) => Some((token, right)),
+            (true, true) => None,
         };
     }
-    // A type-like name. One letter is a generic parameter, not a claim.
-    (token.len() >= 2
-        && token.starts_with(|c: char| c.is_ascii_uppercase())
-        && token.chars().all(|c| c.is_ascii_alphanumeric()))
-    .then_some((token, token))
+    type_like(token).then_some((token, token))
+}
+
+/// A type-like name: capitalised and at least two characters, so a generic
+/// parameter `T` is not a claim.
+fn type_like(text: &str) -> bool {
+    text.len() >= 2
+        && text.starts_with(|c: char| c.is_ascii_uppercase())
+        && text.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Every identifier the [`SCANNED`] documents name that nothing declares.
@@ -734,6 +748,25 @@ mod tests {
     #[test]
     fn a_crate_path_is_checked_on_its_type() {
         assert_eq!(claimed("compat::Stamp"), Some(("compat::Stamp", "Stamp")));
+    }
+
+    #[test]
+    fn a_crate_path_to_a_module_or_function_is_checked_on_the_item() {
+        assert_eq!(claimed("entity::store"), Some(("entity::store", "store")));
+        assert_eq!(
+            claimed("wal::checksum()"),
+            Some(("wal::checksum()", "checksum"))
+        );
+    }
+
+    #[test]
+    fn a_generic_is_checked_on_its_head() {
+        assert_eq!(claimed("Wal<T>"), Some(("Wal<T>", "Wal")));
+        assert_eq!(
+            claimed("ClusterSystem<C, E, S, T>"),
+            Some(("ClusterSystem<C, E, S, T>", "ClusterSystem"))
+        );
+        assert_eq!(claimed("T<U>"), None, "a one-letter head is a parameter");
     }
 
     #[test]

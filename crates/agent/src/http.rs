@@ -57,22 +57,9 @@ pub trait HttpPost: Send + Sync + 'static {
 /// Retry tuning: attempts and the backoff curve, timed by the injected
 /// [`Clock`] with jitter from the injected [`Entropy`] (§4.2 rule 1). The
 /// shell's judgment, not the caller's: no adapter or deployment tunes it.
-#[derive(Clone, Debug)]
-struct RetryPolicy {
-    attempts: u32,
-    base_backoff: Duration,
-    max_backoff: Duration,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        RetryPolicy {
-            attempts: 4,
-            base_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(8),
-        }
-    }
-}
+const ATTEMPTS: u32 = 4;
+const BASE_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 /// Which failures the bounded policy absorbs (§4.3): pressure and transport
 /// blips, never a request the API called malformed.
@@ -85,11 +72,11 @@ fn retryable(error: &ModelError) -> bool {
 
 /// Backoff before the `attempt`-th retry (1-based): exponential, capped, with
 /// up to one base of seeded jitter.
-fn backoff<E: Entropy + ?Sized>(retry: &RetryPolicy, entropy: &E, attempt: u32) -> Duration {
+fn backoff<E: Entropy + ?Sized>(entropy: &E, attempt: u32) -> Duration {
     let factor = 2u32.saturating_pow(attempt.saturating_sub(1).min(16));
-    let base = (retry.base_backoff * factor).min(retry.max_backoff);
-    let jitter_nanos = entropy.next_u64() % retry.base_backoff.as_nanos().max(1) as u64;
-    (base + Duration::from_nanos(jitter_nanos)).min(retry.max_backoff)
+    let base = (BASE_BACKOFF * factor).min(MAX_BACKOFF);
+    let jitter_nanos = entropy.next_u64() % BASE_BACKOFF.as_nanos().max(1) as u64;
+    (base + Duration::from_nanos(jitter_nanos)).min(MAX_BACKOFF)
 }
 
 /// A provider protocol: the wire-specific four an adapter crate owns; the
@@ -118,7 +105,6 @@ pub struct ProtocolModel<P: Protocol, C: Clock, E: Entropy> {
     api_key: String,
     clock: C,
     entropy: Arc<E>,
-    retry: RetryPolicy,
     _protocol: PhantomData<P>,
 }
 
@@ -134,11 +120,9 @@ impl<P: Protocol, C: Clock, E: Entropy> ProtocolModel<P, C, E> {
             api_key: api_key.into(),
             clock,
             entropy,
-            retry: RetryPolicy::default(),
             _protocol: PhantomData,
         }
     }
-
 }
 
 impl<P: Protocol, C: Clock, E: Entropy> Model for ProtocolModel<P, C, E> {
@@ -147,10 +131,9 @@ impl<P: Protocol, C: Clock, E: Entropy> Model for ProtocolModel<P, C, E> {
         let headers = P::headers(&self.api_key);
         let http = Arc::clone(&self.http);
         let clock = self.clock.clone();
-        let attempts = self.retry.attempts.max(1);
         // Pre-draw the jitter schedule so the future owns no entropy handle.
-        let backoffs: Vec<Duration> = (1..attempts)
-            .map(|a| backoff(&self.retry, self.entropy.as_ref(), a))
+        let backoffs: Vec<Duration> = (1..ATTEMPTS)
+            .map(|a| backoff(self.entropy.as_ref(), a))
             .collect();
         Box::pin(async move {
             let mut attempt = 0;
@@ -162,7 +145,7 @@ impl<P: Protocol, C: Clock, E: Entropy> Model for ProtocolModel<P, C, E> {
                 };
                 match outcome {
                     Ok(response) => return Ok(response),
-                    Err(error) if attempt < attempts && retryable(&error) => {
+                    Err(error) if attempt < ATTEMPTS && retryable(&error) => {
                         clock.sleep(backoffs[(attempt - 1) as usize]).await;
                     }
                     Err(error) => return Err(error),
@@ -311,6 +294,6 @@ mod tests {
         let http = ScriptedHttp::new(vec![429; 8]);
         let outcome = sim.block_on(model(9, &sim, Arc::clone(&http)).complete(request()));
         assert_eq!(outcome, Err(ModelError::RateLimited));
-        assert_eq!(http.calls(), RetryPolicy::default().attempts as usize);
+        assert_eq!(http.calls(), ATTEMPTS as usize);
     }
 }

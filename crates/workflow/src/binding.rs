@@ -89,15 +89,6 @@ impl<T> Binding<T> {
         self.state = BindingState::Failed(why.into());
     }
 
-    /// The failure this binding is holding, if any; read by the workflow when it
-    /// settles the effects that needed the resource.
-    pub fn failure(&self) -> Option<&str> {
-        match &self.state {
-            BindingState::Failed(why) => Some(why),
-            _ => None,
-        }
-    }
-
     /// Whether an open is in flight, and therefore whether this binding vetoes
     /// hibernation (§6). A `Failed` binding does **not** veto: the failure is
     /// the activation's to surface through a settle, not to wait on.
@@ -105,9 +96,11 @@ impl<T> Binding<T> {
         matches!(self.state, BindingState::Opening)
     }
 
-    /// Take the resource for release, leaving the binding closed. Called from
-    /// `on_deactivate` on **every** deactivation path (idle hibernation,
-    /// migration, or a forced step-down), so nothing is owed at deactivation.
+    /// Take the resource for release, leaving the binding closed whatever it
+    /// held. Called from `on_deactivate` on **every** deactivation path (idle
+    /// hibernation, migration, or a forced step-down), so nothing is owed at
+    /// deactivation; and by a consumer giving up a claimed open it could not
+    /// launch, so the claim does not outlive the attempt.
     pub fn take(&mut self) -> Option<T> {
         match std::mem::replace(&mut self.state, BindingState::Closed) {
             BindingState::Open(t) => Some(t),
@@ -115,12 +108,17 @@ impl<T> Binding<T> {
         }
     }
 
-    /// Return to `Closed` from a failed open, so the next demand retries. The
-    /// consumer calls this once it has settled the effects that failure
-    /// concerned, never before, or the failure spins invisibly.
-    pub fn clear_failure(&mut self) {
-        if matches!(self.state, BindingState::Failed(_)) {
-            self.state = BindingState::Closed;
+    /// Take a failed open's reason, returning the binding to `Closed` so the
+    /// next demand retries; `None` in any other state. Taking is settling: the
+    /// consumer fails the effects that needed the resource with the reason in
+    /// the same round, or the failure spins invisibly.
+    pub fn take_failure(&mut self) -> Option<String> {
+        if !matches!(self.state, BindingState::Failed(_)) {
+            return None;
+        }
+        match std::mem::replace(&mut self.state, BindingState::Closed) {
+            BindingState::Failed(why) => Some(why),
+            _ => None,
         }
     }
 }
@@ -149,7 +147,6 @@ mod tests {
         let mut b: Binding<u8> = Binding::default();
         b.begin_open();
         b.failed("no sandbox");
-        assert_eq!(b.failure(), Some("no sandbox"));
         assert!(
             !b.is_opening(),
             "a failure is settled through the fold, never waited on"
@@ -158,8 +155,9 @@ mod tests {
             !b.begin_open(),
             "the failure must be settled before a retry"
         );
-        b.clear_failure();
-        assert!(b.begin_open(), "cleared, the next demand retries");
+        assert_eq!(b.take_failure().as_deref(), Some("no sandbox"));
+        assert_eq!(b.take_failure(), None, "taken once");
+        assert!(b.begin_open(), "taken, the next demand retries");
     }
 
     #[test]

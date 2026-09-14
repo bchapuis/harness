@@ -43,9 +43,9 @@ much behind little. Prefer a few deep modules to many shallow ones.
 
 ```rust
 // ✗ Shallow: the caller resolves locality, serializes, correlates, awaits, decodes.
-let payload = codec.serialize(&msg)?;
+let payload = encode(codec, &msg)?;
 let bytes = system.remote_ask(&id, M::MANIFEST, payload, deadline).await?;
-let reply: M::Reply = codec.deserialize(&bytes)?;
+let reply: M::Reply = decode(codec, &bytes)?;
 
 // ✓ Deep: one call hides local-vs-remote, codec, correlation, and timeout (§3.3, §4.4).
 let reply = actor.ask(msg).await?;
@@ -78,7 +78,7 @@ the *same* traits (§4.6, §18.2), so the real system code runs unchanged under 
 
 // ✓ General capabilities; production and simulation each implement them (§4.6).
 pub trait Clock:   Clone + Send + Sync + 'static { fn now(&self) -> Instant; /* sleep, timeout */ }
-pub trait Entropy: Send + Sync + 'static { fn next_u64(&self) -> u64; /* buggify, … */ }
+pub trait Entropy: Send + Sync + 'static { fn next_u64(&self) -> u64; /* pick_index */ }
 pub trait Spawner: Send + Sync + 'static { fn launch(&self, task: BoxFuture<'static, ()>); }
 ```
 

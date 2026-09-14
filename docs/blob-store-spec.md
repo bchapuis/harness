@@ -160,7 +160,7 @@ Rebalancing **only restores copies; it never drops them**. Bytes are removed on 
 - **Node added → optional migration.** Nothing is lost when a new node holds nothing: the prior owners still have W..R copies. Migrating some blobs onto the new node is load balancing, not durability, so it MAY be lazy or low-priority.
 - **No drop on rebalance.** A node that is no longer an owner of a blob it holds keeps the extra copy; reconcile tolerates over-replication and never risks under-replication. Such a now-misplaced copy is reclaimed only when its whole namespace is deleted (§5.3).
 
-The loop reads membership through the same seam the rest of the cluster does and runs on the framework's `Spawner`/`Clock`, so it is seed-reproducible under simulation (§8). It SHOULD rate-limit copying and prioritize restoring under-replicated blobs over balancing well-replicated ones.
+The loop reads membership through the same seam the rest of the cluster does and runs on the framework's `Spawner`/`Clock`, so it is seed-reproducible under simulation (§8). A pass walks the node's blobs in sorted order and copies sequentially, one blob and one owner per await, with no priority between an under-replicated blob and a well-replicated one and no rate limit beyond the 250 ms period between passes.
 
 ---
 

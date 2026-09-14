@@ -20,8 +20,8 @@
 //!   survives until [`NativeTier::release`]'s `rm -f`. That is the contract
 //!   `ToolError::Timeout` documents ("the call's effects may still land"),
 //!   and `--pids-limit` is the fork-bomb guard in the meantime.
-//! - **The bind mount is composed, not opened.** The provider retains the
-//!   workspaces root as a host path solely to compose the `-v` argument it
+//! - **The bind mount is composed, not opened.** The tier retains the
+//!   session workspace's host path solely to compose the `-v` argument it
 //!   hands to docker: the mount is performed by the docker daemon, never an
 //!   ambient filesystem operation by this crate, so S1 survives with this
 //!   one documented composition.
@@ -41,9 +41,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use agent::OnOrphan;
-use agent::Tier;
-use agent::ToolDecl;
 use agent::ToolError;
 use machine_host::GuestError;
 use machine_host::GuestKey;
@@ -63,29 +60,30 @@ const PIDS_LIMIT: u32 = 512;
 /// Names this tier's containers apart from any other consumer's on one host.
 const CONTAINER_PREFIX: &str = "agent-sb";
 
-/// The native tier's tool declaration, ready for [`agent::Kind::tool`]:
-/// arbitrary commands are not idempotent, so an orphaned call interrupts and
-/// the model decides whether to retry the side effect
-/// (`OnOrphan::Interrupt`, agent spec §5.5).
-pub fn shell_tool() -> ToolDecl {
-    ToolDecl {
-        name: "shell".to_string(),
-        description: "Run a POSIX shell command (`/bin/sh -c`) inside the session's \
-                      container. The session workspace is mounted at /workspace (the \
-                      working directory); there is no network. Returns exit_code, \
-                      stdout, and stderr."
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to run."}
-            },
-            "required": ["command"]
-        }),
-        tier: Tier::Native,
-        on_orphan: OnOrphan::Interrupt,
-        timeout: None,
-    }
+/// How much of the session id the container's name keeps readable.
+const NAME_PREFIX: usize = 80;
+
+/// What the model is told `shell` does under this realization; the rest of
+/// the declaration is the provider's `shell_decl`.
+pub(crate) const SHELL_DESCRIPTION: &str = "Run a POSIX shell command (`/bin/sh -c`) \
+     inside the session's container. The session workspace is mounted at /workspace (the \
+     working directory); there is no network. Returns exit_code, stdout, and stderr.";
+
+/// The readable half of a container name: the session id, truncated and
+/// reduced to the characters docker accepts. Readability only; the digest
+/// of the workspace path beside it is what keeps the name injective.
+fn readable(session: &str) -> String {
+    session
+        .chars()
+        .take(NAME_PREFIX)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// One session's native tier: a container provisioned lazily on the first
@@ -102,9 +100,11 @@ pub(crate) struct NativeTier {
     host_workspace: PathBuf,
     /// Names this session's container. A name, not just a handle: a provision
     /// future dropped after `docker run` succeeds would leak a container no
-    /// handle records; the name keeps the orphan addressable. Carries a digest
-    /// of the host workspace path so two providers holding the same session id
-    /// never contend for one name.
+    /// handle records; the name keeps the orphan addressable. A readable
+    /// prefix of the session id, then a digest of the host workspace path:
+    /// the digest is what makes the name injective (two sessions never share
+    /// a workspace directory) and keeps two providers holding the same
+    /// session id from contending for one name.
     key: GuestKey,
     /// The provisioned container. tokio's mutex, deliberately: provisioning
     /// awaits across the lock, and tokio mutexes cannot poison.
@@ -123,17 +123,17 @@ impl NativeTier {
         cli: String,
         image: String,
         host_workspace: PathBuf,
-        workspace_name: &str,
+        session: &str,
         stats: TierStats,
     ) -> NativeTier {
-        let disambiguator = agent::session::content_digest(&host_workspace.display().to_string());
+        let digest = agent::session::content_digest(&host_workspace.display().to_string());
         NativeTier {
             host: ContainerHost::new(cli, CONTAINER_PREFIX),
             image,
             host_workspace,
             // No node scope: a sandbox's containers are named by the session
             // workspace they mount, which is already node-local.
-            key: GuestKey::new("", format!("{workspace_name}-{:08x}", disambiguator as u32)),
+            key: GuestKey::new("", format!("{}-{digest:016x}", readable(session))),
             container: tokio::sync::Mutex::new(None),
             attempted: AtomicBool::new(false),
             stats,

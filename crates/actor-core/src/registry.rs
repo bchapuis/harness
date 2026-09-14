@@ -18,6 +18,7 @@ use actor_serialization::Codec;
 
 use crate::actor::Actor;
 use crate::actor::Handler;
+use crate::actor::Terminated;
 use crate::error::CallError;
 use crate::mailbox::Mailbox;
 use crate::message::Manifest;
@@ -73,23 +74,24 @@ impl<A: Actor> Default for HandlerRegistry<A> {
     }
 }
 
-// Manual `Clone`: `A` itself need not be `Clone` (the entries are `fn` pointers).
-impl<A: Actor> Clone for HandlerRegistry<A> {
-    fn clone(&self) -> Self {
-        HandlerRegistry {
-            entries: self.entries.clone(),
-        }
-    }
-}
-
 impl<A: Actor> HandlerRegistry<A> {
     /// Accept message type `M` over the network, capturing its dispatch entry
     /// for `(A, M)` (spec §4.4).
+    ///
+    /// [`Terminated`] is never accepted: a watcher receives it only as the
+    /// value its own node synthesizes from a `Terminated` frame (spec §12), so
+    /// listing it here would let any peer inject a termination into the
+    /// watcher from raw bytes (spec §15). The request is ignored rather than
+    /// refused so a registration derived from every `Handler<M>` impl stays
+    /// valid (spec §4.4).
     pub fn accept<M>(&mut self)
     where
         A: Handler<M>,
         M: Message,
     {
+        if M::MANIFEST == Terminated::MANIFEST {
+            return;
+        }
         self.entries.insert(M::MANIFEST, dispatch_entry::<A, M>);
     }
 

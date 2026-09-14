@@ -1078,6 +1078,12 @@ impl EntityStore for FileEntityStore {
             .unwrap_or_default()
     }
 
+    // The reads above answer a poisoned store as an entity with no history (`segment`
+    // yields `None`); this is how a journal tells that apart from a real empty one.
+    fn failed(&self) -> bool {
+        self.poisoned()
+    }
+
     fn prepare(&self, shard: u32, entity: &EntityName, term: Term) -> ReadOutcome {
         // The promise (the fence bump) must be durable before it is made, else a
         // restart could forget it and let a deposed leader commit (§8). The segment is

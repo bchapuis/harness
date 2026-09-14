@@ -42,7 +42,7 @@
 //! # Multiple consumers
 //!
 //! Hosted under its own `ENTITY_TYPE` (`"tenancy.Directory"`) via
-//! [`system.entities::<Directory<S>>(config)`](entity::EntityExt::entity), all
+//! [`system.entities::<Directory<S>>(config)`](entity::EntityExt::entities), all
 //! consumers share one directory namespace. A consumer that wants an isolated
 //! namespace hosts the same entity under its own runtime type name with
 //! [`entities_named`](entity::cluster::EntityNode::entities_named) (e.g. `"app.Directory"`):

@@ -10,7 +10,7 @@
 //! The drivers take an opened channel, not a socket path: the same three ops run
 //! over a microVM's vsock and over a container's relayed pipe, because what
 //! differs between the mechanisms is how the guest agent is reached
-//! (`machine_host::Guest::connect`), not what it is told.
+//! (`machine_host::MachineGuest::connect`), not what it is told.
 
 use machine_host::Duplex;
 use machine_host::vsock;
@@ -128,7 +128,7 @@ mod tests {
 
     /// Open a channel the way a mechanism would, against the fake socket below:
     /// connect, muxer handshake, header. The real bindings get their stream from
-    /// `machine_host::Guest::connect`, which does the first two.
+    /// `machine_host::MachineGuest::connect`, which does the first two.
     async fn open_vsock(uds: &Path, port: u32, kind: &ChannelKind) -> std::io::Result<UnixStream> {
         let mut stream = vsock::connect(uds, port).await?;
         vsock::send_frame(&mut stream, &kind.header()).await?;

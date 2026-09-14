@@ -53,11 +53,13 @@ pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTree
 
 /// Run an effect's future, turning a panic into a value.
 ///
-/// A panic inside [`Workflow::perform`](crate::Workflow::perform) is caught at the
-/// task boundary and settled as `Failed` (§4.3), so a consumer bug in one effect
-/// cannot take the activation with it, and, which matters more, cannot leave a
-/// claimed key with no outcome, stranding the engine on a key it will never
-/// relaunch and never let rest.
+/// A panic inside the future [`Workflow::perform`](crate::Workflow::perform)
+/// returns is caught at the boundary of the task that runs it and settled as
+/// `Failed` (§4.3), so a consumer bug in one effect cannot take the activation
+/// with it, and, which matters more, cannot leave a claimed key with no outcome,
+/// stranding the engine on a key it will never relaunch and never let rest. The
+/// synchronous call to `perform` runs on the command path before the launch and
+/// is not covered: a panic there is the handler's, like any other.
 ///
 /// `AssertUnwindSafe` is the honest annotation here: the future owns everything
 /// it touches (it is `'static` and holds no borrow of the entity, §4.1), and what
@@ -89,11 +91,16 @@ mod tests {
 
     #[test]
     fn only_interrupt_members_are_resolved_without_launching() {
+        let interrupt = |key: u8| Pending {
+            key,
+            effect: (),
+            on_orphan: OnOrphan::Interrupt,
+        };
         let desired = vec![
             Pending::reexecute(1u8, ()),
-            Pending::interrupt(2u8, ()),
+            interrupt(2),
             Pending::reexecute(3u8, ()),
-            Pending::interrupt(4u8, ()),
+            interrupt(4),
         ];
         assert_eq!(interrupted(&desired), BTreeSet::from([2, 4]));
     }

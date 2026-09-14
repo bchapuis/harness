@@ -22,46 +22,32 @@ use std::time::Duration;
 
 use actor_core::Instant;
 
-/// The schedule a tick backs off on (spec §3.4).
+/// The first delay, doubled per consecutive unproductive settle (spec §3.4).
 ///
-/// The defaults are chosen so a transient failure retries promptly and a
-/// permanent one stops holding the activation within one idle window (entity
-/// §10 puts `idle_after` in minutes): four doublings from 500 ms reach the 8 s
-/// cap, at which point the key is at rest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BackoffPolicy {
-    /// The first delay, doubled per consecutive unproductive settle.
-    pub base: Duration,
-    /// The ceiling. A key delayed by the cap is **at rest** (§6): the engine
-    /// stops treating it as work that must keep this activation resident.
-    pub cap: Duration,
-}
+/// Chosen with [`CAP`] so a transient failure retries promptly and a permanent
+/// one stops holding the activation within one idle window (entity §10 puts
+/// `idle_after` in minutes): four doublings from 500 ms reach the 8 s cap, at
+/// which point the key is at rest.
+const BASE: Duration = Duration::from_millis(500);
 
-impl Default for BackoffPolicy {
-    fn default() -> Self {
-        BackoffPolicy {
-            base: Duration::from_millis(500),
-            cap: Duration::from_secs(8),
-        }
-    }
-}
+/// The ceiling. A key delayed by the cap is **at rest** (§6): the engine stops
+/// treating it as work that must keep this activation resident.
+const CAP: Duration = Duration::from_secs(8);
 
-impl BackoffPolicy {
-    /// The delay after `failures` consecutive unproductive settles, before
-    /// jitter: the core's capped exponential schedule (core §11.2), so the engine
-    /// and the supervisor back off the same way. Saturates at
-    /// [`cap`](BackoffPolicy::cap) rather than overflowing: the engine has no
-    /// attempt bound, so `failures` is unbounded by design.
-    fn delay(&self, failures: u32) -> Duration {
-        if failures == 0 {
-            return Duration::ZERO;
-        }
-        actor_core::Backoff::Exponential {
-            base: self.base,
-            max: self.cap,
-        }
-        .delay(failures)
+/// The delay after `failures` consecutive unproductive settles, before jitter:
+/// the core's capped exponential schedule (core §11.2), so the engine and the
+/// supervisor back off the same way. Saturates at [`CAP`] rather than
+/// overflowing: the engine has no attempt bound, so `failures` is unbounded by
+/// design.
+fn delay(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
     }
+    actor_core::Backoff::Exponential {
+        base: BASE,
+        max: CAP,
+    }
+    .delay(failures)
 }
 
 /// One key's backoff state.
@@ -74,29 +60,23 @@ struct Entry {
 }
 
 /// The per-key backoff table: ephemeral activation state, rebuilt from nothing
-/// on every activation (spec §3.4). The engine's own; a consumer sets the
-/// [`BackoffPolicy`] and sees nothing of the table.
+/// on every activation (spec §3.4). The engine's own; a consumer sees nothing
+/// of it.
 ///
 /// `K` is the consumer's [`Workflow::Key`](crate::Workflow::Key).
 pub(crate) struct Backoff<K: Ord> {
-    policy: BackoffPolicy,
     entries: BTreeMap<K, Entry>,
 }
 
 impl<K: Ord> Default for Backoff<K> {
     fn default() -> Self {
-        Backoff::new(BackoffPolicy::default())
+        Backoff {
+            entries: BTreeMap::new(),
+        }
     }
 }
 
 impl<K: Ord> Backoff<K> {
-    pub fn new(policy: BackoffPolicy) -> Self {
-        Backoff {
-            policy,
-            entries: BTreeMap::new(),
-        }
-    }
-
     /// Record one unproductive settle of `key` and return how long the engine
     /// must wait before relaunching it, or `None` if the key has reached the
     /// cap and is now **at rest**.
@@ -120,8 +100,8 @@ impl<K: Ord> Backoff<K> {
             .get(&key)
             .map(|e| e.failures.saturating_add(1))
             .unwrap_or(1);
-        let base = self.policy.delay(failures);
-        if base >= self.policy.cap {
+        let base = delay(failures);
+        if base >= CAP {
             self.entries.insert(
                 key,
                 Entry {
@@ -211,22 +191,14 @@ mod tests {
 
     #[test]
     fn the_delay_doubles_from_the_base_and_stops_at_the_cap() {
-        let p = BackoffPolicy {
-            base: Duration::from_millis(500),
-            cap: Duration::from_secs(8),
-        };
-        assert_eq!(p.delay(0), Duration::ZERO);
-        assert_eq!(p.delay(1), Duration::from_millis(500));
-        assert_eq!(p.delay(2), Duration::from_secs(1));
-        assert_eq!(p.delay(3), Duration::from_secs(2));
-        assert_eq!(p.delay(4), Duration::from_secs(4));
-        assert_eq!(p.delay(5), Duration::from_secs(8));
-        assert_eq!(
-            p.delay(60),
-            Duration::from_secs(8),
-            "saturates, never wraps"
-        );
-        assert_eq!(p.delay(u32::MAX), Duration::from_secs(8));
+        assert_eq!(delay(0), Duration::ZERO);
+        assert_eq!(delay(1), Duration::from_millis(500));
+        assert_eq!(delay(2), Duration::from_secs(1));
+        assert_eq!(delay(3), Duration::from_secs(2));
+        assert_eq!(delay(4), Duration::from_secs(4));
+        assert_eq!(delay(5), Duration::from_secs(8));
+        assert_eq!(delay(60), Duration::from_secs(8), "saturates, never wraps");
+        assert_eq!(delay(u32::MAX), Duration::from_secs(8));
     }
 
     #[test]

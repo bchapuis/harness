@@ -7,11 +7,13 @@
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
 //!
-//! The three actions that reach past the wire (a registry outage, a process
-//! replacement, a release change) need the workload's [`Consent`], so a run only
-//! does to a workload what that workload said it could survive.
+//! The two actions that reach past the wire (a registry outage, a process
+//! replacement) need the workload's [`Consent`], so a run only does to a
+//! workload what that workload said it could survive.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -137,11 +139,10 @@ pub enum ClusterModeSpec {
 }
 
 impl ClusterModeSpec {
-    /// Leader mode at the tree's simulated Raft timings
-    /// ([`ELECTION_TIMEOUT`](crate::config::ELECTION_TIMEOUT),
-    /// [`HEARTBEAT_INTERVAL`](crate::config::HEARTBEAT_INTERVAL)): what every
-    /// clustered swarm in the tree wants, so the two durations are named here
-    /// rather than written out per workload.
+    /// Leader mode at the tree's simulated Raft timings (the ones
+    /// [`raft_config`](crate::raft_config) installs): what every clustered swarm
+    /// in the tree wants, so the two durations are named here rather than
+    /// written out per workload.
     ///
     /// A workload whose scenarios need their own cadence builds
     /// [`Leader`](ClusterModeSpec::Leader) directly; the fields stay public, and
@@ -551,8 +552,8 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
 }
 
 /// Sweep a cluster workload across many seeds, stopping at the first failure,
-/// or, under [`collect_all_failures`](crate::collect_all_failures), running to
-/// the end and reporting every failing seed.
+/// or, under `SWARM_CONTINUE=1`, running to the end and reporting every
+/// failing seed.
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run first,
 /// ahead of `seeds` and whatever sizing produced them: a seed that failed once
@@ -590,16 +591,24 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
 
 /// How many `ask`s the run has issued but not yet resolved, read by
 /// [`drive_cluster`] to decide when the run has gone quiet. It counts the same
-/// bracket as the no-silent-loss invariant (spec §18.5 #1), so the driver and
-/// the invariant cannot disagree about what pending means.
+/// bracket as the no-silent-loss invariant (spec §18.5 #1), per calling node
+/// and forgetting a node when it restarts, so the driver and the invariant
+/// cannot disagree about what pending means: an ask issued by a process that
+/// has since died never reaches an outcome, and waiting for it would spend the
+/// whole settle cap on every restart.
 #[derive(Default)]
 struct AskTally {
-    outstanding: std::sync::atomic::AtomicI64,
+    outstanding: Mutex<BTreeMap<NodeId, i64>>,
 }
 
 impl AskTally {
     fn in_flight(&self) -> bool {
-        self.outstanding.load(Ordering::SeqCst) > 0
+        self.outstanding
+            .lock()
+            .expect("ask tally mutex poisoned")
+            .values()
+            .sum::<i64>()
+            > 0
     }
 }
 
@@ -612,15 +621,25 @@ struct TallyingSink {
 
 impl actor_core::EventSink for TallyingSink {
     fn emit(&self, event: actor_core::Event) {
-        match event {
-            actor_core::Event::AskIssued { .. } => {
-                self.tally.outstanding.fetch_add(1, Ordering::SeqCst);
+        let mut outstanding = self
+            .tally
+            .outstanding
+            .lock()
+            .expect("ask tally mutex poisoned");
+        match &event {
+            actor_core::Event::AskIssued { caller, .. } => {
+                *outstanding.entry(*caller).or_default() += 1;
             }
-            actor_core::Event::AskOutcome { .. } => {
-                self.tally.outstanding.fetch_sub(1, Ordering::SeqCst);
+            actor_core::Event::AskOutcome { caller, .. } => {
+                *outstanding.entry(*caller).or_default() -= 1;
             }
-            _ => {}
+            _ => {
+                if let Some(crate::NodeRestarted { node }) = event.as_app() {
+                    outstanding.remove(node);
+                }
+            }
         }
+        drop(outstanding);
         self.inner.emit(event);
     }
 }

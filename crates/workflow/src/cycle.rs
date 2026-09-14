@@ -24,7 +24,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backoff::Backoff;
-use crate::BackoffPolicy;
 use crate::EffectError;
 use crate::Pending;
 use crate::Perform;
@@ -93,10 +92,10 @@ struct Scope<K: Ord> {
 }
 
 impl<K: Ord> Scope<K> {
-    fn new(policy: BackoffPolicy) -> Self {
+    fn new() -> Self {
         Scope {
             claims: BTreeSet::new(),
-            backoff: Backoff::new(policy),
+            backoff: Backoff::default(),
             phase: Phase::Fresh,
             quiescent: false,
             staged: Vec::new(),
@@ -108,27 +107,21 @@ impl<K: Ord> Scope<K> {
 /// (spec §2.1).
 ///
 /// Internally synchronized, so a consumer holds it as a plain field and reaches
-/// it through `&self` from its handlers, `can_hibernate`, and `on_deactivate`:
-/// the shape entity's own per-activation state already takes.
+/// it through `&self` from its handlers and `can_hibernate`: the shape entity's
+/// own per-activation state already takes.
 pub struct Engine<D: Workflow> {
     scope: Mutex<Scope<D::Key>>,
-    policy: BackoffPolicy,
 }
 
 impl<D: Workflow> Default for Engine<D> {
     fn default() -> Self {
-        Engine::new(BackoffPolicy::default())
+        Engine {
+            scope: Mutex::new(Scope::new()),
+        }
     }
 }
 
 impl<D: Workflow> Engine<D> {
-    pub fn new(policy: BackoffPolicy) -> Self {
-        Engine {
-            scope: Mutex::new(Scope::new(policy)),
-            policy,
-        }
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, Scope<D::Key>> {
         // Poisoning would mean a panic inside the cycle itself. `perform` runs
         // outside this lock and its panics are caught at the task boundary
@@ -147,7 +140,7 @@ impl<D: Workflow> Engine<D> {
     /// all on an entity nobody is about to command: a resumed one with work still
     /// outstanding, which is the whole of resume (§4.4).
     pub fn on_activate(&self, ctx: &EntityCtx<D>) {
-        *self.lock() = Scope::new(self.policy);
+        *self.lock() = Scope::new();
         // No state to classify from here (entity §4.1: `on_activate` sees no
         // state); the first handler or the first tick does that (§4.4). A fresh
         // scope has no at-rest key to wake, so the plain re-entry suffices.

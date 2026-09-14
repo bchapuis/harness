@@ -550,3 +550,71 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
         "the machine must hibernate after the front door died",
     );
 }
+
+/// Policy commands before `Provision` are refused (machine §3): the
+/// `Provisioned` fold sets the key set whole, so a `KeyAdded` journaled
+/// earlier would be silently discarded, and an `EgressChanged` would outlive
+/// a typo in the machine's name.
+#[test]
+fn policy_commands_before_provision_answer_not_provisioned() {
+    let Fixture {
+        _scratch,
+        base,
+        image_len: _image_len,
+        sim,
+        recorder: _recorder,
+        system: _system,
+        machines,
+    } = fixture(44);
+
+    let entity = machines.entity("unprovisioned-box");
+    let base_for_task = base.clone();
+    sim.block_on(async move {
+        let refused = entity
+            .ask(machine_entity::AddKey {
+                fingerprint: "fp2".into(),
+                key: "ssh-ed25519 BBBB...".into(),
+            })
+            .await
+            .expect("ask");
+        assert_eq!(refused, Err(MachineError::NotProvisioned));
+        let refused = entity
+            .ask(machine_entity::RevokeKey {
+                fingerprint: "fp1".into(),
+            })
+            .await
+            .expect("ask");
+        assert_eq!(refused, Err(MachineError::NotProvisioned));
+        let refused = entity
+            .ask(machine_entity::SetEgress {
+                policy: machine_entity::EgressPolicy::None,
+            })
+            .await
+            .expect("ask");
+        assert_eq!(refused, Err(MachineError::NotProvisioned));
+
+        // Nothing was journaled: the provision's key set is the whole set,
+        // and the policy is the fresh default.
+        entity
+            .ask(provision(&base_for_task))
+            .await
+            .expect("ask")
+            .expect("provision");
+        let policy = entity.ask(DoorPolicy).await.expect("ask").expect("policy");
+        assert_eq!(
+            policy.authorized_keys.keys().collect::<Vec<_>>(),
+            vec!["fp1"],
+            "only the provision's keys are folded",
+        );
+        let status = entity.ask(Status).await.expect("status");
+        assert_eq!(status.egress, machine_entity::EgressPolicy::Open);
+        entity
+            .ask(machine_entity::AddKey {
+                fingerprint: "fp2".into(),
+                key: "ssh-ed25519 BBBB...".into(),
+            })
+            .await
+            .expect("ask")
+            .expect("a provisioned machine takes keys");
+    });
+}

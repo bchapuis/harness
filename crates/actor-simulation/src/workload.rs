@@ -57,15 +57,15 @@ pub trait Workload: Send + 'static {
 /// faults (drop/duplicate/latency) live in
 /// [`FaultPolicy`](crate::FaultPolicy), applied to the in-memory network.
 #[derive(Clone, Copy, Debug)]
-pub struct FaultConfig {
+pub(crate) struct FaultConfig {
     /// Per-actor bounded mailbox capacity for this run.
-    pub mailbox_capacity: usize,
+    pub(crate) mailbox_capacity: usize,
 }
 
 impl FaultConfig {
     /// Sample a configuration from the run's entropy. Drawing here keeps the
     /// choice deterministic per seed.
-    pub fn sample(entropy: &SimEntropy) -> FaultConfig {
+    pub(crate) fn sample(entropy: &SimEntropy) -> FaultConfig {
         use actor_core::Entropy;
         FaultConfig {
             mailbox_capacity: 1 + (entropy.next_u64() % 64) as usize,
@@ -111,7 +111,7 @@ impl std::error::Error for RunFailure {}
 /// Every seed a sweep failed at, and how many it ran (spec §18.6).
 ///
 /// CI stops at the first failure, so this carries one [`RunFailure`] and prints
-/// exactly as one; under [`collect_all_failures`](crate::collect_all_failures)
+/// exactly as one; under `SWARM_CONTINUE=1`
 /// it carries every failing seed and prints them ready to paste into
 /// `corpus.txt`.
 #[derive(Clone)]
@@ -196,7 +196,8 @@ pub(crate) fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// `collect` is a parameter rather than an environment read, so the loop is a
 /// pure function of its inputs; the runners read
-/// [`collect_all_failures`](crate::collect_all_failures) once, at the edge.
+/// [`collect_all_failures`](crate::sweep::collect_all_failures) once, at the
+/// edge.
 pub(crate) fn sweep_collecting(
     workload: &'static str,
     seeds: impl IntoIterator<Item = u64>,
@@ -260,9 +261,8 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
 }
 
 /// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
-/// the first failing seed so it can be replayed, or, under
-/// [`collect_all_failures`](crate::collect_all_failures), running to the end and
-/// reporting every one.
+/// the first failing seed so it can be replayed, or, under `SWARM_CONTINUE=1`,
+/// running to the end and reporting every one.
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run first,
 /// ahead of `seeds` and whatever sizing produced them: a seed that failed once

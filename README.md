@@ -36,8 +36,9 @@ journal's head from a quorum of its replicas, folds the session back out of it,
 and the run finishes as if nothing happened. No coordinator, no session server,
 no state lost.
 
-`GET /v1/assistant/demo/records` shows what exists: the journal, one record per
-line. Sessions are durable and named. Quit, reboot everything, and prompt
+`GET /v1/assistant/demo/records` shows what exists: the journal as a JSON page
+of `(seq, record)` pairs plus its compaction `base`. Sessions are durable and
+named. Quit, reboot everything, and prompt
 `demo` again to continue the same transcript.
 
 Sessions are also multi-tenant. A bearer token names the tenant, and every
@@ -53,8 +54,9 @@ authenticated form with opaque per-tenant tokens.
   transport. Seeded deterministic simulation tests all of it, FoundationDB-style:
   one seed reproduces an entire multi-node run, partitions and all.
 - An **agent runtime** on top (`crates/agent`): each session is an actor
-  whose only state is a fenced, append-only journal. Model, journal, and sandbox
-  are injected seams (`crates/agent-anthropic` is the Anthropic one).
+  whose only state is a fenced, append-only journal. Model and sandbox are the
+  two injected seams (`crates/agent-anthropic` is the Anthropic model); the
+  journal is the entity's.
 - A **standalone deployment** (`crates/agent-standalone`): the binary the demo
   runs. A file-backed, replicated journal fenced by a per-shard term written
   beside it (`fences/<shard>`), tokio/rustls HTTP to the Messages API, and

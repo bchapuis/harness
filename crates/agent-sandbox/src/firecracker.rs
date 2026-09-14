@@ -72,9 +72,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use cap_std::fs::Dir;
-use agent::OnOrphan;
-use agent::Tier;
-use agent::ToolDecl;
 use agent::ToolError;
 use machine_host::microvm::MicroVm;
 use machine_host::vsock;
@@ -103,30 +100,15 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The microVM `shell` declaration, ready for [`agent::Kind::tool`]. A
-/// distinct declaration from the docker fallback's [`crate::shell_tool`]:
-/// the sync-around-each-command semantics are model-visible, and the digest
-/// difference keeps a mixed-realization cluster from agreeing silently.
-pub fn fc_shell_tool() -> ToolDecl {
-    ToolDecl {
-        name: "shell".to_string(),
-        description: "Run a POSIX shell command (`/bin/sh -c`) inside the session's \
-                      microVM. The session workspace is synchronized to /workspace (the \
-                      working directory) before the command and back after it; there is \
-                      no network. Returns exit_code, stdout, and stderr."
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to run."}
-            },
-            "required": ["command"]
-        }),
-        tier: Tier::Native,
-        on_orphan: OnOrphan::Interrupt,
-        timeout: None,
-    }
-}
+/// What the model is told `shell` does under the microVM; the rest of the
+/// declaration is the provider's `shell_decl`. Distinct from the docker
+/// fallback's wording: the sync-around-each-command semantics are
+/// model-visible, and the digest difference keeps a mixed-realization
+/// cluster from agreeing silently.
+pub(crate) const SHELL_DESCRIPTION: &str = "Run a POSIX shell command (`/bin/sh -c`) \
+     inside the session's microVM. The session workspace is synchronized to /workspace \
+     (the working directory) before the command and back after it; there is no network. \
+     Returns exit_code, stdout, and stderr.";
 
 /// Deployment-level Firecracker configuration, handed to
 /// [`crate::TieredSandboxes::with_firecracker`]: the node's VMM assets. Which

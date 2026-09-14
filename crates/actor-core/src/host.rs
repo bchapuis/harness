@@ -40,6 +40,7 @@ use crate::event::SupervisionDecision;
 use crate::id::ActorId;
 use crate::id::NodeId;
 use crate::id::Path;
+use crate::mailbox::Envelope;
 use crate::mailbox::Inbox;
 use crate::mailbox::Mailbox;
 use crate::refs::ActorRef;
@@ -60,6 +61,23 @@ use crate::system::ActorSystem;
 /// yields indefinitely (spec §11.2).
 pub type ActorFactory<A> = Box<dyn FnMut() -> Option<A> + Send>;
 
+/// The factory behind a by-value spawn: yields `actor` once, so a `Restart`
+/// directive finds it exhausted and degrades to `Stop` (spec §11.2).
+pub(crate) fn once<A: Actor>(actor: A) -> ActorFactory<A> {
+    let mut slot = Some(actor);
+    Box::new(move || slot.take())
+}
+
+/// The factory behind a restartable spawn: re-creates the actor from `factory`
+/// on every call (spec §11.2).
+pub(crate) fn always<A, F>(mut factory: F) -> ActorFactory<A>
+where
+    A: Actor,
+    F: FnMut() -> A + Send + 'static,
+{
+    Box::new(move || Some(factory()))
+}
+
 /// Delivers a [`Terminated`] to one watcher by enqueuing it on the watcher's
 /// mailbox. Built in [`Ctx::watch`](crate::Ctx::watch), where the watcher type
 /// is still known.
@@ -73,7 +91,9 @@ pub type WatchDelivery = Arc<dyn Fn(Terminated) -> BoxFuture<'static, ()> + Send
 /// inbound `(manifest, payload)` pairs into typed handler calls.
 struct ActorEntry<A: Actor> {
     mailbox: Mailbox<A>,
-    registry: HandlerRegistry<A>,
+    /// Shared with the per-type cache: every actor of type `A` dispatches
+    /// through the one registry `Actor::register` built.
+    registry: Arc<HandlerRegistry<A>>,
 }
 
 /// Type-erased view of a live actor, so one map holds every actor type while
@@ -263,7 +283,7 @@ impl LocalHost {
 
     /// The dispatch registry for actor type `A`, built on first use and cached
     /// by type, so `Actor::register` runs at most once per type (spec §4.4).
-    fn registry_for<A: Actor>(&self) -> HandlerRegistry<A> {
+    fn registry_for<A: Actor>(&self) -> Arc<HandlerRegistry<A>> {
         let key = TypeId::of::<A>();
         let mut cache = self
             .state
@@ -271,14 +291,15 @@ impl LocalHost {
             .lock()
             .expect("registry cache mutex poisoned");
         if let Some(cached) = cache.get(&key) {
-            return cached
-                .downcast_ref::<HandlerRegistry<A>>()
-                .expect("registry cache type mismatch")
-                .clone();
+            return Arc::clone(cached)
+                .downcast::<HandlerRegistry<A>>()
+                .expect("registry cache type mismatch");
         }
         let mut registry = HandlerRegistry::<A>::default();
         A::register(&mut registry);
-        cache.insert(key, Arc::new(registry.clone()));
+        let registry = Arc::new(registry);
+        let erased: Arc<dyn Any + Send + Sync> = registry.clone();
+        cache.insert(key, erased);
         registry
     }
 
@@ -632,7 +653,14 @@ impl<A: Actor, C: Clock> Executor<A, C> {
                             self.host.state.events.emit(Event::ActorReady { id });
                             ever_started = true;
                         }
-                        Step::Run(actor)
+                        // `Ctx::stop` from `started` stops before the first
+                        // message (spec §3.4): there is no current message to
+                        // finish, so the loop must not admit one.
+                        if self.ctx.is_stopping() {
+                            Step::End(End::Stop(actor, StopReason::Stopped))
+                        } else {
+                            Step::Run(actor)
+                        }
                     }
                     Err(_err) => self.handle_fault(Fault::Started, actor).await,
                 },
@@ -770,12 +798,16 @@ impl<A: Actor, C: Clock> Executor<A, C> {
             match futures::future::select(next, escalated.as_mut()).await {
                 futures::future::Either::Left((Err(_), _)) => return Outcome::Stopped,
                 futures::future::Either::Left((Ok(envelope), _)) => {
-                    let manifest = envelope.manifest;
+                    let Envelope {
+                        manifest,
+                        run,
+                        reply,
+                    } = envelope;
                     host.state.events.emit(Event::DispatchStart {
                         actor: ctx.id().clone(),
                         manifest,
                     });
-                    let running = (envelope.run)(actor, ctx);
+                    let running = run(actor, ctx, reply);
                     let panicked = AssertUnwindSafe(running).catch_unwind().await.is_err();
                     host.state.events.emit(Event::DispatchEnd {
                         actor: ctx.id().clone(),
@@ -819,7 +851,13 @@ async fn supervise<C: Clock>(
     match supervision.decide(fault) {
         SupervisionDirective::Stop => SupervisionDecision::Stop,
         SupervisionDirective::Escalate => SupervisionDecision::Escalate,
-        SupervisionDirective::Resume => SupervisionDecision::Resume,
+        // `Resume` drops the failed message and carries on; a failed `started`
+        // has no message to drop, and carrying on would run an actor that never
+        // became ready (spec §3.1.1, §4.2 step 3), so it degrades to `Stop`.
+        SupervisionDirective::Resume => match fault {
+            Fault::Started => SupervisionDecision::Stop,
+            Fault::Message | Fault::Escalation => SupervisionDecision::Resume,
+        },
         SupervisionDirective::Restart {
             max,
             within,

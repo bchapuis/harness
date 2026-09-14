@@ -1,6 +1,6 @@
 //! The guest half of the workspace sync (machine spec §4): pack and unpack
 //! `/workspace` as a tar stream, mirroring the host-side codec
-//! (`crates/microvm/src/ws_sync.rs`) by convention, as `guest/fc-agent`
+//! (`crates/machine-host/src/ws_sync.rs`) by convention, as `guest/fc-agent`
 //! mirrors the sandbox's. Deterministic walk (sorted entries, zero mtimes);
 //! symlinks archived as symlinks (following one would copy its target *into*
 //! the stream); fifos, sockets, and devices skipped *before* any open, so one

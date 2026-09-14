@@ -73,6 +73,7 @@ dependencies = [
  "actor-core",
  "actor-serialization",
  "async-channel",
+ "erased-serde",
  "futures",
  "rand 0.8.6",
  "rand_chacha",
@@ -156,7 +157,6 @@ dependencies = [
  "actor-core",
  "actor-simulation",
  "agent",
- "futures",
  "serde",
  "serde_json",
 ]
@@ -196,7 +196,6 @@ dependencies = [
  "actor-core",
  "actor-simulation",
  "agent",
- "futures",
  "serde",
  "serde_json",
 ]
@@ -213,7 +212,6 @@ dependencies = [
  "futures",
  "machine-host",
  "rustix 1.1.4",
- "serde",
  "serde_json",
  "spec",
  "tar",
@@ -235,9 +233,6 @@ dependencies = [
  "agent-http",
  "agent-sandbox",
  "entity",
- "serde",
- "serde_json",
- "tempfile",
  "tenancy",
  "tokio",
 ]
@@ -2009,14 +2004,11 @@ dependencies = [
 name = "machine-frontdoor"
 version = "0.1.0"
 dependencies = [
- "actor-core",
  "bytes",
  "entity",
- "machine-entity",
  "machine-host",
  "machine-proto",
  "russh",
- "serde_json",
  "tokio",
 ]
 

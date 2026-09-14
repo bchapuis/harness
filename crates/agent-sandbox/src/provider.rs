@@ -21,9 +21,6 @@ use agent::ToolError;
 use agent::session::content_digest;
 use serde_json::Value;
 
-#[cfg(feature = "native")]
-use crate::ids::sanitize;
-
 /// Observable provider activity, for the S5 accounting tests: every
 /// environment opened is eventually released, and tier environments are
 /// built only on first use.
@@ -234,18 +231,43 @@ impl TieredSandboxes {
     fn shell(&self) -> Option<ToolDecl> {
         #[cfg(feature = "firecracker")]
         if self.firecracker.is_some() {
-            return Some(crate::firecracker::fc_shell_tool());
+            return Some(shell_decl(crate::firecracker::SHELL_DESCRIPTION));
         }
         #[cfg(feature = "native")]
         {
             self.container_cli
                 .as_ref()
-                .map(|_| crate::native::shell_tool())
+                .map(|_| shell_decl(crate::native::SHELL_DESCRIPTION))
         }
         #[cfg(not(feature = "native"))]
         {
             None
         }
+    }
+}
+
+/// The `shell` declaration, ready for [`agent::Kind::tool`], in the words of
+/// one native realization: the two realizations share everything but the
+/// description, and the description differs on purpose, so that the digest
+/// keeps a mixed-realization cluster from agreeing silently. Arbitrary
+/// commands are not idempotent, so an orphaned call interrupts and the model
+/// decides whether to retry the side effect (`OnOrphan::Interrupt`, agent
+/// spec §5.5).
+#[cfg(feature = "native")]
+fn shell_decl(description: &str) -> ToolDecl {
+    ToolDecl {
+        name: "shell".to_string(),
+        description: description.to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to run."}
+            },
+            "required": ["command"]
+        }),
+        tier: Tier::Native,
+        on_orphan: agent::OnOrphan::Interrupt,
+        timeout: None,
     }
 }
 
@@ -275,8 +297,6 @@ impl SandboxProvider for TieredSandboxes {
         profile: &SandboxProfile,
         workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
-        #[cfg(feature = "native")]
-        let name = sanitize(session.as_str());
         let workspace = workspace.to_path_buf();
         let seed = content_digest(&format!("{:016x}|{}", self.seed, session.as_str()));
         let limits = profile.compute;
@@ -301,6 +321,7 @@ impl SandboxProvider for TieredSandboxes {
         let spec = NativeSpec {
             cli: self.container_cli.clone(),
             image: profile.image.clone(),
+            session: session.as_str().to_string(),
             #[cfg(feature = "firecracker")]
             firecracker: self.firecracker.clone(),
         };
@@ -309,9 +330,12 @@ impl SandboxProvider for TieredSandboxes {
             // The caller owns the directory and usually materialized it
             // already; open creates-if-missing rather than demanding it. The
             // loss detector below is unaffected: it watches for the directory
-            // *vanishing after* this open. Opening it as a capability handle
-            // is this crate's only use of ambient authority: every tier
-            // after this reaches the filesystem through the handle (S1).
+            // *vanishing after* this open. Workspace *contents* are reached
+            // only through the capability handle opened here (S1); the
+            // crate's ambient calls are this open, the loss stat sandbox
+            // spec §4 requires, the bind-mount and tar-restore host path,
+            // and the microVM's own assets, none of which reads the
+            // workspace by path.
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
             // Canonicalized so docker's `-v` (and the microVM's tar source)
@@ -328,7 +352,7 @@ impl SandboxProvider for TieredSandboxes {
             // (container or microVM) is what stays lazy (sandbox spec §2.3
             // item 2).
             #[cfg(feature = "native")]
-            let native = NativeEnv::build(spec, &dir, &host_path, &name, stats.clone());
+            let native = NativeEnv::build(spec, &dir, &host_path, stats.clone());
             // Opening grants `Workspace` and nothing else (agent spec §5.6
             // item 1): no other tier environment exists until a call carries
             // its tier.
@@ -383,6 +407,8 @@ struct TieredSandbox {
 struct NativeSpec {
     cli: Option<String>,
     image: String,
+    /// The raw session id, the readable half of the container's name.
+    session: String,
     #[cfg(feature = "firecracker")]
     firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
 }
@@ -393,12 +419,12 @@ struct NativeSpec {
 #[derive(Clone)]
 enum NativeEnv {
     /// The kind's profile names no image, or the provider names no native
-    /// realization to run it under: every `Native` call fails identically,
-    /// with or without a container runtime or a hypervisor installed, and no
-    /// environment is ever provisioned. The provider declares no `shell` in
-    /// that second case (`TieredSandboxes::shell`), so the model is never
-    /// offered a tool that can only fail.
-    Unconfigured,
+    /// realization to run it under: every `Native` call fails with the
+    /// carried reason, with or without a container runtime or a hypervisor
+    /// installed, and no environment is ever provisioned. The provider
+    /// declares no `shell` in that second case (`TieredSandboxes::shell`),
+    /// so the model is never offered a tool that can only fail.
+    Unconfigured(&'static str),
     Docker(Arc<crate::native::NativeTier>),
     #[cfg(feature = "firecracker")]
     MicroVm(Arc<crate::firecracker::FirecrackerTier>),
@@ -411,11 +437,13 @@ impl NativeEnv {
         spec: NativeSpec,
         dir: &Arc<Dir>,
         host_path: &std::path::Path,
-        name: &str,
         stats: TierStats,
     ) -> NativeEnv {
         if spec.image.is_empty() {
-            return NativeEnv::Unconfigured;
+            return NativeEnv::Unconfigured(
+                "native: the kind's SandboxProfile.image is empty; the Native tier needs an \
+                 image (a container image, or the microVM's base rootfs) and pulls no default",
+            );
         }
         #[cfg(feature = "firecracker")]
         if let Some(config) = spec.firecracker {
@@ -434,10 +462,13 @@ impl NativeEnv {
                 cli,
                 spec.image,
                 host_path.to_path_buf(),
-                name,
+                &spec.session,
                 stats,
             ))),
-            None => NativeEnv::Unconfigured,
+            None => NativeEnv::Unconfigured(
+                "native: this provider names neither a container CLI nor a Firecracker \
+                 profile, so it has no native realization to run the image under",
+            ),
         }
     }
     /// Execute one Native call (`shell` only): the declaration's checks once,
@@ -451,11 +482,7 @@ impl NativeEnv {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidArguments("`command` must be a string".to_string()))?;
         match self {
-            NativeEnv::Unconfigured => Err(ToolError::Sandbox(
-                "native: the kind's SandboxProfile.image is empty; the Native tier needs an \
-                 image (a container image, or the microVM's base rootfs) and pulls no default"
-                    .to_string(),
-            )),
+            NativeEnv::Unconfigured(reason) => Err(ToolError::Sandbox(reason.to_string())),
             NativeEnv::Docker(tier) => tier.run(command).await,
             #[cfg(feature = "firecracker")]
             NativeEnv::MicroVm(tier) => tier.run(command).await,
@@ -464,7 +491,7 @@ impl NativeEnv {
 
     async fn release(&self) {
         match self {
-            NativeEnv::Unconfigured => {}
+            NativeEnv::Unconfigured(_) => {}
             NativeEnv::Docker(tier) => tier.release().await,
             #[cfg(feature = "firecracker")]
             NativeEnv::MicroVm(tier) => tier.release().await,

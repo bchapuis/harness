@@ -32,10 +32,12 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
         property: "Workspace confinement: at every tier, no path outside the session's workspace is representable to a tool or a guest; confinement is by capability handle, never by sanitization of a representable escape",
         verify: &[
             Verify::CompileTime(
-                "the cap-std Dir handle is the only filesystem capability the provider holds; \
-                 the crate's one ambient-authority call opens the root",
+                "the cap-std Dir handle is the only filesystem capability the provider holds, \
+                 and workspace contents are reached only through it; the crate's ambient \
+                 calls are the open, the loss stat §4 requires, the mount and tar host \
+                 path, and the microVM's assets",
             ),
-            Verify::SimTest("workspace.rs, native.rs, firecracker.rs"),
+            Verify::SimTest("workspace.rs, quickjs.rs, native.rs, firecracker.rs"),
         ],
     },
     CatalogueEntry {

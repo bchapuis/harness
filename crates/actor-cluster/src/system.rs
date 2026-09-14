@@ -287,7 +287,7 @@ where
             system
                 .inner
                 .spawner
-                .launch(Box::pin(detector(system.clone(), swim)));
+                .launch(Box::pin(detector(system.clone())));
             // Anti-entropy rides alongside the detector on the same cadence: it
             // only makes sense for a live cluster, and gating it on SWIM keeps
             // SWIM-off systems quiescent (spec §13, §18.1).
@@ -589,13 +589,6 @@ where
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Launch a background task on the system's spawner. The singleton manager
-    /// (utilities spec §4) and layered runtimes launch through this, so a
-    /// simulated run stays on the seeded scheduler (spec §18.1).
-    pub fn launch_task(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
-        self.inner.spawner.launch(Box::pin(task));
-    }
-
     /// The resolved SWIM probe interval: the cadence background utility loops
     /// reuse so they add no second tunable (utilities spec §4).
     pub(crate) fn probe_interval(&self) -> Duration {
@@ -661,9 +654,21 @@ where
             return;
         }
         for observation in committed {
-            // The control group never compacts, so it only ever applies commands.
-            let Committed::Apply { index, command, .. } = observation else {
-                continue;
+            let (index, command) = match observation {
+                Committed::Apply { index, command } => (index, command),
+                // The control group never compacts, so a snapshot is an entry this
+                // build cannot apply: it subsumes transitions it never saw. Stop
+                // rather than skip it, by the same rule as an unreadable entry
+                // below (spec §9.4.3 item 1).
+                Committed::Snapshot { index, .. } => {
+                    self.inner.membership.stop_applying(format!(
+                        "control group: a snapshot through index {index} was \
+                         committed, but this build cannot install one, so this \
+                         node stopped applying membership transitions rather than \
+                         skip the transitions it subsumes",
+                    ));
+                    return;
+                }
             };
             // **Fail closed on a committed entry** (compatibility **V2**). The
             // control group's log is agreed, so an entry this node skips is one its
@@ -795,12 +800,7 @@ where
     }
 
     fn is_serving(&self, node: NodeId) -> bool {
-        // Route service discovery away from a node taken out of rotation: one the
-        // operator drained for maintenance, or one that is down (spec §9.4, §13).
-        // A drained node keeps its registrations and still answers
-        // direct calls: it is just not handed out to new callers.
-        !self.inner.membership.is_down(node)
-            && self.inner.membership.status(node) != Some(MemberStatus::Draining)
+        self.inner.membership.is_serving(node)
     }
 
     fn codec(&self) -> Arc<dyn Codec> {
@@ -1382,7 +1382,11 @@ async fn handle_terminated<C, E, S, T>(
         .await;
 }
 
-/// Apply a single remote receptionist registration.
+/// Apply a single remote receptionist registration, unless the actor is hosted
+/// on a node this node already considers `down`: pruning follows the actor's
+/// host, not the node whose `register` call recorded it (spec §13 requirement
+/// 3), so a broadcast that races the down decision never resurrects a pruned
+/// registration (spec §8.1 step 5).
 fn handle_receptionist<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     key: String,
@@ -1394,14 +1398,16 @@ fn handle_receptionist<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    system
-        .receptionist()
-        .apply_remote_registration(&key, origin, actor);
+    if !system.inner.membership.is_down(actor.node()) {
+        system
+            .receptionist()
+            .apply_remote_registration(&key, origin, actor);
+    }
 }
 
-/// Merge a peer's full receptionist registry, skipping entries from a node we
-/// already consider `down` so anti-entropy never resurrects a pruned registration
-/// (spec §8.1 step 5, §13).
+/// Merge a peer's full receptionist registry, skipping entries whose actor is
+/// hosted on a node we already consider `down` so anti-entropy never resurrects a
+/// pruned registration (spec §8.1 step 5, §13 requirement 3).
 fn handle_receptionist_sync<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     entries: Vec<ReceptionistEntry>,
@@ -1413,7 +1419,7 @@ fn handle_receptionist_sync<C, E, S, T>(
 {
     let receptionist = system.receptionist();
     for entry in entries {
-        if !system.inner.membership.is_down(entry.origin) {
+        if !system.inner.membership.is_down(entry.actor.node()) {
             receptionist.apply_remote_registration(&entry.key, entry.origin, entry.actor);
         }
     }
@@ -1508,7 +1514,7 @@ where
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed> {
         let (tx, rx) = async_channel::unbounded();
         // A subscriber over a reloaded, compacted log is seeded with the snapshot
-        // it reloaded (spec §9, `RaftGroup::snapshot_observation`). Sent before
+        // it reloaded (entity §9, `RaftGroup::snapshot_observation`). Sent before
         // the sender is registered, so it strictly precedes any commit a later
         // tick fans out to this sink.
         if let Some(snapshot) = self.group(group).and_then(|g| g.snapshot_observation()) {
@@ -1774,7 +1780,7 @@ async fn gossip_merge<C, E, S, T>(
 /// The SWIM failure detector (spec §10): probe a random member each interval,
 /// suspect it on a missed `Ack`, and apply suspicion/downing timeouts,
 /// completing the in-flight calls of any node it downs (spec §8.1).
-async fn detector<C, E, S, T>(system: ClusterSystem<C, E, S, T>, config: SwimConfig)
+async fn detector<C, E, S, T>(system: ClusterSystem<C, E, S, T>)
 where
     C: Clock,
     E: Entropy,
@@ -1782,7 +1788,7 @@ where
     T: Transport,
 {
     loop {
-        system.inner.clock.sleep(config.probe_interval).await;
+        system.inner.clock.sleep(system.inner.swim.probe_interval).await;
         if system.is_shutting_down() {
             return;
         }
@@ -1820,7 +1826,7 @@ where
         // On a missed direct probe, enlist `k` helpers to probe indirectly before
         // suspecting: a single bad link should not cause a false suspicion
         // (spec §10 #2). Suspect only if both the direct and indirect probes fail.
-        if !direct_ok && !indirect_probe(&system, target, &config).await {
+        if !direct_ok && !indirect_probe(&system, target).await {
             system
                 .inner
                 .membership
@@ -1833,22 +1839,18 @@ where
 /// `target`, returning `true` if any relays back an `IndirectAck`. The relayed
 /// ack also clears our suspicion via the receive loop. `false` if there are no
 /// helpers or none answer within `rtt`.
-async fn indirect_probe<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    target: NodeId,
-    config: &SwimConfig,
-) -> bool
+async fn indirect_probe<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, target: NodeId) -> bool
 where
     C: Clock,
     E: Entropy,
     S: Spawner,
     T: Transport,
 {
-    let helpers =
-        system
-            .inner
-            .membership
-            .pick_helpers(config.indirect_count, target, &system.inner.entropy);
+    let helpers = system.inner.membership.pick_helpers(
+        system.inner.swim.indirect_count,
+        target,
+        &system.inner.entropy,
+    );
     if helpers.is_empty() {
         return false;
     }
@@ -1997,8 +1999,8 @@ async fn registry_sync<C, E, S, T>(
 
 /// Receptionist anti-entropy (spec §13): every `interval`, push this node's full
 /// registry to a random member, converging nodes that joined late or missed a
-/// broadcast. Down origins are skipped so a pruned registration is never
-/// resurrected (spec §8.1 step 5).
+/// broadcast. Actors hosted on a down node are skipped so a pruned registration
+/// is never resurrected (spec §8.1 step 5, §13 requirement 3).
 async fn receptionist_gossip<C, E, S, T>(system: ClusterSystem<C, E, S, T>, interval: Duration)
 where
     C: Clock,
@@ -2017,7 +2019,7 @@ where
             .receptionist
             .digest()
             .into_iter()
-            .filter(|(_, origin, _)| !system.inner.membership.is_down(*origin))
+            .filter(|(_, _, actor)| !system.inner.membership.is_down(actor.node()))
             .map(|(key, origin, actor)| ReceptionistEntry { key, origin, actor })
             .collect();
         if entries.is_empty() {

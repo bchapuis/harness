@@ -91,14 +91,12 @@ pub use replay::SweepDivergence;
 pub use replay::check_cluster_reproducible;
 pub use replay::check_reproducible;
 pub use replay::record_cluster_seed;
-pub use replay::record_seed;
 pub use replay::replay_cluster_swarm;
 pub use replay::replay_swarm;
 
 // --- Which seeds a run spends: sizing by cost class, plus the pinned corpus
 // that ignores sizing entirely (spec §18.6).
 pub use corpus::regression_seeds;
-pub use sweep::collect_all_failures;
 pub use sweep::coverage_seeds;
 pub use sweep::scenario_sweep;
 pub use sweep::slow_seeds;
@@ -108,7 +106,6 @@ pub use sweep::sweep_seeds;
 pub use coverage::FaultStats;
 pub use faults::FaultPolicy;
 pub use faults::RegistryFaultPolicy;
-pub use workload::FaultConfig;
 
 // --- Invariants and the checker that feeds them (spec §18.5) ------------------
 pub use check::Checker;
@@ -136,7 +133,6 @@ pub use linearizability::CounterOp;
 pub use linearizability::CounterRet;
 pub use linearizability::History;
 pub use linearizability::Linearization;
-pub use linearizability::MAX_HISTORY;
 pub use linearizability::Model;
 pub use linearizability::OpId;
 pub use linearizability::Register;

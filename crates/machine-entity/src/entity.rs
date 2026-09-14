@@ -247,9 +247,6 @@ struct Activation {
     /// When the last capture committed (activation clock), so the alarm (the
     /// lease heartbeat) captures only once per checkpoint interval.
     last_capture: Option<Instant>,
-    /// Front-door members already death-watched by this activation, so the
-    /// re-watch sweep (below) registers each once.
-    watched: std::collections::BTreeSet<ActorId>,
 }
 
 /// The machine entity (machine §1). The provider is the node's runtime binding,
@@ -325,23 +322,16 @@ impl<S: EntitySystem> Machine<S> {
         }
     }
 
-    /// Death-watch the front-door member of every folded attachment not yet
-    /// watched by this activation (machine §5.1). `on_activate` cannot see
-    /// state, so a rehydrated machine re-watches on its first state-bearing
-    /// entry point: the pending alarm's fire, or any command; watch-after-
-    /// death then folds `Detached { FrontDoorLost }` for holders that died
-    /// while the entity was down.
+    /// Death-watch the front-door member of every folded attachment (machine
+    /// §5.1). `on_activate` cannot see state, so a rehydrated machine
+    /// re-watches on its first state-bearing entry point: the pending alarm's
+    /// fire, or any command; watch-after-death then folds
+    /// `Detached { FrontDoorLost }` for holders that died while the entity was
+    /// down. Re-watching is idempotent: the host dedups watches by watcher id,
+    /// so a door yields at most one `Terminated` per activation.
     fn watch_attachments(&self, state: &MachineState, ctx: &EntityCtx<Self>) {
         for attachment in state.attachments.values() {
-            self.watch_door(&attachment.front_door, ctx);
-        }
-    }
-
-    /// Death-watch one front-door member idempotently (the `watched` set makes
-    /// a re-watch a no-op).
-    fn watch_door(&self, door: &ActorId, ctx: &EntityCtx<Self>) {
-        if self.lock().watched.insert(door.clone()) {
-            ctx.watch(door.clone());
+            ctx.watch(attachment.front_door.clone());
         }
     }
 
@@ -449,6 +439,11 @@ impl<S: EntitySystem> Machine<S> {
         match out {
             Ok(stats) => {
                 events.extend(self.capture_event(stats, now));
+                if runtime.is_none() {
+                    // No guest is writing, so the committed image is the
+                    // whole truth: nothing is left for a later capture.
+                    self.lock().dirty = false;
+                }
                 (events, true)
             }
             Err(_) => (events, false),
@@ -552,7 +547,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
     }
 
     async fn on_activate(&mut self, _ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
-        // The runtime, dirty flag, and watch set are activation-local (E3): a fresh
+        // The runtime and dirty flag are activation-local (E3): a fresh
         // activation has a freshly rehydrated (clean) image and no guest.
         *self.lock() = Activation::default();
         Ok(())
@@ -599,11 +594,21 @@ impl<S: EntitySystem> Entity for Machine<S> {
         // fire re-arms, which is the session lease's fenced append (M5), even
         // when no capture is due.
         ctx.alarm().set_after(state.alarm_cadence());
-        let checkpoint_due = match self.lock().last_capture {
-            Some(last) => now.duration_since(last) >= Duration::from_nanos(state.checkpoint_nanos),
-            None => true,
+        let (checkpoint_due, idle) = {
+            let act = self.lock();
+            let due = match act.last_capture {
+                Some(last) => {
+                    now.duration_since(last) >= Duration::from_nanos(state.checkpoint_nanos)
+                }
+                None => true,
+            };
+            (due, act.runtime.is_none() && !act.dirty)
         };
-        if !checkpoint_due {
+        // An attached machine with no guest (attachments folded on a node that
+        // never booted one, as after a failover while the door lives on) has
+        // nothing to capture: a scan would hash the whole image to find no
+        // dirty block. The re-arm above is still the lease's append.
+        if !checkpoint_due || idle {
             return vec![];
         }
         // Pause-and-resume around the capture; the ws delta is as-of-pull,
@@ -750,7 +755,7 @@ impl<S: EntitySystem> EntityHandler<Attach> for Machine<S> {
             return (vec![], Err(e));
         }
         self.watch_attachments(state, ctx);
-        self.watch_door(&msg.front_door, ctx);
+        ctx.watch(msg.front_door.clone());
         // Start the capture cadence, which is also the session lease (M5).
         ctx.alarm().set_after(state.alarm_cadence());
         let id = state.next_attachment;
@@ -806,7 +811,9 @@ impl<S: EntitySystem> EntityHandler<Detach> for Machine<S> {
 }
 
 /// Authorize a key (machine §3): an ordinary journaled event; the next attach
-/// sees the folded set (M4).
+/// sees the folded set (M4). Refused before `Provision` (machine §3): the
+/// `Provisioned` fold sets the key set whole, so an earlier `KeyAdded` would
+/// be journaled and then silently discarded.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AddKey {
     pub fingerprint: String,
@@ -814,75 +821,89 @@ pub struct AddKey {
 }
 
 impl Message for AddKey {
-    type Reply = ();
+    type Reply = Result<(), MachineError>;
     const MANIFEST: Manifest = Manifest::new("machine.AddKey");
 }
 
 impl<S: EntitySystem> EntityHandler<AddKey> for Machine<S> {
     async fn handle(
         &self,
-        _state: &MachineState,
+        state: &MachineState,
         msg: AddKey,
         _ctx: &EntityCtx<Self>,
-    ) -> (Vec<MachineEvent>, ()) {
+    ) -> (Vec<MachineEvent>, Result<(), MachineError>) {
+        if !state.provisioned {
+            return (vec![], Err(MachineError::NotProvisioned));
+        }
         (
             vec![MachineEvent::KeyAdded {
                 fingerprint: msg.fingerprint,
                 key: msg.key,
             }],
-            (),
+            Ok(()),
         )
     }
 }
 
 /// Revoke a key (machine §3): stops authorizing the next attach; it does not
 /// tear down a live connection (that is a separate administrative action).
+/// Refused before `Provision`, like every policy command (machine §3).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RevokeKey {
     pub fingerprint: String,
 }
 
 impl Message for RevokeKey {
-    type Reply = ();
+    type Reply = Result<(), MachineError>;
     const MANIFEST: Manifest = Manifest::new("machine.RevokeKey");
 }
 
 impl<S: EntitySystem> EntityHandler<RevokeKey> for Machine<S> {
     async fn handle(
         &self,
-        _state: &MachineState,
+        state: &MachineState,
         msg: RevokeKey,
         _ctx: &EntityCtx<Self>,
-    ) -> (Vec<MachineEvent>, ()) {
+    ) -> (Vec<MachineEvent>, Result<(), MachineError>) {
+        if !state.provisioned {
+            return (vec![], Err(MachineError::NotProvisioned));
+        }
         (
             vec![MachineEvent::KeyRevoked {
                 fingerprint: msg.fingerprint,
             }],
-            (),
+            Ok(()),
         )
     }
 }
 
 /// Change the egress policy (machine §5.2): a journaled event, effective from
-/// the next activation or applied live where the provider can.
+/// the next activation or applied live where the provider can. Refused before
+/// `Provision`, like every policy command (machine §3).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetEgress {
     pub policy: EgressPolicy,
 }
 
 impl Message for SetEgress {
-    type Reply = ();
+    type Reply = Result<(), MachineError>;
     const MANIFEST: Manifest = Manifest::new("machine.SetEgress");
 }
 
 impl<S: EntitySystem> EntityHandler<SetEgress> for Machine<S> {
     async fn handle(
         &self,
-        _state: &MachineState,
+        state: &MachineState,
         msg: SetEgress,
         _ctx: &EntityCtx<Self>,
-    ) -> (Vec<MachineEvent>, ()) {
-        (vec![MachineEvent::EgressChanged { policy: msg.policy }], ())
+    ) -> (Vec<MachineEvent>, Result<(), MachineError>) {
+        if !state.provisioned {
+            return (vec![], Err(MachineError::NotProvisioned));
+        }
+        (
+            vec![MachineEvent::EgressChanged { policy: msg.policy }],
+            Ok(()),
+        )
     }
 }
 
@@ -948,8 +969,9 @@ pub struct StatusReply {
     pub ws_capture_skips: u64,
     pub image_bytes: u64,
     pub running: bool,
-    /// BLAKE3 of the live image (verification surface for tests and
-    /// operators; reads the activation-local materialization).
+    /// The hash of the committed block index (the disk facet's
+    /// `content_digest`), no image read: the verification surface for tests
+    /// and operators. `None` before an import commits.
     pub image_digest: Option<BlobId>,
 }
 

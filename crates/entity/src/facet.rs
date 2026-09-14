@@ -245,7 +245,7 @@ pub(crate) struct StateManifest {
 /// The chunked form trades bytes for round trips: the chunk puts are one quorum
 /// round of their own, ahead of the snapshot record's. Under 64 KiB the bytes are
 /// not worth that round trip: a state that size costs about half a millisecond of a
-/// 125 MB/s uplink even re-sent whole (hw §3.3), and staying inline also keeps a
+/// 125 MB/s uplink even re-sent whole (hw §2, §3.9), and staying inline also keeps a
 /// small entity's snapshot free of blobs to root, fetch, and sweep.
 const SNAPSHOT_INLINE_MAX: usize = 64 * 1024;
 
@@ -870,11 +870,6 @@ impl<FS: FacetSet> FacetCell<FS> {
         };
         FS::seal(&mut forms, &mut stage)?;
         Ok(FS::drain(stage))
-    }
-
-    /// Disarm the stage without draining (the command failed before the append).
-    pub(crate) fn abandon(&self) {
-        *self.stages.lock().expect("facet stages lock") = None;
     }
 
     pub(crate) fn fold_live(&self, tag: u8, payload: &[u8]) -> Result<(), FacetError> {

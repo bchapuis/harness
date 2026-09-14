@@ -18,7 +18,7 @@
 //! compared, which invariants exist, which sections define them, and which
 //! suites verify them.
 //!
-//! # The two shapes, and four vocabularies
+//! # The two shapes, and three vocabularies
 //!
 //! Eight catalogues are markdown tables with a `Verified by` column. The core
 //! catalogue (actor §18.5) is a numbered list instead ([`Shape`]), for nine
@@ -26,11 +26,11 @@
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
 //! trusting one: entity, utilities, sandbox, workflow, and agent name test
-//! **files**, wal names test **functions**, and blob and machine name functions
-//! where their Rust catalogues name files. Only matching vocabularies can be
-//! compared, and [`Pointers`] records which is which per site, so where the suite
-//! axis is skipped, it is skipped by a declaration naming the reason rather than
-//! by a comparison that finds nothing.
+//! **files**, and wal, blob, and machine name test **functions**, each on both
+//! sides. Only matching vocabularies can be compared, and [`Pointers`] records
+//! which is which per site, so where the suite axis is skipped (core, whose list
+//! names no suites at all), it is skipped by a declaration naming the reason
+//! rather than by a comparison that finds nothing.
 //!
 //! # What is compared, and what is not
 //!

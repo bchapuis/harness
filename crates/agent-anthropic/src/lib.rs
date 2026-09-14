@@ -31,9 +31,9 @@ use serde_json::Value;
 use serde_json::json;
 
 /// The API path every completion posts to.
-pub const MESSAGES_PATH: &str = "/v1/messages";
+const MESSAGES_PATH: &str = "/v1/messages";
 /// The API version header this client speaks.
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// The Messages API protocol: the wire-specific four this crate owns.
 pub struct Messages;
@@ -69,9 +69,9 @@ pub type AnthropicModel<C, E> = ProtocolModel<Messages, C, E>;
 // Request encoding (agent Entry → Messages API)
 // ---------------------------------------------------------------------------
 
-/// Encode a [`ModelRequest`] as a Messages API request body. Public for
-/// golden tests; the encoding is part of this crate's contract.
-pub fn encode_request(req: &ModelRequest) -> Value {
+/// Encode a [`ModelRequest`] as a Messages API request body. The encoding is
+/// part of this crate's contract, pinned by the golden tests below.
+fn encode_request(req: &ModelRequest) -> Value {
     // Each transcript entry becomes content blocks for a role; consecutive
     // same-role blocks merge into one message, as the API prefers.
     let mut messages: Vec<(&str, Vec<Value>)> = Vec::new();

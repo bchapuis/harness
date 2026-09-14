@@ -230,10 +230,9 @@ impl Facet for Ws {
     }
 
     /// Fold the staged delta into the committed index. The index mutates HERE,
-    /// not in capture: the pre-seal `abandon` path (an event that will not
-    /// encode) leaves the form untouched, and every post-seal failure routes
-    /// through discard (E20), so the index can never silently diverge from the
-    /// journal.
+    /// not in capture, and every failure after it, from an event that will not
+    /// encode to a lost quorum, routes through discard (E20), so the index can
+    /// never silently diverge from the journal.
     fn seal(form: &mut WsForm, stage: &mut WsStage) -> Result<(), FacetError> {
         if stage.writes.is_empty() && stage.removes.is_empty() {
             return Ok(());

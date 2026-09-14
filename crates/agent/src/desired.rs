@@ -135,7 +135,8 @@ pub enum Effect {
 ///   side-effect-free, so an orphaned one re-executes (workflow §4.2).
 /// - A live run with pending calls ⇒ **every journaled intent lacking an
 ///   outcome** that can be launched as it stands, each under its declared
-///   recovery policy (§5.5).
+///   recovery policy (§5.5); one the fold answers on its own carries
+///   `Reexecute`, since nothing ran (§5.4).
 pub fn desired(
     kind: &Kind,
     config: &HarnessConfig,
@@ -182,55 +183,75 @@ pub fn desired(
     // the way any unlaunchable member does.
     let root = state.created.as_ref().map(|c| c.root.clone());
     set.extend(live.pending.iter().filter_map(|(call, pending)| {
-            let effect = if pending.name == DELEGATE {
-                // Not yet launchable: the `ChildRun` intent this call needs is
-                // still to be journaled (§8.1 step 1), so the set omits it.
-                let child = pending.child.clone()?;
-                let root = root.clone()?;
-                match serde_json::from_value::<DelegateInput>(pending.input.clone()) {
-                    // Validated once when the intent was journaled, so a failure
-                    // here is a drifted schema; resolve rather than strand.
-                    Err(e) => Effect::Fail {
+        // Each member carries its recovery policy (workflow §3.1, agent §5.5):
+        // a sandboxed tool follows its declaration; `delegate` re-executes by
+        // construction (its re-submission dedups, §8.1); a synthesized outcome
+        // executes nothing, so an orphaned one has no fate to be unsure of and
+        // the successor re-synthesizes it (§5.4).
+        let (effect, on_orphan) = if pending.name == DELEGATE {
+            // Not yet launchable: the `ChildRun` intent this call needs is
+            // still to be journaled (§8.1 step 1), so the set omits it.
+            let child = pending.child.clone()?;
+            let root = root.clone()?;
+            match serde_json::from_value::<DelegateInput>(pending.input.clone()) {
+                // Validated once when the intent was journaled, so a failure
+                // here is a drifted schema; resolve rather than strand.
+                Err(e) => (
+                    Effect::Fail {
                         call: call.clone(),
                         error: ToolError::InvalidArguments(e.to_string()),
                     },
-                    Ok(request) => Effect::Delegate {
+                    OnOrphan::Reexecute,
+                ),
+                Ok(request) => (
+                    Effect::Delegate {
                         call: call.clone(),
                         turn: live.turn.clone(),
                         prompt: request.prompt,
                         child,
                         root,
                     },
-                }
-            } else {
-                match kind.tools.get(&pending.name) {
-                    None => Effect::Fail {
+                    OnOrphan::Reexecute,
+                ),
+            }
+        } else {
+            match kind.tools.get(&pending.name) {
+                None => (
+                    Effect::Fail {
                         call: call.clone(),
                         error: ToolError::UnknownTool {
                             name: pending.name.clone(),
                         },
                     },
-                    Some(_) if !pending.input.is_object() => Effect::Fail {
+                    OnOrphan::Reexecute,
+                ),
+                Some(_) if !pending.input.is_object() => (
+                    Effect::Fail {
                         call: call.clone(),
                         error: ToolError::InvalidArguments(
                             "tool input must be a JSON object".into(),
                         ),
                     },
-                    Some(decl) => Effect::Tool {
+                    OnOrphan::Reexecute,
+                ),
+                Some(decl) => (
+                    Effect::Tool {
                         call: call.clone(),
                         tier: decl.tier,
                         name: pending.name.clone(),
                         input: pending.input.clone(),
                         timeout: decl.timeout.unwrap_or(config.tool_timeout),
                     },
-                }
-            };
-            Some(Pending {
-                key: StepKey::Call(live.turn.clone(), call.clone()),
-                effect,
-                on_orphan: orphan_policy(kind, &pending.name),
-            })
-        }));
+                    decl.on_orphan,
+                ),
+            }
+        };
+        Some(Pending {
+            key: StepKey::Call(live.turn.clone(), call.clone()),
+            effect,
+            on_orphan,
+        })
+    }));
     set
 }
 
@@ -280,25 +301,5 @@ fn delegate_spec(kind: &Kind) -> ToolSpec {
             kinds.join(", ")
         ),
         input_schema: DelegateInput::input_schema(&kinds),
-    }
-}
-
-/// The recovery policy for an orphaned call (agent §5.5): `delegate`
-/// re-executes by construction (its re-submission dedups, §8.1); a sandboxed
-/// tool follows its declaration, defaulting to `Interrupt` if the declaration
-/// vanished; the kind changed under a resumed session, and an unknown side
-/// effect is not repeated on a guess.
-///
-/// Kept beside [`desired`] rather than on the agent because it is part of the
-/// pure function: a [`Pending`] carries its policy (workflow §3.1), so deriving
-/// one is deriving the other.
-pub(crate) fn orphan_policy(kind: &Kind, name: &str) -> OnOrphan {
-    if name == DELEGATE {
-        OnOrphan::Reexecute
-    } else {
-        kind.tools
-            .get(name)
-            .map(|d| d.on_orphan)
-            .unwrap_or(OnOrphan::Interrupt)
     }
 }

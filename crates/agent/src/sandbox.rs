@@ -124,8 +124,9 @@ impl std::fmt::Display for SandboxError {
 pub trait Sandbox: Send + Sync + 'static {
     /// Execute one declared, sandboxed tool call to completion inside the
     /// environment, at the call's declared tier (§5.2, §5.6). The agent runtime
-    /// passes the tier: the provider holds no registry and cannot derive it
-    /// (§5.3 item 1), and passes only declared, cap-checked tiers, so a
+    /// passes the tier: the seam hands the sandbox no registry, so the tier
+    /// must travel with the call (§5.3 item 1), and only declared, cap-checked
+    /// tiers are passed, so a
     /// conforming pair grants nothing the journal does not show (sandbox
     /// spec §2.3, S4).
     fn call(

@@ -97,9 +97,10 @@ sim.run();                          // the drain to quiescence is a separate, ex
 drive traffic through the **public API only** (never actor state, `when_local`
 excepted, §3.5.1), then let the runner check invariants. `run_swarm` /
 `run_cluster_swarm` sweep one workload across many seeds, sampling a
-`FaultConfig` / `FaultPolicy` from each seed's stream. A failing run is reported
-as a `RunFailure` carrying the `(workload, seed)` that replays it; the seed
-regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
+`FaultConfig` / `FaultPolicy` from each seed's stream. A failing sweep is
+reported as a `SweepFailure` of `RunFailure`s, each carrying the
+`(workload, seed)` that replays it; the seed regenerates the run's faults, so
+there is nothing run-shaped to carry beyond it.
 
 The checkers have to respect an asymmetry: a single-node run is driven to
 **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the

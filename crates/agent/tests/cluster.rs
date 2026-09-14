@@ -13,6 +13,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -28,17 +29,23 @@ use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use actor_simulation::raft_config;
 use agent::Budget;
+use agent::CallId;
 use agent::Harness;
 use agent::Kind;
 use agent::Kinds;
+use agent::ModelResponse;
 use agent::RecordBody;
 use agent::RunError;
 use agent::SessionId;
 use agent::Tier;
+use agent::ToolCall;
+use agent::ToolError;
 use agent::Turn;
 use agent::TurnId;
+use agent::Usage;
 use entity::EntityConfig;
 use entity::EntityEvent;
+use serde_json::Value;
 use serde_json::json;
 
 use support::CollectingSink;
@@ -249,6 +256,169 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
         .filter(|b| matches!(b, RecordBody::RunEnded { .. }))
         .count();
     assert_eq!((submitted, ended), (1, 1), "one run survives the crash");
+
+    assert_invariants(&sink.events());
+}
+
+// -- crash-window orphaned calls (§5.4, §5.5) --------------------------------
+
+/// One step calling two tools at once, one the kind never declared and one it
+/// did; after their results, a final message. A pure function of the request,
+/// so the successor's own model instance answers the resumed run the same way.
+fn mixed_call_model() -> ScriptedModel {
+    ScriptedModel::new(|req| match req.transcript.last() {
+        Some(agent::Entry::ToolResult { .. }) => Ok(final_message("done")),
+        _ => Ok(ModelResponse {
+            content: "calling both".to_string(),
+            calls: vec![
+                ToolCall {
+                    id: CallId::new("c-unknown"),
+                    name: "nope".to_string(),
+                    input: json!({}),
+                },
+                ToolCall {
+                    id: CallId::new("c-shell"),
+                    name: "shell".to_string(),
+                    input: json!({}),
+                },
+            ],
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 30,
+            },
+        }),
+    })
+}
+
+/// The orphaned-call window (§5.5): the leader crashes after a `ModelResponse`
+/// commits and before either call's outcome does. The successor's first sight
+/// of the journal classifies both calls as orphaned. The declared tool
+/// resolves by its policy (`sandboxed` declares `Interrupt`, so `Interrupted`);
+/// the unknown one, which nothing ever ran, is re-synthesized as `UnknownTool`
+/// (§5.4), never `Interrupted`.
+///
+/// The window is held open by the sandbox open: while it is in flight the
+/// activation launches nothing, the synthesized failure included (§5.3 item
+/// 1), so the crash lands between the two commits by construction.
+#[test]
+fn an_orphaned_unknown_tool_call_is_resynthesized_on_resume() {
+    let sim = Simulation::new(29);
+    let sink = CollectingSink::default();
+    let net = SimNetwork::new(&sim)
+        .with_leader(
+            SwimConfig::default(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
+        .with_events(Arc::new(sink.clone()));
+    let systems = [net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
+    let harnesses: Vec<Harness<SimNode>> = systems
+        .iter()
+        .map(|s| {
+            Harness::cluster(
+                s.clone(),
+                &kinds(),
+                Arc::new(mixed_call_model()),
+                Arc::new(
+                    ScriptedSandboxes::echo().with_open_delay(sim.clock(), Duration::from_secs(60)),
+                ),
+            )
+        })
+        .collect();
+    sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
+
+    let session_id = SessionId::new("s-orphan");
+    {
+        let session = harnesses[0].session("worker", session_id.clone()).unwrap();
+        sim.spawner().launch(Box::pin(async move {
+            let _ = session
+                .prompt_within(
+                    Turn::new(TurnId::new("t-1"), "go"),
+                    Duration::from_secs(1_000),
+                )
+                .await;
+        }));
+    }
+
+    // The response commits; no outcome can while the open is in flight.
+    let before = await_journal(
+        &sim,
+        &harnesses[0],
+        "worker",
+        &session_id,
+        Duration::from_secs(20),
+        |bodies| {
+            bodies
+                .iter()
+                .any(|b| matches!(b, RecordBody::ModelResponse { .. }))
+        },
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|b| matches!(b, RecordBody::ToolOutcome { .. })),
+        "crash-window: both calls are journaled intents without outcomes"
+    );
+
+    let leader = last_activation(&sink, "s-orphan").expect("session activated");
+    net.crash(leader);
+    sim.run_for(Duration::from_secs(3)); // re-elect
+
+    // Re-contact from a survivor (A7 attaches): the new leader rehydrates,
+    // resolves the orphan set, and drives the run to its end.
+    let spare = *[A, B, C]
+        .iter()
+        .find(|n| **n != leader)
+        .expect("a survivor");
+    let surviving = harnesses[[A, B, C].iter().position(|n| *n == spare).unwrap()].clone();
+    let text = drive(&sim, Duration::from_secs(300), {
+        let session = surviving.session("worker", session_id.clone()).unwrap();
+        async move {
+            loop {
+                if let Ok(Ok(c)) = session
+                    .prompt_within(
+                        Turn::new(TurnId::new("t-1"), "go"),
+                        Duration::from_secs(1_000),
+                    )
+                    .await
+                {
+                    return c.text().to_string();
+                }
+            }
+        }
+    });
+    assert_eq!(text, "done");
+
+    let bodies = await_journal(
+        &sim,
+        &surviving,
+        "worker",
+        &session_id,
+        Duration::from_secs(10),
+        |_| true,
+    );
+    let outcomes: BTreeMap<String, Result<Value, ToolError>> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            RecordBody::ToolOutcome { call, outcome, .. } => {
+                Some((call.as_str().to_string(), outcome.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outcomes.get("c-unknown"),
+        Some(&Err(ToolError::UnknownTool {
+            name: "nope".to_string()
+        })),
+        "nothing ran, so the successor re-synthesizes the outcome (§5.4)"
+    );
+    assert_eq!(
+        outcomes.get("c-shell"),
+        Some(&Err(ToolError::Interrupted)),
+        "the declared tool follows its policy (§5.5)"
+    );
 
     assert_invariants(&sink.events());
 }

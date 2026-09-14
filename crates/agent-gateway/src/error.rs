@@ -64,7 +64,8 @@ impl GatewayError {
     }
 
     /// The HTTP status this error maps to.
-    pub fn status(&self) -> StatusCode {
+    #[cfg(test)]
+    fn status(&self) -> StatusCode {
         self.status
     }
 

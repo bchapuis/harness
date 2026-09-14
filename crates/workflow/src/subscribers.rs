@@ -81,12 +81,6 @@ impl<K: Ord, V> Subscribers<K, V> {
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.waiting.keys()
     }
-
-    /// Forget every registration: a fresh activation starts clean, and callers
-    /// re-register by re-contacting (§7.1 item 1).
-    pub fn reset(&mut self) {
-        self.waiting.clear();
-    }
 }
 
 #[cfg(test)]
@@ -128,13 +122,5 @@ mod tests {
             s.take(&1).is_empty(),
             "a second post-commit pass must not re-notify"
         );
-    }
-
-    #[test]
-    fn a_reset_drops_every_registration() {
-        let mut s: Subscribers<u8, &str> = Subscribers::default();
-        s.register(1, "a");
-        s.reset();
-        assert_eq!(s.keys().count(), 0, "callers re-register by re-contacting");
     }
 }

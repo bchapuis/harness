@@ -5,11 +5,12 @@
 //! node loss. It adds no network and no nondeterminism, so the deterministic
 //! simulator (§14) runs an entity's whole lifecycle under one seed.
 //!
-//! It never returns `NotLeader` or `Unavailable`: with a single store there is always
-//! a leader and always a quorum (those outcomes arise on the clustered `Quorum`
-//! tier, `EntityJournal for Arc<QuorumReplicator>` in replicator.rs). Every method
-//! here writes and reads the [`EntityStore`] seam this tier shares with the clustered
-//! one; there is no durability machinery under it.
+//! It never returns `NotLeader`: with a single store there is always a leader
+//! (`NotLeader` arises on the clustered `Quorum` tier, `EntityJournal for
+//! Arc<QuorumReplicator>` in replicator.rs). `Unavailable` it answers only when the
+//! single store has failed (§11): a write it refused, or a read it can no longer
+//! vouch for. Every method here writes and reads the [`EntityStore`] seam this tier
+//! shares with the clustered one; there is no durability machinery under it.
 
 use std::sync::Arc;
 
@@ -25,7 +26,6 @@ use crate::journal::Seq;
 use crate::journal::Term;
 use crate::store::BlobAck;
 use crate::store::EntityStore;
-use crate::store::MemoryEntityStore;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
 
@@ -42,9 +42,10 @@ pub struct LocalEntityJournal {
 
 impl LocalEntityJournal {
     /// A journal over a fresh, empty in-memory store for shard 0.
-    pub fn new() -> LocalEntityJournal {
+    #[cfg(test)]
+    pub(crate) fn new() -> LocalEntityJournal {
         LocalEntityJournal::over(
-            Arc::new(MemoryEntityStore::new()),
+            Arc::new(crate::store::MemoryEntityStore::new()),
             0,
             Arc::new(crate::blocking::InlineIo),
         )
@@ -62,11 +63,18 @@ impl LocalEntityJournal {
     ) -> LocalEntityJournal {
         LocalEntityJournal { store, shard, io }
     }
-}
 
-impl Default for LocalEntityJournal {
-    fn default() -> Self {
-        LocalEntityJournal::new()
+    /// The §11 gate on every read: a failed store answers its reads as an entity
+    /// with no history, and the only store there is cannot be outvoted, so the read
+    /// is refused as `Unavailable` rather than served as an empty entity (§7.5:
+    /// staleness is the budget, invention is not).
+    fn usable(&self) -> Result<(), EntityJournalError> {
+        if self.store.failed() {
+            return Err(EntityJournalError::Unavailable(
+                "local store unusable".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -95,10 +103,12 @@ impl EntityJournal for LocalEntityJournal {
         from: Seq,
         limit: usize,
     ) -> Result<RecordPage, EntityJournalError> {
+        self.usable()?;
         Ok(self.store.read_from(self.shard, entity, from, limit))
     }
 
     async fn head(&self, entity: &EntityName) -> Result<Seq, EntityJournalError> {
+        self.usable()?;
         Ok(self.store.head(self.shard, entity))
     }
 
@@ -126,6 +136,7 @@ impl EntityJournal for LocalEntityJournal {
         &self,
         entity: &EntityName,
     ) -> Result<Option<(Seq, Vec<u8>)>, EntityJournalError> {
+        self.usable()?;
         Ok(self.store.snapshot(self.shard, entity))
     }
 
@@ -277,5 +288,46 @@ mod tests {
         );
         assert_eq!(run(j.head(&b)), Ok(Seq::ZERO));
         assert_eq!(run(j.load_snapshot(&b)), Ok(None));
+    }
+
+    /// §11 on the single-store tier: once the store has failed, every read is
+    /// `Unavailable` rather than the empty entity the store's reads describe, so an
+    /// activation over it refuses instead of rehydrating from nothing (§7.5).
+    #[test]
+    fn a_failed_store_makes_every_read_unavailable() {
+        use crate::file_store::FileEntityStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileEntityStore::open(dir.path(), "json").expect("open"));
+        let j = LocalEntityJournal::over(store.clone(), 0, Arc::new(crate::blocking::InlineIo));
+        let entity = name("served");
+        assert_eq!(
+            run(j.append(&entity, Seq::ZERO, vec![b"a".to_vec()])),
+            AppendOutcome::Committed(Seq::new(1))
+        );
+        assert_eq!(run(j.head(&entity)), Ok(Seq::new(1)));
+
+        // Poison the store as a failing device would: the segment area is gone, so
+        // the next entity's segment file cannot be created.
+        std::fs::remove_dir_all(dir.path().join("segments")).unwrap();
+        assert!(matches!(
+            run(j.append(&name("doomed"), Seq::ZERO, vec![b"b".to_vec()])),
+            AppendOutcome::Unavailable(_)
+        ));
+        assert!(store.failure().is_some(), "poisoned by the failed write");
+
+        // The served entity's own history is refused, not read back as empty.
+        assert!(matches!(
+            run(j.head(&entity)),
+            Err(EntityJournalError::Unavailable(_))
+        ));
+        assert!(matches!(
+            run(j.load(&entity, Seq::ZERO, 10)),
+            Err(EntityJournalError::Unavailable(_))
+        ));
+        assert!(matches!(
+            run(j.load_snapshot(&entity)),
+            Err(EntityJournalError::Unavailable(_))
+        ));
     }
 }

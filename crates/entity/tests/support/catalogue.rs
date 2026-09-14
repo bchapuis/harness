@@ -100,7 +100,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
         spec: "entity §11",
         property: "CP under partition: a shard that cannot reach a quorum pauses its entities' writes (Unavailable) and never forks; other shards serve",
         verify: &[Verify::SimTest(
-            "clustered_entities.rs, entities.rs, partition_safety.rs",
+            "clustered_entities.rs, partition_safety.rs",
         )],
     },
     CatalogueEntry {
@@ -116,7 +116,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
         spec: "entity §5.4",
         property: "Location transparency: a call to a local versus remote entity produces observably identical replies and ordering",
         verify: &[Verify::SimTest(
-            "clustered_entities.rs, entities.rs, entity_swarm.rs, blobs.rs, blob_swarm.rs, disk_swarm.rs, sql_swarm.rs, subscription_swarm.rs, ws_clustered.rs, ws_swarm.rs",
+            "clustered_entities.rs, entity_swarm.rs, blobs.rs, blob_swarm.rs, disk_swarm.rs, sql_swarm.rs, subscription_swarm.rs, ws_clustered.rs, ws_swarm.rs",
         )],
     },
     CatalogueEntry {
@@ -131,7 +131,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
         invariant: 15,
         spec: "entity §7.7",
         property: "Split/merge safety: an entity is writable in exactly one shard at any time; a split or merge transfers the committed prefix atomically and loses or duplicates no write",
-        verify: &[Verify::SimTest("entities.rs, shard_split.rs")],
+        verify: &[Verify::SimTest("shard_split.rs")],
     },
     CatalogueEntry {
         invariant: 16,

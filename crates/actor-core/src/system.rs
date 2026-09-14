@@ -22,6 +22,8 @@ use crate::event::EventSink;
 use crate::host::ActorFactory;
 use crate::host::LocalHost;
 use crate::host::WatchDelivery;
+use crate::host::always;
+use crate::host::once;
 use crate::id::ActorId;
 use crate::id::NodeId;
 use crate::mailbox::Mailbox;
@@ -69,42 +71,18 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// directive degrades to `Stop` (spec §11.2); use
     /// [`spawn_with`](ActorSystem::spawn_with) for a restartable actor.
     fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
-        let mut once = Some(actor);
-        self.spawn_factory(Box::new(move || once.take()), None)
-    }
-
-    /// Spawn an actor parented to `parent` (the supervisor), so a fault it
-    /// escalates fails the parent (spec §11.1). Used by [`Ctx::spawn`].
-    ///
-    /// [`Ctx::spawn`]: crate::Ctx::spawn
-    fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
-        let mut once = Some(child);
-        self.spawn_factory(Box::new(move || once.take()), Some(parent))
+        self.spawn_factory(once(actor), None)
     }
 
     /// Spawn a root actor from a `factory` so a `Restart` directive can
     /// re-create it (spec §11.2), unlike the value-based
     /// [`spawn`](ActorSystem::spawn).
-    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
+    fn spawn_with<A, F>(&self, factory: F) -> ActorRef<A>
     where
         A: Actor<System = Self>,
         F: FnMut() -> A + Send + 'static,
     {
-        self.spawn_factory(Box::new(move || Some(factory())), None)
-    }
-
-    /// Spawn a child from a `factory` so a `Restart` directive can re-create it
-    /// (spec §11.2), parented to `parent`, unlike the value-based
-    /// [`spawn_child`]. Used by [`Ctx::spawn_with`].
-    ///
-    /// [`spawn_child`]: ActorSystem::spawn_child
-    /// [`Ctx::spawn_with`]: crate::Ctx::spawn_with
-    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.spawn_factory(Box::new(move || Some(factory())), Some(parent))
+        self.spawn_factory(always(factory), None)
     }
 
     /// Resolve `id` to its local mailbox if a live local actor of type `A` owns
@@ -329,11 +307,6 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
     /// The system entropy source.
     pub fn entropy(&self) -> &E {
         &self.inner.entropy
-    }
-
-    /// The system task spawner.
-    pub fn spawner(&self) -> &S {
-        &self.inner.spawner
     }
 }
 

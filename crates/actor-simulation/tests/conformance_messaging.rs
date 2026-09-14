@@ -14,10 +14,13 @@ use actor_core::ActorRef;
 use actor_core::ActorSystem;
 use actor_core::CallError;
 use actor_core::Clock;
+use actor_core::Codec;
+use actor_core::CodecError;
 use actor_core::Ctx;
 use actor_core::Event;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
+use actor_core::JsonCodec;
 use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
 use actor_core::Message;
@@ -33,6 +36,8 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use support::Counter;
 use support::Get;
@@ -493,6 +498,59 @@ fn when_local_is_none_for_a_remote_actor() {
             .await
     });
     assert_eq!(result, None);
+}
+
+// --- §4.3 #9: a local send performs no encode or decode -----------------------
+
+/// The system codec with every call counted: a local `ask` or `tell` must leave
+/// both counters at zero (invariant #9). Delegates to JSON so a call that did
+/// reach it would still succeed, and the assertion is on the count alone.
+#[derive(Default)]
+struct CountingCodec {
+    encodes: AtomicUsize,
+    decodes: AtomicUsize,
+}
+
+impl Codec for CountingCodec {
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+    fn encode_erased(&self, value: &dyn erased_serde::Serialize) -> Result<Vec<u8>, CodecError> {
+        self.encodes.fetch_add(1, Ordering::SeqCst);
+        JsonCodec.encode_erased(value)
+    }
+    fn with_deserializer(
+        &self,
+        bytes: &[u8],
+        f: &mut dyn FnMut(&mut dyn erased_serde::Deserializer),
+    ) {
+        self.decodes.fetch_add(1, Ordering::SeqCst);
+        JsonCodec.with_deserializer(bytes, f)
+    }
+}
+
+#[test]
+fn local_ask_and_tell_touch_no_codec() {
+    let sim = Simulation::new(11);
+    let codec = Arc::new(CountingCodec::default());
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+        .codec(codec.clone())
+        .build();
+    let count = sim.block_on(async move {
+        let counter = system.spawn(Counter::<SimSystem>::new());
+        counter.tell(Inc).await.unwrap();
+        counter.tell(Inc).await.unwrap();
+        counter.ask(Get).await
+    });
+    assert_eq!(count, Ok(2), "the local path serves the same result");
+    assert_eq!(
+        (
+            codec.encodes.load(Ordering::SeqCst),
+            codec.decodes.load(Ordering::SeqCst)
+        ),
+        (0, 0),
+        "a local ask/tell never encodes or decodes (spec §4.3, invariant #9)"
+    );
 }
 
 // =============================================================================

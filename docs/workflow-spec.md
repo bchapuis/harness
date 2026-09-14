@@ -231,9 +231,9 @@ An effect that fails does not fail the entity. The workflow settles it as `Err(E
 | `Lost(String)` | The environment the effect needed is gone. |
 | `Failed(String)` | The effect ran and failed. |
 
-**Only `Interrupted` is the workflow's to mint** (§4.4). The other three are what a consumer's `perform` returns: the workflow neither bounds an effect nor interprets its failure, and a consumer that wants a per-effect timeout takes it from the `Clock` on `Perform` (§4.1). The agent runtime's per-tool bound (agent §5.3 item 3) is exactly that, one layer up. `EffectError` and the agent runtime's `ToolError` (agent §5.4) stay distinct types, because a tool failure carries a payload the *model* reads and an effect failure carries nothing; the four variants map one to one, and the agent runtime's `settle` does the mapping, where an effect's outcome becomes the record its model will read.
+**Two variants are the workflow's to mint**: `Interrupted` for an orphan resolved on resume (§4.4) and `Failed` for a panic caught at the task boundary (below). The other two are what a consumer's `perform` returns: the workflow neither bounds an effect nor interprets its failure, and a consumer that wants a per-effect timeout takes it from the `Clock` on `Perform` (§4.1). The agent runtime's per-tool bound (agent §5.3 item 3) is exactly that, one layer up. `EffectError` and the agent runtime's `ToolError` (agent §5.4) stay distinct types, because a tool failure carries a payload the *model* reads and an effect failure carries nothing; the four variants map one to one, and the agent runtime's `settle` does the mapping, where an effect's outcome becomes the record its model will read.
 
-This mirrors agent §5.4 one layer down, for the same reason: a failing effect is information the consumer's fold should record and react to, not a fault that should tear down an activation holding durable state. The workflow itself has **no** failure mode that ends an entity. A panic inside `perform` is caught at the task boundary and settled as `Failed`, so a consumer bug in one effect cannot take the activation with it.
+This mirrors agent §5.4 one layer down, for the same reason: a failing effect is information the consumer's fold should record and react to, not a fault that should tear down an activation holding durable state. The workflow itself has **no** failure mode that ends an entity. A panic inside the future `perform` returns is caught at the boundary of the task that runs it and settled as `Failed`, so a consumer bug in one effect cannot take the activation with it; the synchronous call to `perform` itself runs on the command path, where a panic is the entity's to answer for like any handler's.
 
 ### 4.4 Orphaned effects and resume
 
@@ -374,7 +374,7 @@ The workflow adds **one** row to the table the entity already virtualizes (entit
 
 | Seam | Production | Simulation |
 |---|---|---|
-| `Workflow::perform` | the consumer's own seams (the agent runtime's model and sandbox, agent §12.1) | a **scripted effect**: a deterministic function of the key and the seed; seeded latency, failure, loss, and crash-mid-effect |
+| `Workflow::perform` | the consumer's own seams (the agent runtime's model and sandbox, agent §12.1) | a **scripted effect**: a deterministic function of the key and the seed; seeded latency, failure, a hang, a panic, and crash-mid-effect |
 
 The `workflow` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness, every launch through `Spawner` and every delay through `Clock`. Backoff jitter comes from `Entropy` (§3.4), so a backed-off relaunch happens at a virtual instant one seed reproduces.
 
@@ -480,7 +480,7 @@ What is *not* written above is the point. There is no dispatch loop, no in-fligh
 
 ```
 workflow/                  # the autonomous entity (this spec): an entity that drives itself
-  lib.rs                #   the Workflow trait, Pending, OnOrphan, EffectError (§3, §4)
+  lib.rs                #   the Workflow trait, Pending, OnOrphan, EffectError, Perform (§3, §4)
   cycle.rs              #   the workflow cycle: its entry points, desired-set
                         #     reconciliation, claims, launch, quiescence (§3.2, §3.3, §6)
   settle.rs             #   the Settled command, its manifest and handler (§4.2)

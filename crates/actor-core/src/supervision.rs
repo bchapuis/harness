@@ -30,8 +30,6 @@ pub enum Fault {
 pub enum Backoff {
     /// Restart immediately.
     None,
-    /// A constant delay.
-    Fixed(Duration),
     /// `base · 2^(attempt-1)`, capped at `max`.
     Exponential { base: Duration, max: Duration },
 }
@@ -41,7 +39,6 @@ impl Backoff {
     pub fn delay(&self, attempt: u32) -> Duration {
         match self {
             Backoff::None => Duration::ZERO,
-            Backoff::Fixed(d) => *d,
             Backoff::Exponential { base, max } => {
                 let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
                 (*base * factor).min(*max)
@@ -55,7 +52,11 @@ impl Backoff {
 pub enum SupervisionDirective {
     /// Terminate the actor; notify watchers (spec §12). The default.
     Stop,
-    /// Keep state, drop the failed message, and carry on (use sparingly).
+    /// Keep state, drop the failed message, and carry on (use sparingly). A
+    /// failed `started` has no message to drop, so for it this degrades to
+    /// [`Stop`]: an actor never runs before its start succeeded (spec §3.1.1).
+    ///
+    /// [`Stop`]: SupervisionDirective::Stop
     Resume,
     /// Re-create the actor (fresh state) keeping its id and mailbox. Exceeding
     /// `max` restarts within `within` escalates to [`Stop`].

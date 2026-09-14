@@ -539,19 +539,28 @@ impl<G: Entity> Host<G> {
         events: Vec<G::Event>,
         ctx: &Ctx<Host<G>>,
     ) -> Result<(), EntityError> {
-        // 2. Encode the events (facet 0) under their record tag (§7.12). Encoded
-        //    BEFORE the facet seal, so a serialization failure abandons the
-        //    stage with no physical local commit to unwind.
+        // 2. Encode the events (facet 0) under their record tag (§7.12). A
+        //    serialization failure is a non-committed outcome like any other: the
+        //    disk facet has already folded its capture into the committed form
+        //    (§7.15), so the materialization is discarded and the node steps down
+        //    (E20) rather than left claiming blocks no record journaled.
+        //    Encoded in full before the step-down's await: neither the events'
+        //    borrow nor the codec's error is `Send`.
         let codec = ctx.system().codec();
         let mut encoded = Vec::with_capacity(events.len());
+        let mut failed = None;
         for event in &events {
             match actor_serialization::encode(&*codec, event) {
                 Ok(bytes) => encoded.push(tag_record(EVENT_TAG, &bytes)),
                 Err(e) => {
-                    self.activation.facets.abandon();
-                    return Err(EntityError::Call(CallError::Serialization(e.to_string())));
+                    failed = Some(e.to_string());
+                    break;
                 }
             }
+        }
+        if let Some(reason) = failed {
+            self.forced_step_down(ctx).await;
+            return Err(EntityError::Call(CallError::Serialization(reason)));
         }
 
         // 3. Seal and drain the facet stages into tagged records (§7.12): a

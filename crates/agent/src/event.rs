@@ -1,7 +1,7 @@
 //! Harness observability events (agent spec §10.4): checker-facing,
 //! ephemeral, describing the *machinery around* sessions (run pairing, model
-//! spend, the sandbox bind/release pair), so the A-invariants are checkable over
-//! a run's stream. They carry nothing about a session's content: records are the
+//! completions, the sandbox bind/release pair), so the A-invariants are
+//! checkable over a run's stream. They carry nothing about a session's content: records are the
 //! durable, user-facing account (§10.1). Activation, deactivation, and the
 //! single-writer fence are the entity's events (`Activated`/`Deactivated`/
 //! `LeaderChanged`, entity §13), not duplicated here.
@@ -32,16 +32,16 @@ pub enum AgentEvent {
         turn: TurnId,
         parent: Option<SessionId>,
     },
-    /// One model call finished and its response committed on a live activation.
-    /// `usage` is the model-reported total token count feeding the A4 checker;
-    /// a discarded straggler (run already ended) emits nothing, keeping the
-    /// event scoped to journaled spend (§9.1 item 4, §10.4). `node` attributes the
-    /// call to its enclosing activation.
+    /// One model call finished and its response committed on a live activation:
+    /// the stream half of A4 (no completion after `RunEnded`) and the per-node
+    /// half of A6. A discarded straggler (run already ended) emits nothing,
+    /// keeping the event scoped to journaled spend (§9.1 item 4, §10.4); the
+    /// spend itself is audited from records, not from the stream. `node`
+    /// attributes the call to its enclosing activation.
     ModelCompleted {
         session: SessionId,
         turn: TurnId,
         node: NodeId,
-        usage: u64,
     },
     /// One tool call's `ToolOutcome` committed on a live activation (§5.4,
     /// §6.4). Scoped to a live run: a straggler of an ended or cancelled run

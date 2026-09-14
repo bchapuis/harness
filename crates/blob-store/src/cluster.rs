@@ -21,7 +21,6 @@
 //! `R` margin after a node departs (spec §7, **B6**) lives in `reconcile`.
 
 use std::future::Future;
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -137,16 +136,24 @@ impl<S: BlobSystem> Inner<S> {
     }
 
     /// `FetchBlob` from `node`'s replica (spec §5.2): the whole raw bytes, or
-    /// `None`. The caller verifies (B1).
+    /// `None`. The caller verifies (B1). The message's `range` is reserved for
+    /// range-verified streaming (spec §10); v1 always fetches the whole blob.
     pub(crate) fn fetch_blob(
         &self,
         node: NodeId,
         ns: Namespace,
         id: BlobId,
-        range: Option<Range<u64>>,
         within: Duration,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, CallError>> + Send + 'static {
-        let fetched = self.ask(node, FetchBlob { ns, id, range }, within);
+        let fetched = self.ask(
+            node,
+            FetchBlob {
+                ns,
+                id,
+                range: None,
+            },
+            within,
+        );
         async move {
             fetched
                 .await
@@ -190,13 +197,21 @@ impl<S: BlobSystem> Inner<S> {
 
 impl<S: BlobSystem> ClusteredBlobStore<S> {
     /// Bring the `Clustered` tier up on `system` with this node's on-disk `local`
-    /// store: spawn and register the node's [`BlobReplica`] so peers can reach it,
-    /// and share the tombstone awareness set with it.
+    /// store: seed the tombstone awareness set from the tombstones on that disk,
+    /// then spawn and register the node's [`BlobReplica`] so peers can reach it,
+    /// sharing the set with it.
     ///
     /// `local` is opened by the caller (one store per node), so the deterministic
     /// simulator can give each node its own directory (spec §8).
     pub fn start(system: S, config: BlobConfig, local: LocalBlobStore) -> ClusteredBlobStore<S> {
+        // A restarted node must still refuse, short-circuit, and answer a peer's
+        // pull with every tombstone it learned before the restart (spec §5.3, B7
+        // liveness): the on-disk records are the durable copy, and the set is
+        // their in-memory image.
         let tombstones = TombstoneSet::new();
+        for tombstone in local.tombstones() {
+            tombstones.insert(&tombstone.ns, tombstone.deleted_at);
+        }
         let replica = system.spawn(BlobReplica::<S>::new(local.clone(), tombstones.clone()));
         system
             .receptionist()
@@ -218,12 +233,6 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
                 &inner,
             ))));
         ClusteredBlobStore { inner }
-    }
-
-    /// The node's tombstone awareness set (shared with its replica): consulted
-    /// before a reconcile copy (spec §7).
-    pub fn tombstones(&self) -> &TombstoneSet {
-        &self.inner.tombstones
     }
 
     /// This node's on-disk store, which the reconcile loop enumerates to re-push
@@ -332,11 +341,11 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
 
         let mut saw_non_verifying = false;
         for node in candidates {
-            // v1 fetches the whole blob (range reserved for §10) and verifies it
-            // against `id` after transfer (B1) before slicing.
+            // v1 fetches the whole blob and verifies it against `id` after
+            // transfer (B1) before slicing.
             match self
                 .inner
-                .fetch_blob(node, ns.clone(), *id, None, READ_TIMEOUT)
+                .fetch_blob(node, ns.clone(), *id, READ_TIMEOUT)
                 .await
             {
                 Ok(Some(bytes)) => match verify(id, &bytes) {

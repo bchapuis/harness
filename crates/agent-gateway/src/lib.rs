@@ -84,9 +84,8 @@ pub struct Gateway<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Gateway<S> {
     /// Build the shared state from an already-connected client harness and
-    /// directory entity. Split out of [`connect`] so a test can drive the router
-    /// over a single in-process system without the discovery poll.
-    pub fn new(
+    /// directory entity.
+    fn new(
         harness: Harness<S>,
         directory: Entities<Directory<S>>,
         tokens: Arc<dyn TokenVerifier>,

@@ -23,7 +23,7 @@ pub type ReplyResult = Result<Vec<u8>, CallError>;
 /// reply with the system codec and routes it back to the caller.
 pub struct ReplyHandle {
     codec: Arc<dyn Codec>,
-    tx: Option<oneshot::Sender<ReplyResult>>,
+    tx: oneshot::Sender<ReplyResult>,
 }
 
 impl ReplyHandle {
@@ -32,38 +32,26 @@ impl ReplyHandle {
     /// loopback test can await the receiver directly.
     pub fn channel(codec: Arc<dyn Codec>) -> (ReplyHandle, oneshot::Receiver<ReplyResult>) {
         let (tx, rx) = oneshot::channel();
-        (
-            ReplyHandle {
-                codec,
-                tx: Some(tx),
-            },
-            rx,
-        )
+        (ReplyHandle { codec, tx }, rx)
     }
 
     /// Serialize `reply` and return it to the caller (spec §4.5). Carries both
     /// successful and application-failed outcomes (the latter as values inside
     /// `R`). Non-blocking: the return channel never applies backpressure.
-    pub fn send<R: SerializationRequirement>(mut self, reply: R) {
-        if let Some(tx) = self.tx.take() {
-            let encoded =
-                actor_serialization::encode(&*self.codec, &reply).map_err(CallError::from);
-            let _ = tx.send(encoded);
-        }
+    pub fn send<R: SerializationRequirement>(self, reply: R) {
+        let encoded = actor_serialization::encode(&*self.codec, &reply).map_err(CallError::from);
+        let _ = self.tx.send(encoded);
     }
 
     /// Fail the call with a transport/system error (spec §4.5). Distinct from an
     /// application error, which travels inside the reply via [`send`].
     ///
     /// [`send`]: ReplyHandle::send
-    pub fn fail(mut self, failure: CallError) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(Err(failure));
-        }
+    pub fn fail(self, failure: CallError) {
+        let _ = self.tx.send(Err(failure));
     }
 
-    /// Resolve with no reply, for a one-way `tell` (spec §4.5).
-    pub fn none(mut self) {
-        let _ = self.tx.take();
-    }
+    /// Resolve with no reply, for a one-way `tell` (spec §4.5): dropping the
+    /// sender is the resolution, and the receiver observes a cancelled channel.
+    pub fn none(self) {}
 }

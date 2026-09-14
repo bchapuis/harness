@@ -168,8 +168,8 @@ it rejoins as the same node and new sessions place onto it again.
 
 ## Sandbox boundary
 
-The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
-durable filesystem entity (entity §7.10), so a session's files survive
+The manifest runs `--sandbox durable`: the `Workspace` tier is backed by the
+session entity's workspace facet (entity §7.11), so a session's files survive
 hibernation, migration, and node loss. It needs no extra in-cluster runtime, so
 it is the right starter default, but it offers the typed file tools
 (`read_file`/`write_file`/`edit_file`/`list_dir`/`remove`) only: **no `shell`

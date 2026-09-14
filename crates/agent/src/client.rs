@@ -215,7 +215,6 @@ impl<S: HarnessSystem> Harness<S> {
         Ok(SessionRef {
             entity: entities.entity(session.as_str()),
             kind,
-            session,
             system: self.system.clone(),
             config: self.shared.config.clone(),
         })
@@ -460,7 +459,6 @@ impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
 pub struct SessionRef<S: HarnessSystem> {
     entity: EntityRef<Agent<S>>,
     kind: KindId,
-    session: SessionId,
     system: S,
     config: HarnessConfig,
 }
@@ -470,7 +468,6 @@ impl<S: HarnessSystem> Clone for SessionRef<S> {
         SessionRef {
             entity: self.entity.clone(),
             kind: self.kind.clone(),
-            session: self.session.clone(),
             system: self.system.clone(),
             config: self.config.clone(),
         }

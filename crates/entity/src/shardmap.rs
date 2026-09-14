@@ -1491,8 +1491,15 @@ async fn migrate_loop<R: RaftConsensus>(
                         break;
                     }
                 }
-                // Re-check the target is still the one we migrated toward, then flip.
-                if complete && replicator.migration_target().is_some() {
+                // A duplicate flip is a no-op; skip proposing once `Migrated` already
+                // committed (the allocator never re-targets a non-idle shard, so
+                // that is the only way `target` clears mid-pass).
+                let still_migrating = inner
+                    .lock()
+                    .expect("shard map mutex poisoned")
+                    .alloc(shard)
+                    .is_some_and(|a| a.target().is_some());
+                if complete && still_migrating {
                     consensus
                         .propose_to(map_group, encode(&ShardMapCommand::Migrated { shard }))
                         .await;

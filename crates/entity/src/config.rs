@@ -111,10 +111,11 @@ pub struct EntityConfig {
     /// (`docs/hardware-envelope.md` §3.1, §3.2). The cache holds up to twice this many
     /// entries while an older generation ages out.
     pub host_cache_capacity: usize,
-    /// The node-local scratch directory a **physical facet** materializes under
-    /// (spec §7.12/§7.14): the SQL facet's database files live here, keyed by
-    /// entity. Rebuildable caches only, never a source of truth (§1); safe to
-    /// wipe between runs. `None` (the default) uses the system temp directory.
+    /// The node-local scratch directory every **physical facet** materializes
+    /// under (spec §7.12): the workspace tree (§7.11), the SQL database files
+    /// (§7.14) and the disk image (§7.15) live here, keyed by node and entity.
+    /// Rebuildable caches only, never a source of truth (§1); safe to wipe between
+    /// runs. `None` (the default) uses the system temp directory.
     pub data_dir: Option<std::path::PathBuf>,
 }
 

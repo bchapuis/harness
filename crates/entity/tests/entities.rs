@@ -836,3 +836,155 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
         "the overstated snapshot is never folded from (E4)",
     );
 }
+
+// --- Lifecycle: a failed `on_activate` fails the command that triggered it (§4.1) --
+
+#[derive(Default)]
+struct RefusingEntity;
+
+impl Entity for RefusingEntity {
+    type System = SimSystem;
+    type State = CounterState;
+    type Event = CounterEvent;
+    type Facets = ();
+    const ENTITY_TYPE: &'static str = "test.RefusingEntity";
+
+    fn apply(state: &mut CounterState, event: &CounterEvent) {
+        match event {
+            CounterEvent::Added(d) => state.value += *d,
+        }
+    }
+
+    async fn on_activate(&mut self, _ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
+        Err("refused".into())
+    }
+}
+
+impl EntityHandler<Add> for RefusingEntity {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        msg: Add,
+        _ctx: &EntityCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
+        (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
+    }
+}
+
+#[test]
+fn a_failed_on_activate_fails_the_triggering_command() {
+    let sim = Simulation::new(11);
+    let recorder = Recorder::new();
+    let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+        .events(sink)
+        .build();
+    let refusing = system.entities::<RefusingEntity>(EntityConfig::default());
+
+    let outcome = sim.block_on(async move { refusing.entity("r/0").ask(Add(1)).await });
+    assert!(
+        outcome.is_err(),
+        "the command that triggered the aborted activation fails: {outcome:?}",
+    );
+
+    // The abort leaves no `Activated` on the stream (§13): a phantom activation
+    // would break every E6 activation count.
+    sim.run();
+    assert!(
+        !recorder.events().iter().any(|e| matches!(
+            e.as_app::<EntityEvent>(),
+            Some(EntityEvent::Activated { .. })
+        )),
+        "an aborted activation emits no Activated",
+    );
+}
+
+// --- Death watch: `watch` after death fires `on_peer_terminated` at once (§4.3) --
+
+#[derive(Default)]
+struct Watcher;
+
+impl Entity for Watcher {
+    type System = SimSystem;
+    type State = CounterState;
+    type Event = CounterEvent;
+    type Facets = ();
+    const ENTITY_TYPE: &'static str = "test.Watcher";
+
+    fn apply(state: &mut CounterState, event: &CounterEvent) {
+        match event {
+            CounterEvent::Added(d) => state.value += *d,
+        }
+    }
+
+    // One event per terminated peer: the callerless decision commits through the
+    // §6 barrier, so the count below is journaled, not in-memory.
+    async fn on_peer_terminated(
+        &self,
+        _state: &CounterState,
+        _ctx: &EntityCtx<Self>,
+        _peer: &actor_core::ActorId,
+        _reason: actor_core::TerminationReason,
+    ) -> Vec<CounterEvent> {
+        vec![CounterEvent::Added(1)]
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WatchPeer(actor_core::ActorId);
+impl Message for WatchPeer {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("test.WatchPeer");
+}
+
+impl EntityHandler<WatchPeer> for Watcher {
+    async fn handle(
+        &self,
+        _state: &CounterState,
+        msg: WatchPeer,
+        ctx: &EntityCtx<Self>,
+    ) -> (Vec<CounterEvent>, ()) {
+        // Queued here, installed by the host after this handler returns (§4.3).
+        ctx.watch(msg.0);
+        (Vec::new(), ())
+    }
+}
+
+impl EntityHandler<ReadCount> for Watcher {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        _msg: ReadCount,
+        _ctx: &EntityCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
+        (Vec::new(), state.value)
+    }
+}
+
+#[test]
+fn a_watch_on_a_dead_peer_runs_on_peer_terminated_through_the_barrier() {
+    use actor_core::ActorSystem;
+
+    let sim = Simulation::new(13);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+    let watchers = system.entities::<Watcher>(EntityConfig::default());
+    // No actor ever held this id: the watch fires immediately (actor §12).
+    let ghost = actor_core::ActorId::new(system.node(), actor_core::Path::new("/user/ghost"), 0);
+
+    let watcher = watchers.entity("w/0");
+    let watching = watcher.clone();
+    sim.block_on(async move {
+        watching
+            .ask(WatchPeer(ghost))
+            .await
+            .expect("watch commits nothing")
+    });
+    // Drain the termination signal and the decision it triggers.
+    sim.run();
+
+    let count = sim.block_on(async move { watcher.ask(ReadCount).await.expect("read") });
+    assert_eq!(
+        count, 1,
+        "one on_peer_terminated decision journaled one event"
+    );
+}

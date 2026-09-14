@@ -6,7 +6,7 @@
 //! **voters** commits it, and the **commit index** is the authority stamp the
 //! membership merge orders decisions by (spec §9.2). The scope is elections,
 //! heartbeats, log replication, quorum commit, single-server voter changes, and
-//! snapshot/compaction (§9): enough for every observable guarantee the spec
+//! snapshot/compaction (entity §9): enough for every observable guarantee the spec
 //! requires (election safety, log matching, leader completeness) and invariant
 //! #22.
 //!
@@ -96,7 +96,7 @@ pub struct RaftEntry {
 
 /// The durable Raft state a voter must persist (spec §9.4.3 item 2): the
 /// current term, the vote cast in it, the log, and; once the prefix has been
-/// compacted (§9); the state-machine snapshot that subsumes it. `log` holds the
+/// compacted (entity §9); the state-machine snapshot that subsumes it. `log` holds the
 /// entries *after* `snapshot_index`, so entry `i` (1-based) lives at
 /// `log[i - snapshot_index - 1]`; with no snapshot `snapshot_index == 0` and the
 /// log is absolute as before.
@@ -196,7 +196,7 @@ pub trait RaftWAL: Send + Sync + 'static {
     /// onto its retained suffix.
     fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck;
 
-    /// Record a state-machine snapshot at `index`/`term` (§9) and discard the log
+    /// Record a state-machine snapshot at `index`/`term` (entity §9) and discard the log
     /// prefix it subsumes (every entry with absolute index `≤ index`). Persisted
     /// before the engine drops the prefix in memory, so a restart reloads from the
     /// snapshot plus the retained tail rather than a blank log. The default keeps
@@ -383,7 +383,7 @@ impl MultiRaft {
     }
 
     /// Stop running `group`: drop it from the tick map so it no longer elects,
-    /// heartbeats, or commits (spec §7.7, E7 reclamation on a shard merge).
+    /// heartbeats, or commits (entity §7.7, E7 reclamation on a shard merge).
     /// Retiring needs no in-group consensus (see
     /// [`RaftConsensus::remove_group`](crate::RaftConsensus::remove_group)).
     /// Idempotent; a group this node never ran is already gone. Not implemented:
@@ -429,7 +429,7 @@ enum Role {
 /// One observation the caller folds into its state machine, in commit order
 /// (spec §9.4.3). The opaque-bytes seam: the caller decodes and applies these.
 /// A `Snapshot` is delivered when this node installs a leader's state-machine
-/// snapshot, the log prefix it subsumes having been compacted away (§9). Both
+/// snapshot, the log prefix it subsumes having been compacted away (entity §9). Both
 /// variants ride one ordered stream, so an install and the commands after it
 /// never reorder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -478,7 +478,7 @@ pub enum RaftMessage {
         match_index: u64,
     },
     /// The `leader`'s state-machine snapshot for a follower whose `next` has fallen
-    /// below the leader's compacted prefix (spec §9): the entries that would catch
+    /// below the leader's compacted prefix (entity §9): the entries that would catch
     /// it up no longer exist. `data` is the opaque application snapshot;
     /// `voters`/`learners` are the membership as of the base.
     InstallSnapshot {
@@ -521,7 +521,7 @@ struct RaftState {
     /// `snapshot_index == 0` and this is the plain 1-based log.
     log: Vec<RaftEntry>,
     /// The last index covered by the installed snapshot (`0` = nothing compacted,
-    /// §9), its term, and the application snapshot bytes (held so a leader can ship
+    /// entity §9), its term, and the application snapshot bytes (held so a leader can ship
     /// them via `RaftInstallSnapshot`). Entries `≤ snapshot_index` are gone from
     /// `log`; their term is only known for `snapshot_index` itself.
     snapshot_index: u64,
@@ -537,7 +537,7 @@ struct RaftState {
     /// Only voters elect, lead, and count toward a quorum.
     voters: Vec<NodeId>,
     /// Non-voting **learners**: group members the leader replicates to, but which
-    /// never elect, lead, or count toward a quorum (spec §7.1, the entity shards'
+    /// never elect, lead, or count toward a quorum (entity §7.1, the entity shards'
     /// extra replicas beyond the voter quorum). Kept sorted and disjoint from
     /// `voters`. A learner adopts the leader on append, so it can route and serve
     /// reads.
@@ -793,7 +793,7 @@ impl RaftGroup {
     }
 
     /// This group's current Raft term. A layer above (entity's per-shard
-    /// leader-election group, §8) uses it as the single-writer fencing token every
+    /// leader-election group, entity §8) uses it as the single-writer fencing token every
     /// per-entity append carries: one leader per term, monotonic across the quorum.
     pub(crate) fn term(&self) -> u64 {
         self.lock().term
@@ -808,7 +808,7 @@ impl RaftGroup {
     /// otherwise see only the post-snapshot tail and miss the compacted prefix
     /// entirely. Handing it this observation first rebuilds the projection from the
     /// snapshot, the leaderless counterpart of a leader-driven InstallSnapshot
-    /// (§9).
+    /// (entity §9).
     ///
     /// [`new`]: RaftGroup::new
     pub(crate) fn snapshot_observation(&self) -> Option<Committed> {
@@ -1180,7 +1180,7 @@ impl RaftGroup {
     }
 
     /// Compact the log up to `index` against the application's state-machine
-    /// `snapshot` (§9): discard every entry `≤ index` and remember the snapshot so
+    /// `snapshot` (entity §9): discard every entry `≤ index` and remember the snapshot so
     /// this node can ship it to a lagging peer. Purely local and deterministic:
     /// the caller supplies a snapshot of its applied prefix, so every replica
     /// produces an equivalent one without coordination. Ignores a stale or
@@ -1231,7 +1231,7 @@ impl RaftGroup {
     /// suffix it still misses (a heartbeat when empty), then advance the commit
     /// index to the highest current-term entry a quorum has matched.
     fn replicate(&self, state: &mut RaftState, out: &mut RaftOutput) {
-        // Every other member, learners included (§7.1).
+        // Every other member, learners included (entity §7.1).
         let peers = state.replication_targets(self.node);
         for peer in peers {
             let next = *state.next.get(&peer).unwrap_or(&(state.last_index() + 1));
@@ -1539,7 +1539,7 @@ impl RaftGroup {
         out
     }
 
-    /// Handle an install-snapshot from the leader (spec §9): adopt the leader,
+    /// Handle an install-snapshot from the leader (entity §9): adopt the leader,
     /// and if the snapshot advances us past our commit point, replace our state
     /// with it; set the log base to `(snapshot_index, snapshot_term)`, discard any
     /// log we held (a follower this far behind has no committed entries past the
@@ -2211,7 +2211,7 @@ mod tests {
 
     /// A non-voting learner replicates the committed log just like a voter, but
     /// never elects or leads and never counts toward the quorum (entity's storage
-    /// replicas beyond the voter quorum, spec §7.1).
+    /// replicas beyond the voter quorum, entity §7.1).
     #[test]
     fn a_learner_replicates_committed_state_but_never_leads() {
         let voters = [NodeId::new(1), NodeId::new(2)];
@@ -2404,7 +2404,7 @@ mod tests {
         assert_eq!(state.voters, vec![v2], "and is gone from the voter set");
     }
 
-    /// Compaction (spec §9): the voters commit a run of entries while a learner is
+    /// Compaction (entity §9): the voters commit a run of entries while a learner is
     /// partitioned, then the leader compacts its log against a snapshot. When the
     /// learner heals, its `next` has fallen below the compacted prefix, so the
     /// leader catches it up with one `RaftInstallSnapshot` instead of replaying the

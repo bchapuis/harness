@@ -91,7 +91,7 @@ pub fn unscope_session<'a>(principal: &PrincipalId, key: &'a str) -> Option<&'a 
 /// Whether `host` is a loopback interface: the bind the insecure dev mode is
 /// confined to. Accepts the common literals and any address that parses as a
 /// loopback IP.
-pub fn is_loopback(host: &str) -> bool {
+fn is_loopback(host: &str) -> bool {
     host == "localhost"
         || host
             .parse::<IpAddr>()

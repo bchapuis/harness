@@ -9,7 +9,7 @@
 //! Author an entity by implementing [`Entity`] (state, events, the pure
 //! [`apply`](Entity::apply) fold) and an [`EntityHandler`] per command (the
 //! decide/apply split, §4.2), then host it with
-//! [`system.entities::<G>(config)`](EntityExt::entity) and address it by name
+//! [`system.entities::<G>(config)`](EntityExt::entities) and address it by name
 //! with [`Entities::entity`]. A command's reply is held until its events are
 //! durable (the §6 output gate), so a crash loses no acknowledged write.
 //!

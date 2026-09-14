@@ -1,8 +1,9 @@
 //! The wire protocol: frames exchanged over an association (spec §7.1).
 //!
 //! This is the vocabulary every subsystem speaks across the network: actor
-//! envelopes and replies, SWIM probes, death-watch, and receptionist
-//! replication. It references domain types (e.g. [`MemberDigest`]); the
+//! envelopes and replies, SWIM probes, death-watch, receptionist replication,
+//! and Raft consensus traffic (leader-based mode, spec §9.4.3). It references
+//! domain types (e.g. [`MemberDigest`]); the
 //! [`Transport`](crate::Transport) that carries it does not.
 
 use actor_core::ActorId;

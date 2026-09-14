@@ -52,19 +52,14 @@ impl TombstoneSet {
         TombstoneSet::default()
     }
 
-    /// Record `ns` as tombstoned. Returns `true` if it was newly added (so a
-    /// caller can fan it out or persist it), `false` if already known. On conflict
-    /// the stored stamp converges to the minimum, keeping the set order-independent.
-    pub fn insert(&self, ns: &Namespace, deleted_at: u64) -> bool {
+    /// Record `ns` as tombstoned. Re-inserting a known namespace adds nothing; its
+    /// stored stamp converges to the minimum, keeping the set order-independent.
+    pub fn insert(&self, ns: &Namespace, deleted_at: u64) {
         let mut map = self.lock();
         match map.get_mut(ns) {
-            Some(existing) => {
-                *existing = (*existing).min(deleted_at);
-                false
-            }
+            Some(existing) => *existing = (*existing).min(deleted_at),
             None => {
                 map.insert(ns.clone(), deleted_at);
-                true
             }
         }
     }
@@ -103,12 +98,9 @@ mod tests {
         let set = TombstoneSet::new();
         let a = ns("alpha");
         assert!(!set.contains(&a));
-        assert!(set.insert(&a, 5), "first insert is new");
+        set.insert(&a, 5);
         assert!(set.contains(&a));
-        assert!(
-            !set.insert(&a, 9),
-            "re-inserting an existing namespace is not new"
-        );
+        set.insert(&a, 9);
         assert_eq!(set.snapshot().len(), 1, "the re-insert added no entry");
     }
 

@@ -33,9 +33,11 @@ use crate::reply::ReplyHandle;
 use crate::runtime::BoxFuture;
 use crate::runtime::Clock;
 
-/// A lending closure that runs one message: given the actor and its context, it
-/// returns the future that drives the handler.
-type Runner<A> = Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>) -> BoxFuture<'a, ()> + Send>;
+/// A lending closure that runs one message: given the actor, its context, and
+/// the envelope's reply handle (`None` on the local path), it returns the
+/// future that drives the handler.
+type Runner<A> =
+    Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>, Option<ReplyHandle>) -> BoxFuture<'a, ()> + Send>;
 
 /// Sentinel manifest for the `when_local` closure (spec §3.5.1). That closure
 /// carries no message type, yet the by-value envelope still needs a manifest for
@@ -49,7 +51,7 @@ where
     A: Actor + Handler<M>,
     M: Message,
 {
-    Box::new(move |actor, ctx| {
+    Box::new(move |actor, ctx, _reply| {
         Box::pin(async move {
             let _ = actor.handle(msg, ctx).await;
         })
@@ -62,6 +64,31 @@ where
 pub(crate) struct Envelope<A: Actor> {
     pub(crate) manifest: Manifest,
     pub(crate) run: Runner<A>,
+    /// The reply side of an inbound remote `ask`, carried beside the runner
+    /// rather than captured inside it: a rejected enqueue hands the envelope
+    /// back, and the handle must still be reachable to fail it with the reason
+    /// (spec §4.5: exactly one resolution per `ask`).
+    pub(crate) reply: Option<ReplyHandle>,
+}
+
+impl<A: Actor> Envelope<A> {
+    /// A local envelope: no reply handle, the caller awaits its own oneshot.
+    fn local(manifest: Manifest, run: Runner<A>) -> Envelope<A> {
+        Envelope {
+            manifest,
+            run,
+            reply: None,
+        }
+    }
+
+    /// Resolve a rejected envelope's reply with `error`, and hand the error
+    /// back for the caller's own result.
+    fn refuse(self, error: CallError) -> CallError {
+        if let Some(reply) = self.reply {
+            reply.fail(error.clone());
+        }
+        error
+    }
 }
 
 /// The consuming end of a mailbox, owned by the actor's executor.
@@ -121,14 +148,14 @@ impl<A: Actor> Mailbox<A> {
             manifest,
         });
         let (reply_tx, reply_rx) = oneshot::channel::<M::Reply>();
-        let run: Runner<A> = Box::new(move |actor, ctx| {
+        let run: Runner<A> = Box::new(move |actor, ctx, _reply| {
             Box::pin(async move {
                 let reply = actor.handle(msg, ctx).await;
                 let _ = reply_tx.send(reply);
             })
         });
         let call = async {
-            match self.enqueue(manifest, run).await {
+            match self.enqueue(Envelope::local(manifest, run)).await {
                 // Sender dropped without replying ⇒ the actor died mid-handling.
                 Ok(()) => reply_rx.await.map_err(|_| CallError::DeadLetter),
                 Err(err) => Err(err),
@@ -157,7 +184,8 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.enqueue(M::MANIFEST, tell_runner(msg)).await
+        self.enqueue(Envelope::local(M::MANIFEST, tell_runner(msg)))
+            .await
     }
 
     /// Non-blocking fire-and-forget: [`CallError::MailboxFull`] when full,
@@ -167,7 +195,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.try_enqueue(M::MANIFEST, tell_runner(msg))
+        self.try_enqueue(Envelope::local(M::MANIFEST, tell_runner(msg)))
     }
 
     /// Run `f` on the actor's serial executor with `&mut A` and return its
@@ -179,23 +207,25 @@ impl<A: Actor> Mailbox<A> {
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel::<R>();
-        let run: Runner<A> = Box::new(move |actor, _ctx| {
+        let run: Runner<A> = Box::new(move |actor, _ctx, _reply| {
             Box::pin(async move {
                 let _ = tx.send(f(actor));
             })
         });
-        self.enqueue(WHEN_LOCAL_MANIFEST, run).await?;
+        self.enqueue(Envelope::local(WHEN_LOCAL_MANIFEST, run))
+            .await?;
         rx.await.map_err(|_| CallError::DeadLetter)
     }
 
     /// Awaiting enqueue (spec §6 default backpressure): blocks until the mailbox
     /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`,
     /// `run_local`, and the death-watch signal.
-    async fn enqueue(&self, manifest: Manifest, run: Runner<A>) -> Result<(), CallError> {
+    async fn enqueue(&self, envelope: Envelope<A>) -> Result<(), CallError> {
+        let manifest = envelope.manifest;
         self.sender
-            .send(Envelope { manifest, run })
+            .send(envelope)
             .await
-            .map_err(|_| CallError::DeadLetter)?;
+            .map_err(|rejected| rejected.0.refuse(CallError::DeadLetter))?;
         self.emit_enqueue(manifest);
         Ok(())
     }
@@ -203,14 +233,18 @@ impl<A: Actor> Mailbox<A> {
     /// Non-blocking enqueue: returns [`CallError::MailboxFull`] when the queue is
     /// full rather than awaiting. Shared by `try_tell` (local best-effort) and
     /// `enqueue_remote` (the receive loop, which must not stall on backpressure).
-    fn try_enqueue(&self, manifest: Manifest, run: Runner<A>) -> Result<(), CallError> {
-        match self.sender.try_send(Envelope { manifest, run }) {
+    /// A rejected envelope's reply handle, if any, is resolved with the same
+    /// error the caller gets, so a remote asker sees `MailboxFull` rather than
+    /// a cancelled channel.
+    fn try_enqueue(&self, envelope: Envelope<A>) -> Result<(), CallError> {
+        let manifest = envelope.manifest;
+        match self.sender.try_send(envelope) {
             Ok(()) => {
                 self.emit_enqueue(manifest);
                 Ok(())
             }
-            Err(TrySendError::Full(_)) => Err(CallError::MailboxFull),
-            Err(TrySendError::Closed(_)) => Err(CallError::DeadLetter),
+            Err(TrySendError::Full(rejected)) => Err(rejected.refuse(CallError::MailboxFull)),
+            Err(TrySendError::Closed(rejected)) => Err(rejected.refuse(CallError::DeadLetter)),
         }
     }
 
@@ -236,23 +270,21 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        // Resolve `reply` explicitly here: once the runner below captures it, a
-        // failed `try_send` would drop it silently.
-        if self.sender.is_closed() {
-            reply.fail(CallError::DeadLetter);
-            return Err(CallError::DeadLetter);
-        }
-        if self.sender.is_full() {
-            reply.fail(CallError::MailboxFull);
-            return Err(CallError::MailboxFull);
-        }
-        let run: Runner<A> = Box::new(move |actor, ctx| {
+        // The executor hands the envelope's reply handle to the runner, so the
+        // handle rides beside the closure where a rejected enqueue can reach it.
+        let run: Runner<A> = Box::new(move |actor, ctx, reply| {
             Box::pin(async move {
                 let outcome = actor.handle(msg, ctx).await;
-                reply.send(outcome);
+                if let Some(reply) = reply {
+                    reply.send(outcome);
+                }
             })
         });
-        self.try_enqueue(M::MANIFEST, run)
+        self.try_enqueue(Envelope {
+            manifest: M::MANIFEST,
+            run,
+            reply: Some(reply),
+        })
     }
 
     /// Enqueue a [`Terminated`] death-watch signal (spec §12). It rides the same
@@ -273,12 +305,12 @@ impl<A: Actor> Mailbox<A> {
         // to mark the delivery on the event stream once it lands.
         let target = signal.id.clone();
         let reason = signal.reason;
-        let run: Runner<A> = Box::new(move |actor, ctx| {
+        let run: Runner<A> = Box::new(move |actor, ctx, _reply| {
             Box::pin(async move {
                 actor.handle(signal, ctx).await;
             })
         });
-        if self.enqueue(manifest, run).await.is_ok() {
+        if self.enqueue(Envelope::local(manifest, run)).await.is_ok() {
             // The watcher's mailbox is the one and only point a `Terminated` is
             // actually *delivered* (spec §12, §16), so the event is emitted here:
             // a forward to another node is not a delivery, and a watch-after-death

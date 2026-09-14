@@ -187,6 +187,64 @@ fn repeated_startup_failure_escalates_to_stop() {
     assert_eq!(outcome, Err(CallError::DeadLetter));
 }
 
+// --- Resume on a failed `started` degrades to Stop (spec §3.1.1, §4.2) -------
+//
+// `Resume` keeps state and drops the failed message. A failed `started` has no
+// message to drop, and running the actor anyway would dispatch to one that never
+// became ready (§4.2 step 3, `actor_ready` marks the point). So the directive
+// degrades to `Stop`, and the event stream reports that effective decision.
+
+struct ResumesAfterFailedStart;
+impl Actor for ResumesAfterFailedStart {
+    type System = SimSystem;
+    async fn started(&mut self, _ctx: &Ctx<Self>) -> Result<(), BoxError> {
+        Err("nope".into())
+    }
+    fn supervision() -> Supervision {
+        Supervision::resume()
+    }
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Ping>();
+    }
+}
+impl Handler<Ping> for ResumesAfterFailedStart {
+    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn resume_on_a_failed_start_degrades_to_stop() {
+    let (sim, system, recorder) = support::local_recorded(4);
+    let outcome = sim.block_on(async move {
+        let actor = system.spawn(ResumesAfterFailedStart);
+        actor.ask(Ping).await
+    });
+    assert_eq!(outcome, Err(CallError::DeadLetter));
+    let events = recorder.events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Supervised {
+                fault: Fault::Started,
+                decision: SupervisionDecision::Stop,
+                ..
+            }
+        )),
+        "Resume on a Started fault must be reported as the effective Stop, got {events:?}",
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ActorReady { .. } | Event::DispatchStart { .. })),
+        "an actor whose start failed never becomes ready and never handles a message, got {events:?}",
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::ResignId { .. })),
+        "the actor resigns its id after the failed start (spec §4.2 step 5)"
+    );
+}
+
 // --- A panic in `started` is a start failure, not a crash (spec §11.1) --------
 
 struct PanicsOnStart;

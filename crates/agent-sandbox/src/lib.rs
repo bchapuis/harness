@@ -27,17 +27,16 @@
 //!   §3.5's development fallback, not the microVM grade. Configured per
 //!   provider by [`TieredSandboxes::with_container_cli`]; a provider that
 //!   names neither a container CLI nor a Firecracker profile has no `Native`
-//!   tier, and declares no `shell`. Declared by
-//!   [`shell_tool`]. Native calls require a tokio runtime
+//!   tier, and declares no `shell`. Native calls require a tokio runtime
 //!   (`tokio::process`); the other tiers stay runtime-agnostic.
 //! - **`Native`, microVM grade** (feature `firecracker`): the same tier
 //!   behind a Firecracker VM instead; §3.5's reference choice. Configured
 //!   per provider by [`TieredSandboxes::with_firecracker`]; one VM per
 //!   activation, booted lazily, killed on release; the workspace travels as
 //!   a capped tar stream over vsock around each call (push → exec → pull,
-//!   all through the same cap-std handle). Declared by [`fc_shell_tool`]:
-//!   distinct from the docker declaration because the sync semantics are
-//!   model-visible. Builds everywhere; *runs* on Linux with `/dev/kvm`,
+//!   all through the same cap-std handle). Its `shell` declaration differs
+//!   from the docker one because the sync semantics are model-visible.
+//!   Builds everywhere; *runs* on Linux with `/dev/kvm`,
 //!   against the assets `guest/fc-rootfs/build.sh` produces.
 //! - **`Network`**: not offered. A call carrying it fails as a `ToolError`
 //!   outcome the model reacts to (agent spec §5.4), and a profile that names
@@ -59,12 +58,6 @@
 mod compute;
 #[cfg(feature = "firecracker")]
 mod firecracker;
-// Gated on `native`, not `workspace`: the container's name is the only thing that
-// needs a filesystem-safe session id, and `native` implies `workspace` anyway. The
-// wider gate left the module compiled with no caller on the default feature set,
-// which `-D warnings` rejects as dead code.
-#[cfg(feature = "native")]
-mod ids;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "workspace")]

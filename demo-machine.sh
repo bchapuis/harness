@@ -237,6 +237,10 @@ cat <<EOF
 
     ssh $SSH_OPTS -p $DOOR_BASE alice@127.0.0.1
 
+  A door serves only the machines its own node leads (machine §5.1): if it
+  answers "led by node-2", use port $((DOOR_BASE + 1)); "led by node-3",
+  port $((DOOR_BASE + 2)).
+
   Write something into the rootfs: a file in /root, a user, a config. Then
   disconnect and reconnect: it is still there. That is the disk facet, not a
   container layer. Note the guest has NO network in this demo: egress needs the
@@ -266,6 +270,10 @@ cat <<EOF
   is the machine's own journaled identity:
 
     ssh $SSH_OPTS -p $DOOR_BASE alice@127.0.0.1
+
+  A door serves only the machines its own node leads (machine §5.1): if it
+  answers "led by node-2", use port $((DOOR_BASE + 1)); "led by node-3",
+  port $((DOOR_BASE + 2)).
 
   Write something into the rootfs: a file in /root, a user, a config. Then
   disconnect and reconnect: it is still there. That is the disk facet, not a

@@ -29,7 +29,8 @@ machines").
 
 Each `node` process is a full cluster member: a TCP transport on loopback, a
 static three-node roster with the SWIM failure detector running observe-only,
-and one node's agent runtime, its host actor, its session actors, and the three seams:
+and one node's agent runtime, its host actor, its session actors, the two seams
+(model, sandbox; agent §12.1), and the entity's journal:
 
 - **Model**: the Anthropic Messages API (`agent-anthropic`), over a small
   tokio/rustls HTTP client.
@@ -44,8 +45,9 @@ and one node's agent runtime, its host actor, its session actors, and the three 
   `--data/workspaces/<node-id>/`, keyed by the entity, where the `shell` tool
   runs.
 
-Sessions are placed by rendezvous hashing over the members every node currently
-considers serving. The gateway holds an `EntityRef` per session and the transport
+A session's name hashes to a shard; the consensus-agreed shard map names the
+shard's replicas, and the session activates on the shard's current leader
+(agent §7.2). The gateway holds an `EntityRef` per session and the transport
 routes each `ask` to the session's current owner, so the gateway addresses any
 session whichever node hosts it.
 
@@ -160,7 +162,7 @@ The gateway is the public edge. It joins the same cluster as a non-voting client
 agent-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
 ```
 
-It logs `[gateway 100] joined the cluster (client of nodes 1..=3)` as soon as it
+It logs `[gateway node-100] joined the cluster (client of nodes 1..=3)` as soon as it
 is on the transport, before it has discovered anything. Discovery finishes later,
 and the line that says so is `gateway listening on 127.0.0.1:8080`: the HTTP
 listener is bound only after a host gateway has been resolved through the
@@ -368,7 +370,7 @@ agent-gateway [options]                  # the public HTTP edge
 | `--sandbox-image <r>` | none                       | container image for `--sandbox docker` (required there); agree everywhere |
 | `--container-cli <c>` | `docker`                | the container CLI binary (podman's compatible CLI works) |
 | `--fc-binary <path>` | `firecracker`            | the VMM executable for `--sandbox firecracker` |
-| `--fc-kernel <path>` | none                        | vmlinux for `--sandbox firecracker` (required there); agree everywhere |
+| `--fc-kernel <path>` | none                        | vmlinux for `--sandbox firecracker` (required there); a node-local asset outside the kind digest, so keep it the same on every node by convention |
 | `--fc-rootfs <path>` | none                        | base rootfs with `/sbin/fc-agent` (required there); agree everywhere |
 
 Environment: `ANTHROPIC_API_KEY` (required by `node`).

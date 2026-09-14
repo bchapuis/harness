@@ -79,7 +79,8 @@ pub enum SandboxMode {
     Firecracker {
         /// The firecracker executable.
         binary: String,
-        /// The vmlinux kernel; digest-covered via the kind digest's profile.
+        /// The vmlinux kernel: a node-local VMM asset, not digest-covered;
+        /// only the rootfs travels in the profile as `image`.
         kernel: String,
         /// The base rootfs (ext4, containing `/sbin/fc-agent`); digest-covered
         /// as the profile image.
@@ -92,8 +93,9 @@ pub enum SandboxMode {
 
 /// Everything `node` takes from the command line. The defaults make
 /// `node --id N --sandbox <mode>` enough for the three-node local
-/// deployment: the sandbox is the one choice without a default, because
-/// the unconfined mode must never be reached by omission.
+/// deployment: the sandbox is the one choice without a default, so that a
+/// deployment names its confinement grade explicitly and every node agrees
+/// on the digest.
 #[derive(Clone, Debug)]
 pub struct NodeOptions {
     /// This node's id, `1..=nodes`. Required.

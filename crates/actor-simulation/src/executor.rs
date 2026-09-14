@@ -338,14 +338,11 @@ impl Simulation {
     /// Drive the runtime for `dur` of virtual time, then stop, even if tasks or
     /// timers remain. Needed for perpetual workloads: a failure detector probes
     /// forever and so never quiesces.
+    ///
+    /// Every event due at or before the limit is processed, then the clock is
+    /// advanced to the limit itself.
     pub fn run_for(&self, dur: Duration) {
         let limit = self.now() + dur;
-        self.run_until(limit);
-    }
-
-    /// Drive the runtime until virtual time reaches `limit`, processing every
-    /// event due at or before it, then advance the clock to `limit`.
-    pub fn run_until(&self, limit: Instant) {
         loop {
             while let Some(id) = self.take_ready() {
                 self.poll_task(id);

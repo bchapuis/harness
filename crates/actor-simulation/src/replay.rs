@@ -24,6 +24,10 @@ use crate::workload::drive_local;
 
 /// The first point at which two same-seed runs disagreed (spec §18.1 #1). A
 /// `None` event means that run's stream ended first.
+///
+/// A sweep also reports a workload that panicked while being recorded as one of
+/// these, so a soak attributes the panic to its seed and carries on: `detail`
+/// then carries the panic message, and there are no events to show.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Divergence {
     /// The name of the workload that diverged.
@@ -40,10 +44,20 @@ pub struct Divergence {
     /// The total length of each run's stream.
     pub left_len: usize,
     pub right_len: usize,
+    /// The panic message, when the workload panicked under this seed instead
+    /// of producing two streams to compare.
+    pub detail: Option<String>,
 }
 
 impl std::fmt::Display for Divergence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(detail) = &self.detail {
+            return write!(
+                f,
+                "workload '{}' panicked at seed {} while being recorded: {detail}",
+                self.workload, self.seed
+            );
+        }
         write!(
             f,
             "workload '{}' is non-deterministic at seed {}: event streams of \
@@ -88,7 +102,32 @@ fn first_divergence(
             right: right.get(index).cloned(),
             left_len: left.len(),
             right_len: right.len(),
+            detail: None,
         })
+}
+
+/// Check one seed, turning a panic into a [`Divergence`] against that seed (see
+/// [`caught`](crate::workload::caught) for the invariant sweeps' twin): a
+/// workload that asserts inside `drive` names no seed on its own, and an
+/// uncaught panic would end a collecting sweep at that seed.
+fn caught_divergence(
+    workload: &'static str,
+    seed: u64,
+    check: impl FnOnce() -> Result<(), Box<Divergence>>,
+) -> Result<(), Box<Divergence>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)) {
+        Ok(result) => result,
+        Err(payload) => Err(Box::new(Divergence {
+            workload,
+            seed,
+            index: 0,
+            left: None,
+            right: None,
+            left_len: 0,
+            right_len: 0,
+            detail: Some(crate::workload::panic_detail(payload.as_ref())),
+        })),
+    }
 }
 
 /// Run a workload twice under one seed and diff the two event streams, reporting
@@ -109,26 +148,27 @@ fn check_twice(
 }
 
 /// Sweep a per-seed determinism check across many seeds, stopping at the first
-/// divergence, or, under
-/// [`collect_all_failures`](crate::collect_all_failures), running to the end and
-/// reporting every seed that diverged. The standing reproducibility corpus
-/// (spec §18.6).
+/// divergence, or, when `collect`, running to the end and reporting every seed
+/// that diverged or panicked. The standing reproducibility corpus (spec §18.6).
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run ahead of
 /// `seeds`, exactly as they do for an invariant sweep: a seed that once broke
-/// determinism is checked on every run, however narrow the sweep.
+/// determinism is checked on every run, however narrow the sweep. `collect` is
+/// a parameter so the loop is a pure function of its inputs; the public runners
+/// read the environment once, at the edge.
 fn sweep(
-    workload: &str,
+    workload: &'static str,
     seeds: impl IntoIterator<Item = u64>,
+    collect: bool,
     mut check: impl FnMut(u64) -> Result<(), Box<Divergence>>,
 ) -> Result<(), Box<SweepDivergence>> {
-    let (seeds_run, divergences) = crate::sweep::sweep_generic(
+    let (seeds_run, divergences) = crate::sweep::sweep_generic::<Box<Divergence>>(
         crate::corpus::regression_seeds(workload).chain(seeds),
-        crate::sweep::collect_all_failures(),
+        collect,
         |divergence| divergence.seed,
         // Swept boxed (the per-seed result stays thin), and unboxed only on
         // the cold path below, where divergence is already the whole story.
-        &mut check,
+        |seed| caught_divergence(workload, seed, || check(seed)),
     );
     if divergences.is_empty() {
         Ok(())
@@ -182,7 +222,7 @@ impl std::fmt::Debug for SweepDivergence {
 }
 
 /// Record the event stream of a single-node workload run under `seed`.
-pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
+pub(crate) fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
     let recorder = Recorder::new();
     drive_local(workload, seed, Arc::new(recorder.clone()));
     recorder.events()
@@ -203,7 +243,12 @@ pub fn replay_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<SweepDivergence>> {
-    sweep(workload.name(), seeds, |s| check_reproducible(workload, s))
+    sweep(
+        workload.name(),
+        seeds,
+        crate::sweep::collect_all_failures(),
+        |s| check_reproducible(workload, s),
+    )
 }
 
 /// Record the event stream of a cluster workload run under `seed`. The cluster
@@ -232,9 +277,12 @@ pub fn replay_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<SweepDivergence>> {
-    sweep(workload.name(), seeds, |s| {
-        check_cluster_reproducible(workload, s)
-    })
+    sweep(
+        workload.name(),
+        seeds,
+        crate::sweep::collect_all_failures(),
+        |s| check_cluster_reproducible(workload, s),
+    )
 }
 
 #[cfg(test)]
@@ -275,5 +323,25 @@ mod tests {
         assert_eq!(d.left, Some(ev(1)));
         assert_eq!(d.right, None);
         assert_eq!((d.left_len, d.right_len), (2, 1));
+    }
+
+    #[test]
+    fn a_panicking_seed_is_caught_and_named() {
+        let failure = sweep("w", 0..4, true, |seed| {
+            assert_ne!(seed, 2, "the workload asserted");
+            Ok(())
+        })
+        .expect_err("seed 2 panics");
+        assert_eq!(failure.seeds_run, 4, "a panic does not end the sweep");
+        let [only] = failure.divergences.as_slice() else {
+            panic!("one seed panicked: {failure}");
+        };
+        assert_eq!(only.seed, 2);
+        assert_eq!((only.left.as_ref(), only.right.as_ref()), (None, None));
+        let report = only.to_string();
+        assert!(
+            report.contains("panicked at seed 2") && report.contains("the workload asserted"),
+            "the panic message is kept: {report}"
+        );
     }
 }

@@ -12,14 +12,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-actor-core.workspace = true
 entity.workspace = true
-machine-entity.workspace = true
 machine-proto.workspace = true
 machine-host.workspace = true
 russh.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "sync"] }
-serde_json.workspace = true
 bytes.workspace = true
 
 [dev-dependencies]
