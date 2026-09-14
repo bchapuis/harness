@@ -30,6 +30,15 @@
 //! Everything else in backticks (flags, paths, shell, JSON, prose in code voice)
 //! is left alone.
 //!
+//! A fenced ```` ```rust ```` block is read as code rather than prose. Its
+//! own declarations are in scope (an example's `struct Account` is not a claim
+//! about the tree), and every other type-like name, `Foo::bar` path, and
+//! `foo(...)` call in it is held to the index the same way a backticked token
+//! is. Comments, string literals, attributes, macro names, and method calls
+//! after a `.` are skipped: the first three are prose, and the last two are
+//! mostly `std`'s. Other fence languages are diagrams and shell, and stay
+//! prose.
+//!
 //! # Why there is an exemption list, and why it cannot rot
 //!
 //! Some names a spec uses are correct and will never be in the index. They come in
@@ -115,6 +124,37 @@ pub const EXEMPT: &[Exempt] = &[
     e("Eq", Why::Elsewhere, "std, a derive"),
     e("Hash", Why::Elsewhere, "std, a derive"),
     e("Send", Why::Elsewhere, "std, an auto trait"),
+    // The rest of `std` the rust fences spell out: bounds, closures, futures,
+    // and `Duration`'s constructors in the config examples.
+    e("Sized", Why::Elsewhere, "std, a bound in the trait fences"),
+    e("Ord", Why::Elsewhere, "std, a bound on a workflow key"),
+    e("From", Why::Elsewhere, "std, a bound on `ask_flat`'s error"),
+    e("Fn", Why::Elsewhere, "std, a closure bound"),
+    e("FnMut", Why::Elsewhere, "std, a closure bound"),
+    e("FnOnce", Why::Elsewhere, "std, a closure bound"),
+    e("Future", Why::Elsewhere, "std, the seams' return type"),
+    e("Item", Why::Elsewhere, "std, `Stream`'s associated type"),
+    e("Range", Why::Elsewhere, "std, a blob `get`'s byte range"),
+    e(
+        "PhantomData",
+        Why::Elsewhere,
+        "std, in the receptionist `Key`",
+    ),
+    e(
+        "Duration::from_secs",
+        Why::Elsewhere,
+        "std, in the config examples",
+    ),
+    e(
+        "Duration::from_millis",
+        Why::Elsewhere,
+        "std, in the config examples",
+    ),
+    e(
+        "DeserializeOwned",
+        Why::Elsewhere,
+        "serde, the serialization requirement's bound",
+    ),
     e(
         "InvalidData",
         Why::Elsewhere,
@@ -401,7 +441,28 @@ pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| io::Error::new(e.kind(), format!("reading {}: {e}", path.display())))?;
 
+        // A rust fence is collected whole before it is checked, because an
+        // example may use a name above the line that declares it.
+        let mut rust_block: Option<Vec<(usize, &str)>> = None;
+        let mut other_fence = false;
         for (n, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                if let Some(block) = rust_block.take() {
+                    code_block(doc.id, &block, &exempt, index, &mut out);
+                } else if other_fence {
+                    other_fence = false;
+                } else if trimmed.trim_start_matches('`').trim() == "rust" {
+                    rust_block = Some(Vec::new());
+                } else {
+                    other_fence = true;
+                }
+                continue;
+            }
+            if let Some(block) = rust_block.as_mut() {
+                block.push((n + 1, line));
+                continue;
+            }
             for token in backticked(line) {
                 let Some((token, name)) = claimed(token) else {
                     continue;
@@ -420,6 +481,135 @@ pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
         }
     }
     Ok(out)
+}
+
+/// Check one ```` ```rust ```` block: every name it uses is one it declares
+/// itself, an exemption, or a name the tree declares.
+fn code_block(
+    from: &'static str,
+    lines: &[(usize, &str)],
+    exempt: &BTreeSet<&str>,
+    index: &Index,
+    out: &mut Vec<Unknown>,
+) {
+    let text = lines.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
+    let mut local = BTreeSet::new();
+    harvest(&text, &mut local);
+    let mut in_comment = false;
+    for (n, line) in lines {
+        let code = code_only(line, &mut in_comment);
+        for (token, name) in code_claims(&code) {
+            if local.contains(name)
+                || exempt.contains(token)
+                || exempt.contains(name)
+                || index.contains(name)
+            {
+                continue;
+            }
+            out.push(Unknown {
+                from,
+                line: *n,
+                token: token.to_string(),
+                looked_up: name.to_string(),
+                quote: quote_near(line, token),
+            });
+        }
+    }
+}
+
+/// `line` with its string literals, its comments, and any attribute removed:
+/// the parts of a code line that are prose, not names. `in_comment` carries a
+/// `/* … */` comment across lines.
+fn code_only(line: &str, in_comment: &mut bool) -> String {
+    if line.trim_start().starts_with("#[") {
+        return String::new();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if *in_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                *in_comment = false;
+                out.push(' ');
+            }
+            continue;
+        }
+        match c {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                *in_comment = true;
+            }
+            '"' => {
+                // Skip to the closing quote, honouring a backslash escape.
+                while let Some(d) = chars.next() {
+                    if d == '\\' {
+                        chars.next();
+                    } else if d == '"' {
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            '/' if chars.peek() == Some(&'/') => break,
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The names one line of code claims: each `(token, looked up)` pair, in the
+/// vocabulary of [`claimed`].
+///
+/// A token is a maximal run of identifier characters and `::`. A method call
+/// (`x.foo(`) and a macro (`foo!`) are skipped; so is a lifetime. A path is
+/// checked segment by segment: each type-like segment on its own, and a
+/// lowercase segment that follows a type (`ReadReply::head`) or ends a call
+/// (`wal::checksum(`) as a member or a function.
+fn code_claims(code: &str) -> Vec<(&str, &str)> {
+    let mut claims = Vec::new();
+    let bytes = code.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if !(c.is_ascii_alphabetic() || c == '_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_ascii_alphanumeric() || c == '_' {
+                i += 1;
+            } else if code[i..].starts_with("::") {
+                i += 2;
+            } else {
+                break;
+            }
+        }
+        let token = code[start..i].trim_end_matches("::");
+        let before = code[..start].chars().next_back();
+        let after = code[i..].chars().next();
+        if matches!(before, Some('.' | '\'')) || after == Some('!') {
+            continue;
+        }
+        let called = after == Some('(');
+        let segments: Vec<&str> = token.split("::").filter(|s| !s.is_empty()).collect();
+        for (k, segment) in segments.iter().enumerate() {
+            let type_like = segment.len() >= 2
+                && segment.starts_with(|c: char| c.is_ascii_uppercase())
+                && segment.chars().all(|c| c.is_ascii_alphanumeric());
+            let after_type = k > 0
+                && segments[k - 1].starts_with(|c: char| c.is_ascii_uppercase())
+                && segments[k - 1].len() >= 2;
+            let last = k + 1 == segments.len();
+            let lowercase = segment.starts_with(|c: char| c.is_ascii_lowercase() || c == '_');
+            if type_like || (lowercase && (after_type || (last && called))) {
+                claims.push((token, *segment));
+            }
+        }
+    }
+    claims
 }
 
 /// Exemptions the tree has started to define, so their reason no longer holds.
@@ -543,10 +733,7 @@ mod tests {
 
     #[test]
     fn a_crate_path_is_checked_on_its_type() {
-        assert_eq!(
-            claimed("compat::Stamp"),
-            Some(("compat::Stamp", "Stamp"))
-        );
+        assert_eq!(claimed("compat::Stamp"), Some(("compat::Stamp", "Stamp")));
     }
 
     #[test]
@@ -569,6 +756,91 @@ mod tests {
         ] {
             assert_eq!(claimed(token), None, "{token:?} is not an identifier claim");
         }
+    }
+
+    #[test]
+    fn a_code_line_keeps_its_names_and_drops_its_prose() {
+        let mut in_comment = false;
+        let code = code_only(
+            r#"let id = BlobId::of(b"GRSNAP"); // a comment naming `Missing`"#,
+            &mut in_comment,
+        );
+        assert_eq!(code, "let id = BlobId::of(b ); ");
+        assert!(code_only("#[derive(Debug, Clone)]", &mut in_comment).is_empty());
+
+        let code = code_only("x /* the SAME TurnId", &mut in_comment);
+        assert_eq!(code, "x ");
+        assert!(in_comment);
+        let code = code_only("across lines */ Seq::ZERO", &mut in_comment);
+        assert_eq!(code, "  Seq::ZERO");
+        assert!(!in_comment);
+    }
+
+    #[test]
+    fn a_code_line_claims_types_paths_and_calls() {
+        let claims = code_claims("fn fold(state: &mut Balance, e: &Ledger) -> Seq");
+        assert_eq!(
+            claims,
+            vec![
+                ("fold", "fold"),
+                ("Balance", "Balance"),
+                ("Ledger", "Ledger"),
+                ("Seq", "Seq")
+            ],
+        );
+        assert_eq!(
+            code_claims("ReadReply::head(Duration::from_secs(2))"),
+            vec![
+                ("ReadReply::head", "ReadReply"),
+                ("ReadReply::head", "head"),
+                ("Duration::from_secs", "Duration"),
+                ("Duration::from_secs", "from_secs"),
+            ],
+        );
+        assert_eq!(
+            code_claims("wal::checksum(&bytes)"),
+            vec![("wal::checksum", "checksum")]
+        );
+        assert_eq!(
+            code_claims("actor_core::Event::Undelivered"),
+            vec![
+                ("actor_core::Event::Undelivered", "Event"),
+                ("actor_core::Event::Undelivered", "Undelivered"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_code_line_skips_methods_macros_generics_and_lifetimes() {
+        assert_eq!(
+            code_claims("assert_eq!(x.clone().len(), 'a T)"),
+            Vec::<(&str, &str)>::new()
+        );
+        assert_eq!(code_claims("let bytes = ctx.blobs().get(&id)"), vec![]);
+        assert_eq!(
+            code_claims("impl<S: EntitySystem> Foo<S>"),
+            vec![("EntitySystem", "EntitySystem"), ("Foo", "Foo")]
+        );
+    }
+
+    #[test]
+    fn a_rust_fence_declares_its_own_names_and_claims_the_rest() {
+        let index = indexed("pub struct ClusterSystem;\n");
+        let exempt: BTreeSet<&str> = ["Option"].into_iter().collect();
+        let block = [
+            (1, "struct Account { cents: i64 }"),
+            (2, "impl Entity for Account {"),
+            (3, "    type System = ClusterSystem;"),
+            (
+                4,
+                "    type State = Option<Balance>; // Balance is declared nowhere",
+            ),
+            (5, "}"),
+        ];
+        let mut out = Vec::new();
+        code_block("test", &block, &exempt, &index, &mut out);
+        let unknown: Vec<(usize, &str)> = out.iter().map(|u| (u.line, u.token.as_str())).collect();
+        assert_eq!(unknown, vec![(2, "Entity"), (4, "Balance")]);
     }
 
     #[test]

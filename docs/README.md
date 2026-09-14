@@ -80,7 +80,7 @@ ahead of every tick.
   - **citations**: every `§N` reference, two thousand-odd of them, resolves to a section that exists;
   - **catalogues**: each spec's invariant table is held equal to the Rust copy its crate's `conformance_catalogue.rs` compares it against, section numbers and "Verified by" included;
   - **ranges**: a cited extent such as `E1–E21` reaches no further than the catalogue it names, and across the set some range reaches each catalogue's last invariant, so a catalogue that grows is caught;
-  - **identifiers**: every backticked name of a shape the tree would own exists somewhere under `crates/`, with the listed exemptions checked in the other direction too.
+  - **identifiers**: every backticked name of a shape the tree would own, and every name a ```rust fence uses without declaring, exists somewhere under `crates/`, with the listed exemptions checked in the other direction too.
 - [simulation-testing](simulation-testing.md), the whole verification story:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression

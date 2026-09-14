@@ -244,7 +244,7 @@ let id = blobs.put(&ws, block.to_vec()).await?;   // Ok(BlobId) once W copies ar
 
 // --- Fetch and verify (§4); identical call site on any tier ---
 match blobs.get(&ws, &id, None).await {
-    Ok(bytes)                      => assert_eq!(blake3(&bytes), id),   // B1 holds by construction
+    Ok(bytes)                      => assert_eq!(BlobId::of(&bytes), id), // B1 holds by construction
     Err(BlobError::Unavailable(_)) => { /* fewer than the needed copies reachable; retry/failover */ }
     Err(BlobError::Corrupt(_))     => { /* every reachable copy failed verification: data loss */ }
     Err(BlobError::Deleted(_))     => { /* the namespace has been deleted (§5.3) */ }

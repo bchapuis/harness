@@ -12,8 +12,9 @@
 //!   layered so that each cites the ones beneath it, which makes the citation the
 //!   load-bearing part of the layering rather than a convenience.
 //! - [`identifiers`]: a backticked `EntityHandler` or `load_snapshot()` still
-//!   names something the tree declares. The same failure one level down: a rename
-//!   moves the code and leaves the prose behind.
+//!   names something the tree declares, and so does every name a rust fence uses
+//!   without declaring it. The same failure one level down: a rename moves the
+//!   code and leaves the prose behind.
 //! - [`catalogue`]: a spec's invariant table and the Rust copy beside the suite
 //!   that verifies it agree on which invariants exist, where they are defined, and
 //!   what verifies them. Two hand-maintained copies of one fact, previously
