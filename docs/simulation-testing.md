@@ -222,21 +222,6 @@ quietly shrunk the cluster rather than faulted it. A consenting workload also
 bounds its calls (`ask_timeout`) and keeps no long-lived handle on a node other
 than the first, which the nemesis never restarts.
 
-An **upgrade** joins it on the same terms, for a workload that returns a
-`Rollout` from `ClusterWorkload::rollout`: a list of releases, oldest first, that
-the nemesis walks one node one step at a time, forward or back, so a run is a
-rolling upgrade with rollbacks rather than an arbitrary mix of windows. Because a
-release is a process replacement, an upgrade also restarts the node wherever
-restarts are allowed, which is everywhere but the first node. There the window
-moves under the running process instead, the weaker model, and the reason a
-workload can still drive traffic from node one while its own revision changes.
-
-A `Rollout` is validated when it is built, not when it runs: adjacent releases
-must share a revision (**V2**) and each must accept what its neighbour writes
-(**V4** forward, **V5** back). An invalid sequence is a rollout no operator could
-perform, so it panics at construction rather than failing a sweep for a reason
-that has nothing to do with the workload.
-
 Restart ends the old process for real: its scheduler domain is retired, so none
 of its tasks is ever polled again. That leaves brackets open (an actor stopped
 between `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
@@ -664,12 +649,11 @@ crate wants one, it has become a contract claim and moves up a tier.
 inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
-above: the wal (L1–L5), entity (E1–E21, plus the facet contract F1–F4), the
+above: the wal (L1–L4), entity (E1–E21, plus the facet contract F1–F4), the
 workflow (W1–W7), the agent (A1–A8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
-(B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
-drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5
-are policy, held by the golden corpus and the mixed-version sweep (compatibility
-§4). Assert them; do not re-derive them.
+(B1–B7). Format compatibility (V1–V2) is the one catalogue with no Rust copy to
+drift from: each format's own tests hold its stamp to them (compatibility §3).
+Assert them; do not re-derive them.
 
 The core catalogue's properties are framework ones, not database ones: there is
 no durability, serializability, or lost-update notion at that layer (the actor

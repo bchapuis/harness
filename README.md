@@ -144,7 +144,7 @@ the guides, and the testing conventions. The paths worth taking first:
 - [docs/wal-spec.md](docs/wal-spec.md): the framed, checksummed write-ahead log
   primitive for file-backed durable stores.
 - [docs/compatibility-spec.md](docs/compatibility-spec.md): how a format says
-  which revision it is, and why a skew is a refusal rather than a misparse.
+  which version it is, and why a skew is a refusal rather than a misparse.
 - [docs/simulation-testing.md](docs/simulation-testing.md): how the deterministic
   simulation earns the claims above.
 - [design-principles.md](design-principles.md): the rubric the specs were written

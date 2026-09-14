@@ -150,8 +150,7 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
         assert!(
             // Read the way the apply path reads (`ClusterSystem::apply_membership_commits`):
             // `admit` takes the stamped payload a commit actually writes, where `decode`
-            // takes only the unstamped predecessor and reads the stamp's first byte as a
-            // tag it has never heard of.
+            // takes only the body behind the stamp.
             persisted.log.iter().any(|e| matches!(
                 &e.payload,
                 EntryPayload::App(bytes)

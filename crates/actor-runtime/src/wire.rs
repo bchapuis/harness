@@ -18,7 +18,7 @@ use actor_core::NodeId;
 use actor_serialization::Codec;
 use actor_serialization::decode;
 use actor_serialization::encode;
-use compat::Accepted;
+use compat::Version;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -31,17 +31,13 @@ use tokio::io::AsyncWriteExt;
 /// a huge buffer (spec §7, §15).
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
-/// The association handshake preamble (spec §7.1): the wire revisions the sender
-/// accepts, its node identity and the address peers should dial it back on, the
+/// The association handshake preamble (spec §7.1): the wire version the sender
+/// speaks, its node identity and the address peers should dial it back on, the
 /// codec it speaks, and a shared cluster secret. The receiver rejects the
 /// association on any mismatch (§7, §15) and learns the advertised address.
-///
-/// `accepts` is a *range*, not the single version this build speaks: two builds
-/// settle on the highest revision both accept (`compat::Window::negotiate`). See
-/// [`WIRE`](crate::WIRE) for the release ordering that requires (**V4**).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
-    pub accepts: Accepted,
+    pub version: Version,
     pub node: NodeId,
     pub advertised: SocketAddr,
     pub codec_name: String,
@@ -114,7 +110,7 @@ where
 }
 
 /// Write the handshake preamble. Always JSON-framed independent of the
-/// negotiated codec: neither the codec nor the wire revision is settled yet, so
+/// configured codec: neither the codec nor the wire version is checked yet, so
 /// the preamble cannot depend on either.
 pub async fn write_hello<W>(stream: &mut W, hello: &Hello) -> io::Result<()>
 where
@@ -187,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn hello_round_trips() {
         let hello = Hello {
-            accepts: Accepted::new(1, 2),
+            version: Version(1),
             node: NodeId::new(3),
             advertised: "127.0.0.1:9003".parse().unwrap(),
             codec_name: "json".to_string(),
@@ -200,7 +196,7 @@ mod tests {
         assert_eq!(got.advertised, hello.advertised);
         assert_eq!(got.codec_name, "json");
         assert_eq!(got.cluster_secret, "s3cr3t");
-        assert_eq!(got.accepts, Accepted::new(1, 2));
+        assert_eq!(got.version, Version(1));
     }
 
     #[tokio::test]
@@ -214,54 +210,5 @@ mod tests {
         a.flush().await.unwrap();
         let err = read_wire(&mut b, &JsonCodec).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    // --- Golden corpus (compatibility spec §4) --------------------------------
-
-    /// The corpus `Hello`, and it must never change: the checked-in bytes *are*
-    /// this value. A preamble that changed shape would refuse every peer running
-    /// the previous release, so this fixture is what a build must still read to
-    /// have any hope of a rolling upgrade.
-    fn corpus_hello() -> Hello {
-        Hello {
-            accepts: Accepted::new(1, 1),
-            node: NodeId::new(7),
-            advertised: "10.0.0.7:7946".parse().expect("a literal address"),
-            codec_name: "json".to_string(),
-            cluster_secret: "corpus".to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn actor_wire_v1_hello_still_reads_and_negotiates() {
-        let produced = {
-            let mut buf = Vec::new();
-            write_hello(&mut buf, &corpus_hello())
-                .await
-                .expect("write the corpus preamble");
-            buf
-        };
-        let bytes = crate::corpus::golden("actor.wire", 1, || produced);
-
-        let mut cursor = std::io::Cursor::new(bytes);
-        let got = read_hello(&mut cursor)
-            .await
-            .expect("this build must read an actor.wire v1 preamble it accepts");
-
-        let want = corpus_hello();
-        assert_eq!(got.accepts, want.accepts, "the announced range moved");
-        assert_eq!(got.node, want.node);
-        assert_eq!(got.advertised, want.advertised);
-        assert_eq!(got.codec_name, want.codec_name);
-        assert_eq!(got.cluster_secret, want.cluster_secret);
-
-        // Reading the preamble is only half of it: the range it announces must
-        // still settle against this build's window, or the peer is refused after a
-        // successful decode.
-        assert_eq!(
-            crate::transport::WIRE.negotiate(got.accepts),
-            Ok(compat::Version(1)),
-            "a v1 peer must still negotiate against this build's window",
-        );
     }
 }

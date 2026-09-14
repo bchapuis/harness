@@ -24,9 +24,9 @@
 //! cannot survive losing that node's disk.
 //!
 //! A tombstone file is a stamped durable format, `blob.tombstone` (compatibility
-//! §3), and the reader also accepts the unstamped predecessor. The blob files
-//! themselves are not stamped and must not be: their name *is* the BLAKE3 hash of
-//! their bytes, so a prefix would make `verify` refuse what it wrote.
+//! §3). The blob files themselves are not stamped and must not be: their name *is*
+//! the BLAKE3 hash of their bytes, so a prefix would make `verify` refuse what it
+//! wrote.
 
 use std::fs;
 use std::future::Future;
@@ -48,16 +48,11 @@ use crate::blob::verify;
 
 /// The tombstone file (compatibility §3, `blob.tombstone`): a `wal::Sidecar`
 /// (wal §5) carrying the deletion stamp, the same shape as the entity store's
-/// fence and seal files. Revision 1 implements no extension keys.
-///
-/// `BSTOMB` cannot be confused with the unstamped predecessor by length alone
-/// (that form is exactly 16 bytes, and a stamped record is longer), but the magic
-/// is what lets the reader say so without depending on a width that a later
-/// revision may change.
-const TOMBSTONE: wal::Sidecar = wal::Sidecar::new(
-    compat::Stamp::new(b"BSTOMB", compat::Window::at("blob.tombstone", 1)),
-    &[],
-);
+/// fence and seal files.
+const TOMBSTONE: wal::Sidecar = wal::Sidecar::new(compat::Stamp::new(
+    b"BSTOMB",
+    compat::Format::new("blob.tombstone", 1),
+));
 
 /// A single-node, on-disk content-addressed store (spec §5.1).
 ///
@@ -213,9 +208,8 @@ impl LocalBlobStore {
     ///
     /// # Errors
     ///
-    /// The bytes are neither a stamped record this build accepts nor the unstamped
-    /// predecessor: a format skew or bit-rot, which is reported rather than read
-    /// as an absent tombstone.
+    /// The bytes are not a stamped record this build accepts: a format skew or
+    /// bit-rot, which is reported rather than read as an absent tombstone.
     ///
     /// [`TombstoneSet`]: crate::tombstone::TombstoneSet
     pub fn tombstoned_at(&self, ns: &Namespace) -> io::Result<Option<u64>> {
@@ -425,54 +419,28 @@ mod tests {
         assert_eq!(block_on(store.has(&ns, &id)), Ok(true));
     }
 
-    /// The `blob.tombstone` fixture still decodes to the stamp it recorded
-    /// (compatibility §4). A `postcard` body is positional, so a field added to
-    /// the sidecar body or two of them reordered compiles cleanly and silently
-    /// changes what every stored record means; nothing else in this crate (which
-    /// has no in-tree consumer) would notice.
     #[test]
-    fn blob_tombstone_v1_still_reads_its_stamp() {
+    fn a_tombstone_round_trips_through_its_file() {
         let (_dir, store) = store();
         let ns = ns();
-        let bytes = crate::corpus::golden("blob.tombstone", 1, || TOMBSTONE.encode(9));
-
         let path = store.inner.tombstones.join(ns.to_string());
-        fs::write(&path, &bytes).expect("stage the fixture");
+        fs::write(&path, TOMBSTONE.encode(9)).expect("stage a record");
 
         assert!(store.is_tombstoned(&ns));
         assert_eq!(store.tombstoned_at(&ns).expect("decode"), Some(9));
     }
 
-    /// A tombstone written before this format carried a stamp is *adopted*: read
-    /// by its own decoder rather than refused. The alternative would make the
-    /// stamp a migration for every existing store, which is the opposite of what
-    /// a stamp is for.
+    /// A record carrying the magic is *this* format, so another version is refused
+    /// by name (**V2**) instead of being decoded.
     #[test]
-    fn an_unstamped_tombstone_is_adopted_rather_than_refused() {
-        let (_dir, store) = store();
-        let ns = ns();
-        let mut legacy = [0u8; 16];
-        legacy[..8].copy_from_slice(&42u64.to_le_bytes());
-        legacy[8..].copy_from_slice(&wal::checksum(&42u64.to_le_bytes()).to_le_bytes());
-
-        let path = store.inner.tombstones.join(ns.to_string());
-        fs::write(&path, legacy).expect("stage a legacy record");
-
-        assert_eq!(store.tombstoned_at(&ns).expect("decode"), Some(42));
-    }
-
-    /// A record carrying the magic is *this* format, so a revision outside the
-    /// window is refused by name (**V2**) instead of being handed to the older
-    /// decoder: the misparse `is_stamped` exists to prevent.
-    #[test]
-    fn a_tombstone_from_another_revision_is_refused_rather_than_adopted() {
+    fn a_tombstone_from_another_version_is_refused_by_name() {
         let (_dir, store) = store();
         let ns = ns();
         let mut bytes = TOMBSTONE.encode(9);
         bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
 
         let path = store.inner.tombstones.join(ns.to_string());
-        fs::write(&path, &bytes).expect("stage a future revision");
+        fs::write(&path, &bytes).expect("stage another version");
 
         let err = store
             .tombstoned_at(&ns)
@@ -481,7 +449,7 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("blob.tombstone") && message.contains("v9"),
-            "the refusal names the boundary and what it found: {message}"
+            "the refusal names the format and what it found: {message}"
         );
     }
 

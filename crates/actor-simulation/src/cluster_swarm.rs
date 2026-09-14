@@ -2,7 +2,7 @@
 //!
 //! Runs a [`ClusterWorkload`] over a multi-node [`SimNetwork`] while a seeded
 //! [`Nemesis`](nemesis) injects partitions (symmetric and one-way), crashes,
-//! process freezes, restarts, rolling upgrades, and heals, and a
+//! process freezes, restarts, and heals, and a
 //! [`Checker`](crate::Checker) watches the event stream. Each run is bounded in
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
@@ -105,80 +105,6 @@ impl ClusterCtx {
 /// outlives the borrow of the workload that produced it.
 pub type Rehost = Arc<dyn Fn(&SimNode) + Send + Sync>;
 
-/// The releases a rolling upgrade walks nodes through, oldest first (spec §18.3,
-/// compatibility §4).
-///
-/// A [`ClusterWorkload`] returning `Some` consents to the nemesis moving its
-/// nodes between these windows mid-run: one step at a time, forward or back, so
-/// a run mixes releases the way a real rollout does and reaches a rollback the
-/// same way. Every node starts at stage 0.
-///
-/// **A rollout is checked when it is built**, because a sequence that is not a
-/// legal upgrade path would fail the workload for the wrong reason. Two adjacent
-/// stages MUST share a revision (**V2**: they have to be able to associate at
-/// all), and each stage MUST accept what its neighbours *write* (**V4**, **V5**:
-/// a release only writes what every release that may still read accepts, and a
-/// retired revision stays readable). A sequence failing either is a rollout no
-/// operator could perform, and the panic says which pair and why.
-#[derive(Clone)]
-pub struct Rollout {
-    stages: Arc<Vec<compat::Window>>,
-}
-
-impl Rollout {
-    /// The rollout through `stages`, oldest release first.
-    ///
-    /// # Panics
-    ///
-    /// If fewer than two stages are given (a rollout with one release upgrades
-    /// nothing), or if some adjacent pair is not a legal step (see above).
-    pub fn new(stages: Vec<compat::Window>) -> Rollout {
-        assert!(
-            stages.len() >= 2,
-            "a rollout needs at least two releases to move between",
-        );
-        for (i, pair) in stages.windows(2).enumerate() {
-            let (older, newer) = (pair[0], pair[1]);
-            assert!(
-                older.negotiate(newer.accepted()).is_ok(),
-                "rollout stages {i} and {} share no revision, so a cluster \
-                 running both could not associate (V2): {} then {}",
-                i + 1,
-                older.accepted(),
-                newer.accepted(),
-            );
-            assert!(
-                newer.accepted().holds(older.writes()),
-                "rollout stage {} does not accept revision {} that stage {i} \
-                 writes, so upgrading cannot read what the older release wrote (V4)",
-                i + 1,
-                older.writes(),
-            );
-            assert!(
-                older.accepted().holds(newer.writes()),
-                "rollout stage {i} does not accept revision {} that stage {} \
-                 writes, so rolling back cannot read what the newer release \
-                 wrote (V5)",
-                newer.writes(),
-                i + 1,
-            );
-        }
-        Rollout {
-            stages: Arc::new(stages),
-        }
-    }
-
-    /// The window at `stage`, saturating at the newest release.
-    pub(crate) fn window(&self, stage: usize) -> compat::Window {
-        self.stages[stage.min(self.stages.len() - 1)]
-    }
-
-    /// How many releases the rollout spans.
-    pub(crate) fn len(&self) -> usize {
-        self.stages.len()
-    }
-}
-
 /// A membership-mode choice for a [`ClusterWorkload`] (spec §9.4). Declarative
 /// because the registry- and leader-based modes need per-run resources (the
 /// simulated registry, the voter set) only the driver can build.
@@ -277,25 +203,6 @@ pub trait ClusterWorkload {
         None
     }
 
-    /// The releases the nemesis may move this workload's nodes between, and, by
-    /// being `Some` at all, its consent to being run mixed-version (spec §18.3,
-    /// compatibility §4).
-    ///
-    /// Every node starts at stage 0 and moves one step at a time, so a run is a
-    /// rolling upgrade with rollbacks rather than a set of unrelated windows. A
-    /// workload that consents must tolerate its peers disagreeing about the wire
-    /// revision for the whole run: what a node may write to a given peer is
-    /// [`Transport::peer_version`](actor_cluster::Transport::peer_version), never
-    /// its own window.
-    ///
-    /// An upgrade is a **process replacement**, so it restarts the node when the
-    /// workload also consents to restarts ([`rehost`](Self::rehost)); without that
-    /// consent the window moves under the running process, which is the weaker
-    /// model but still mixes revisions.
-    fn rollout(&self) -> Option<Rollout> {
-        None
-    }
-
     /// Build actors and registrations before traffic starts.
     fn setup(&self, ctx: &ClusterCtx);
 
@@ -334,12 +241,6 @@ enum Fault {
     /// A bounded registry outage window: the "stalled, lagging, or unavailable
     /// registry sync" fault (spec §9.4.2 item 6).
     RegistryOutage,
-    /// Move one node a single step along the workload's [`Rollout`], forward or
-    /// back: the rolling upgrade, and the rollback that follows a bad one
-    /// (compatibility §4). The cluster runs mixed-version from the first step
-    /// until the last node catches up, which is the state the whole boundary
-    /// policy exists for.
-    Upgrade,
 }
 
 /// What a run may do to its nodes beyond dropping their frames (spec §18.3).
@@ -353,14 +254,12 @@ pub(crate) struct Consent {
     pub(crate) registry: Option<SimRegistry>,
     /// How to put a restarted node back to work ([`ClusterWorkload::rehost`]).
     pub(crate) rehost: Option<Rehost>,
-    /// The releases nodes may be moved between ([`ClusterWorkload::rollout`]).
-    pub(crate) rollout: Option<Rollout>,
 }
 
 /// The actions available to one run. The network-only ones (both partitions,
-/// crash, freeze, heal, quiet) are always in it; the three that touch more than
-/// the wire (an external registry, a process replacement, a release change)
-/// are gated on the run having consented to them.
+/// crash, freeze, heal, quiet) are always in it; the two that touch more than
+/// the wire (an external registry, a process replacement) are gated on the run
+/// having consented to them.
 fn vocabulary(consent: &Consent) -> Vec<Fault> {
     let mut faults = vec![
         Fault::Partition,
@@ -375,9 +274,6 @@ fn vocabulary(consent: &Consent) -> Vec<Fault> {
     }
     if consent.rehost.is_some() {
         faults.push(Fault::Restart);
-    }
-    if consent.rollout.is_some() {
-        faults.push(Fault::Upgrade);
     }
     faults
 }
@@ -417,10 +313,6 @@ async fn nemesis(
     consent: Consent,
 ) {
     let faults = vocabulary(&consent);
-    // Where each node sits in the rollout, by its index in `nodes`. Every node
-    // starts on the oldest release, so the first upgrade is what first mixes the
-    // cluster.
-    let mut stages = vec![0usize; nodes.len()];
     for _ in 0..rounds {
         let wait = 200 + entropy.next_u64() % 600;
         clock.sleep(Duration::from_millis(wait)).await;
@@ -474,35 +366,6 @@ async fn nemesis(
                     let outage = 100 + entropy.next_u64() % 300;
                     clock.sleep(Duration::from_millis(outage)).await;
                     registry.set_available(true);
-                }
-            }
-            Fault::Upgrade => {
-                let (Some(rollout), Some(i)) = (&consent.rollout, entropy.pick_index(nodes.len()))
-                else {
-                    continue;
-                };
-                // One step, forward or back. The draw is taken whichever way the
-                // node can move, so a node pinned at either end still consumes it
-                // and the seeded stream does not depend on where the rollout has
-                // got to.
-                let forward = entropy.next_u64().is_multiple_of(2);
-                let stage = match (forward, stages[i]) {
-                    (true, s) if s + 1 < rollout.len() => s + 1,
-                    (false, s) if s > 0 => s - 1,
-                    (_, s) => s,
-                };
-                if stage == stages[i] {
-                    continue;
-                }
-                stages[i] = stage;
-                net.upgrade(nodes[i], rollout.window(stage));
-                // A release is a process replacement, not a live patch, but only
-                // where the workload can put a fresh node back to work, and never
-                // the first node, for the reason `Fault::Restart` gives.
-                if i > 0
-                    && let Some(rehost) = &consent.rehost
-                {
-                    rehost(&net.restart(nodes[i]));
                 }
             }
         }
@@ -626,7 +489,6 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         Consent {
             registry: ctx.registry.clone(),
             rehost: workload.rehost(),
-            rollout: workload.rollout(),
         },
     )));
 

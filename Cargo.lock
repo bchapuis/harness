@@ -73,7 +73,6 @@ dependencies = [
  "actor-core",
  "actor-serialization",
  "async-channel",
- "compat",
  "futures",
  "rand 0.8.6",
  "rand_chacha",

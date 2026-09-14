@@ -8,9 +8,8 @@
 //! socket.
 //!
 //! Before any actor traffic, the two ends exchange a [`Hello`] handshake (the
-//! accepted wire revisions, node identity, codec name, cluster secret) and reject
-//! the association on any mismatch (spec §7.1). The revision is *negotiated* to
-//! the highest both ends accept ([`WIRE`]). When a [`TlsConfig`] is present the
+//! wire version, node identity, codec name, cluster secret) and reject the
+//! association on any mismatch (spec §7.1). When a [`TlsConfig`] is present the
 //! handshake runs over a mutually-authenticated TLS stream and the node allowlist
 //! is enforced (§15).
 //!
@@ -59,8 +58,7 @@ use crate::wire::read_wire;
 use crate::wire::write_hello;
 use crate::wire::write_wire;
 
-/// The wire revisions this build accepts, and the one it writes (spec §7.1,
-/// compatibility spec §3).
+/// The wire version this build speaks (spec §7.1, compatibility spec §3).
 ///
 /// Defined with the protocol it governs ([`actor_cluster::WIRE`]) and re-exported
 /// here, where the handshake that announces it lives, so this transport and the
@@ -264,19 +262,10 @@ struct Shared {
     shutdown: watch::Sender<bool>,
 }
 
-/// One live outbound association: the queue frames leave by, and the wire
-/// revision this end settled on when it handshook (spec §7.1).
-///
-/// The two travel together because they have one lifetime. A revision is what
-/// two ends agreed on over *this* connection, so when the connection is
-/// deregistered (peer restarted, socket died, queue saturated) the revision
-/// goes with it and [`peer_version`](Transport::peer_version) falls back to
-/// `None` rather than answering from a peer that may since have come back on a
-/// narrower window.
+/// One live outbound association: the queue frames leave by.
 #[derive(Clone)]
 struct Conn {
     tx: mpsc::Sender<Wire>,
-    version: compat::Version,
 }
 
 impl Association for Conn {
@@ -292,7 +281,7 @@ impl Association for Conn {
 impl Shared {
     fn hello(&self) -> Hello {
         Hello {
-            accepts: WIRE.accepted(),
+            version: WIRE.version(),
             node: self.config.node,
             advertised: self.config.advertised,
             codec_name: self.config.codec.name().to_string(),
@@ -326,22 +315,12 @@ impl Shared {
     }
 
     /// Validate a peer's handshake against our policy, returning the peer's node
-    /// id and the wire revision the two ends settled on. `expected` is `Some` when
-    /// we dialed a specific peer and want to confirm we reached it.
-    ///
-    /// The revision is *returned*, not consumed here: nothing in the handshake
-    /// varies by it, and everything that will vary by it composes frames far above
-    /// this call. Its route to those callers is the association it is stored on
-    /// and [`Transport::peer_version`].
-    fn accept_hello(
-        &self,
-        hello: &Hello,
-        expected: Option<NodeId>,
-    ) -> Result<(NodeId, compat::Version), String> {
-        // Both ends run this same comparison over the same two ranges and reach the
-        // same answer, so the association needs no confirmation round to agree on
-        // what it speaks (compatibility spec §2).
-        let version = WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
+    /// id. `expected` is `Some` when we dialed a specific peer and want to confirm
+    /// we reached it.
+    fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
+        // Version first, so a build skew is never reported as a security failure
+        // (compatibility §3.1).
+        WIRE.admit(hello.version).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));
         }
@@ -361,7 +340,7 @@ impl Shared {
                 hello.node
             ));
         }
-        Ok((hello.node, version))
+        Ok(hello.node)
     }
 }
 
@@ -437,11 +416,11 @@ impl TcpTransport {
             };
             client_handshake(stream, &self.shared, peer).await
         };
-        let (stream, version) = tokio::time::timeout(handshake_timeout, handshake)
+        let stream = tokio::time::timeout(handshake_timeout, handshake)
             .await
             .map_err(|_| TransportError::Unreachable)?
             .map_err(|_| TransportError::Unreachable)?;
-        Ok(self.register_dialed(peer, stream, version))
+        Ok(self.register_dialed(peer, stream))
     }
 
     fn lookup(&self, peer: NodeId) -> Option<Conn> {
@@ -452,22 +431,17 @@ impl TcpTransport {
             .reuse(peer)
     }
 
-    /// Register a freshly dialed connection under the revision its handshake
-    /// settled on, or, if a concurrent dial already won, keep the existing one and
-    /// let this stream drop (clean teardown).
-    fn register_dialed<S>(&self, peer: NodeId, stream: S, version: compat::Version) -> Conn
+    /// Register a freshly dialed connection, or, if a concurrent dial already
+    /// won, keep the existing one and let this stream drop (clean teardown).
+    fn register_dialed<S>(&self, peer: NodeId, stream: S) -> Conn
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, rx) = mpsc::channel(self.shared.config.outbound_capacity);
-        let conn = Conn {
-            tx: tx.clone(),
-            version,
-        };
-        // The arbitration is [`Slots::admit`]'s: a concurrent dial that won
-        // carries its own negotiated revision, and it is that association's
-        // frames that will travel, so its `Conn` is kept whole and this
-        // stream is dropped without ever starting.
+        let conn = Conn { tx: tx.clone() };
+        // The arbitration is [`Slots::admit`]'s: a concurrent dial that won is the
+        // association whose frames will travel, so its `Conn` is kept whole and
+        // this stream is dropped without ever starting.
         let admitted = self
             .shared
             .slots
@@ -506,18 +480,6 @@ impl Transport for TcpTransport {
                 .evict_if_same(peer, &conn);
             TransportError::Unreachable
         })
-    }
-
-    /// The revision settled with `peer` on the connection this node dials it over
-    /// (spec §7.1, compatibility spec §3.1).
-    ///
-    /// `None` until that connection exists, which for a peer never yet sent to
-    /// means the first [`send`](Transport::send): the dial *is* the handshake.
-    /// Deliberately not answered from the peer's *accepted* connection: that is a
-    /// separate, receive-only association (§7), and its revision governs what the
-    /// peer may write to us, not what we may write to it.
-    fn peer_version(&self, peer: NodeId) -> Option<compat::Version> {
-        self.lookup(peer).map(|conn| conn.version)
     }
 
     /// Stop the node's transport (spec §9.3): signal the accept, gossip, and
@@ -621,9 +583,8 @@ async fn dialed_connection<S>(
         _ = shutdown.changed() => {} // node stopping (spec §9.3)
     }
 
-    // Deregister so the next send re-dials, and so the revision this
-    // association settled on stops being served as the peer's, since the
-    // re-dial negotiates its own. `evict_if_same` leaves a successor alone.
+    // Deregister so the next send re-dials. `evict_if_same` leaves a successor
+    // alone.
     shared
         .slots
         .lock()
@@ -667,38 +628,29 @@ async fn deliver(shared: &Arc<Shared>, peer: NodeId, msg: Wire) -> bool {
 
 /// Dialer side of the handshake: announce ourselves, then read and validate the
 /// peer's `Hello`, confirming it is the node we meant to reach, and learn its
-/// advertised address (spec §9.3). Returns the stream and the revision the two
-/// ends settled on, which becomes this association's for as long as it lives.
-async fn client_handshake<S>(
-    mut stream: S,
-    shared: &Arc<Shared>,
-    expected: NodeId,
-) -> io::Result<(S, compat::Version)>
+/// advertised address (spec §9.3).
+async fn client_handshake<S>(mut stream: S, shared: &Arc<Shared>, expected: NodeId) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     write_hello(&mut stream, &shared.hello()).await?;
     let peer = read_hello(&mut stream).await?;
-    let (_, version) = shared
+    shared
         .accept_hello(&peer, Some(expected))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     shared.learn(peer.node, peer.advertised);
-    Ok((stream, version))
+    Ok(stream)
 }
 
 /// Acceptor side of the handshake: read and validate the peer's `Hello` first,
 /// then announce ourselves. Returns the verified peer identity and learns its
 /// advertised address (spec §9.3).
-///
-/// The negotiated revision is dropped here, and only here: an accepted connection
-/// is receive-only (§7), so there is nothing on it to gate. What we write to this
-/// peer is governed by the connection we dial it over.
 async fn server_handshake<S>(mut stream: S, shared: &Arc<Shared>) -> io::Result<(S, NodeId)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let peer = read_hello(&mut stream).await?;
-    let (node, _version) = shared
+    let node = shared
         .accept_hello(&peer, None)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_hello(&mut stream, &shared.hello()).await?;
@@ -744,7 +696,6 @@ async fn endpoint_gossip(transport: TcpTransport, interval: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compat::Accepted;
 
     /// A `Shared` with no listener and no tasks: enough to exercise
     /// [`Shared::accept_hello`]'s policy, which reads only the config.
@@ -769,9 +720,9 @@ mod tests {
         }
     }
 
-    fn hello(accepts: Accepted) -> Hello {
+    fn hello(version: compat::Version) -> Hello {
         Hello {
-            accepts,
+            version,
             node: NodeId::new(2),
             advertised: "127.0.0.1:2".parse().expect("a literal address"),
             codec_name: "json".to_string(),
@@ -805,53 +756,25 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_sharing_a_wire_revision_associates() {
+    fn a_peer_on_this_builds_wire_version_associates() {
         let shared = shared("secret");
-        // Our own range, and a peer whose range is strictly wider on both sides:
-        // the rolling-upgrade case (spec §7.1).
-        for accepts in [WIRE.accepted(), Accepted::new(1, 9)] {
-            assert_eq!(
-                shared.accept_hello(&hello(accepts), None),
-                Ok((NodeId::new(2), WIRE.accepted().hi)),
-                "a peer accepting {accepts} shares a revision with {}",
-                WIRE.accepted()
-            );
-        }
-    }
-
-    #[test]
-    fn the_settled_revision_is_the_highest_both_ends_accept() {
-        // What the handshake returns is not this build's written revision but the
-        // *negotiated* one, so a peer that reads less than we write is settled
-        // downward rather than written to at a revision it cannot read (**V4**).
-        // With `WIRE` a single revision wide there is nothing yet to settle
-        // downward, so the property is asserted against a widened window standing
-        // in for the release that widens the real one.
-        let ours = compat::Window::new("actor.wire", 1, 3, 3);
         assert_eq!(
-            ours.negotiate(Accepted::new(1, 2)),
-            Ok(compat::Version(2)),
-            "a peer that stops at v2 must settle the association at v2, not our v3",
-        );
-        assert_eq!(
-            ours.negotiate(Accepted::new(1, 9)),
-            Ok(compat::Version(3)),
-            "a peer that reads further than we do settles at the highest we accept",
+            shared.accept_hello(&hello(WIRE.version()), None),
+            Ok(NodeId::new(2)),
         );
     }
 
     #[test]
-    fn a_peer_with_no_shared_wire_revision_is_refused_by_name() {
+    fn a_peer_on_another_wire_version_is_refused_by_name() {
         let shared = shared("secret");
-        // A peer from a future release that has dropped support for everything we
-        // speak. Refused, and the message names both ranges so an operator knows
-        // which end to move (**V2**).
+        // A peer from another release. Refused, and the message names both
+        // versions so an operator knows which end to move (**V2**).
         let err = shared
-            .accept_hello(&hello(Accepted::new(7, 9)), None)
-            .expect_err("disjoint ranges must not associate");
+            .accept_hello(&hello(compat::Version(9)), None)
+            .expect_err("another version must not associate");
         assert!(
-            err.contains("actor.wire") && err.contains("v7..=v9"),
-            "the refusal must name the boundary and the peer's range: {err}"
+            err.contains("actor.wire") && err.contains("v9") && err.contains("v1"),
+            "the refusal must name the format and both versions: {err}"
         );
     }
 
@@ -860,11 +783,11 @@ mod tests {
         // An unreadable peer is turned away before its secret is compared, so a
         // version skew is never reported as a security failure.
         let shared = shared("secret");
-        let mut peer = hello(Accepted::new(7, 9));
+        let mut peer = hello(compat::Version(9));
         peer.cluster_secret = "wrong".to_string();
         let err = shared
             .accept_hello(&peer, None)
-            .expect_err("a disjoint peer must be refused");
+            .expect_err("a peer on another version must be refused");
         assert!(err.contains("actor.wire"), "version first: {err}");
     }
 }

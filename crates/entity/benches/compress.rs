@@ -32,14 +32,10 @@
 //!   exceeds what a few hundred bytes can save. A compressor applied unconditionally
 //!   would make the most numerous payload class on the wire worse.
 //!
-//! Saying which form a payload carries needs a tag an older peer will not read as blob
-//! content and fail the content hash on. `Transport::peer_version` is that: the
-//! association reports what it settled on, and a build accepting two revisions writes
-//! the tagged form only to a peer that settled on the higher one. Taking it is the
-//! **V4** two-release path: widen `WIRE` to accept 1..=2, write 2 in a later release,
-//! against the alternative of capability negotiation, a new blob message older peers
-//! reject with `Unhandled` and the sender caches per peer. Both are rollout decisions
-//! rather than measurements, which is why this file takes neither.
+//! Saying which form a payload carries needs a tag a peer will not read as blob
+//! content and fail the content hash on: a wire-format change, which every peer
+//! takes at once (compatibility §3.1). That is a format decision rather than a
+//! measurement, which is why this file does not take it.
 //!
 //! Run with `cargo bench -p entity --bench compress`. If a `machine-data/` or
 //! `agent-data/` directory from a real run is present at the workspace root, the blob

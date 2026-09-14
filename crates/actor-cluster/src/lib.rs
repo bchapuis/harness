@@ -15,8 +15,6 @@
 //! elected **leader** (§9.4.3), or peer-to-peer **gossip** (§9.4.4).
 
 mod consensus;
-#[cfg(test)]
-mod corpus;
 mod correlator;
 mod membership;
 pub mod placement;

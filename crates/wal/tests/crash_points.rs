@@ -30,7 +30,7 @@
 //! 5. **Refused, not recovered.** Damage to the *file header* is the one case that
 //!    is not a truncated recovery: the log's identity is what was damaged, so
 //!    nothing about the frames can be trusted and `open` refuses. Every one of its
-//!    sixteen bytes is covered, which is also what proves the header validates all
+//!    twelve bytes is covered, which is also what proves the header validates all
 //!    of itself rather than only its magic.
 
 use std::fs;
@@ -45,8 +45,7 @@ use wal::Wal;
 const MAX_RECORD: u32 = 1 << 16;
 
 /// This suite's record schema. The header carries it; these tests never change it.
-const RECORDS: compat::Window = compat::Window::at("wal.crash_points", 1);
-
+const RECORDS: compat::Format = compat::Format::new("wal.crash_points", 1);
 
 /// Records of deliberately varied width, so truncation lands inside headers,
 /// payloads, and checksums rather than always at a tidy boundary.
@@ -166,9 +165,8 @@ fn every_single_byte_corruption_drops_that_record_and_the_rest() {
             // Damage in the *file* header is a different outcome, and the stronger
             // one: the log's identity is what was damaged, so nothing about the
             // frames can be trusted and `open` refuses outright rather than
-            // recovering a prefix. Every one of the sixteen bytes is covered: the
-            // magic, the frame revision, the checksum kind, the record schema, and
-            // the reserved field.
+            // recovering a prefix. Every one of the twelve bytes is covered: the
+            // magic, the frame version, and the record schema.
             let path = dir.path().join(format!("hdr{pos}.log"));
             fs::write(&path, &corrupt).expect("write case");
             assert!(

@@ -32,8 +32,6 @@
 
 mod association;
 mod clock;
-#[cfg(test)]
-mod corpus;
 mod entropy;
 mod join;
 mod lifecycle;

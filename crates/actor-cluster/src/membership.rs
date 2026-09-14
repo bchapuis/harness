@@ -242,28 +242,14 @@ impl MembershipCommand {
     /// ahead of the fixed 9-byte [`body`](MembershipCommand::body). **Canonical**
     /// (one value encodes to one byte string, since the stamp is a fixed prefix), so
     /// the engine's byte-equality dedup of a re-proposed command holds.
-    ///
-    /// **V4's two-release ordering does not apply to a boundary's introduction
-    /// here**, because the thing it protects does not exist. Read-new-first buys one
-    /// release in which every peer learns to read a form before any peer writes it,
-    /// and it earns its cost exactly when there are peers in the field on the older
-    /// build: a deployment mid-rollout, whose oldest node stops applying membership
-    /// on `ACMEMB…` or, older still, skips the entry and holds a member set with a
-    /// gap in it. This tree has no such deployment: a build of it meets only its own
-    /// peers. So the boundary lands in one step, and V4 becomes live again the
-    /// moment there is a fleet to roll.
-    ///
-    /// What that does **not** change is [`admit`](MembershipCommand::admit)'s
-    /// adoption of the unstamped predecessor: **V5**'s obligation, about bytes at
-    /// rest rather than release cadence.
     pub fn encode(self) -> Vec<u8> {
         MEMBERSHIP.stamp(&self.body())
     }
 
-    /// The unstamped payload: a tag and a little-endian node uid, nine bytes. The
-    /// form [`decode`](MembershipCommand::decode) reads and the one every build
-    /// before the boundary wrote, kept separate from [`encode`](MembershipCommand::encode)
-    /// so the stamp is applied in exactly one place.
+    /// The payload behind the stamp: a tag and a little-endian node uid, nine
+    /// bytes. The form [`decode`](MembershipCommand::decode) reads, kept separate
+    /// from [`encode`](MembershipCommand::encode) so the stamp is applied in
+    /// exactly one place.
     fn body(self) -> Vec<u8> {
         let (tag, node) = match self {
             MembershipCommand::Admit(n) => (0u8, n),
@@ -304,19 +290,11 @@ impl MembershipCommand {
     /// **before** any of it is applied (compatibility **V2**).
     ///
     /// `Err` carries why the payload is unreadable, in the words an operator has to
-    /// act on. That is the whole of what the boundary adds: without it an unknown
-    /// tag and a short or damaged payload are one answer, and the two have opposite
-    /// fixes; run the node on a build that accepts the entry, or repair a log.
-    ///
-    /// **An unstamped payload is adopted as revision 1** ([`MEMBERSHIP`],
-    /// [`compat::Stamp::adopt`]). Every transition committed before the stamp existed is
-    /// still in some cluster's log, and a build that refused them would refuse its
-    /// own history: the first rolling upgrade would stop every node on the oldest
-    /// entry it replayed. Adoption keeps a *stamped* payload at an unreadable
-    /// revision refused rather than handed to the old decoder, which is the
-    /// misparse a bare "try the previous format" fallback would introduce.
+    /// act on. That is the whole of what the stamp adds: without it an unknown tag
+    /// and a short or damaged payload are one answer, and the two have opposite
+    /// fixes; run the node on the build that wrote the entry, or repair a log.
     pub fn admit(bytes: &[u8]) -> Result<MembershipCommand, String> {
-        let body = MEMBERSHIP.adopt(bytes).map_err(|err| err.to_string())?;
+        let body = MEMBERSHIP.unstamp(bytes).map_err(|err| err.to_string())?;
         MembershipCommand::decode(body).ok_or_else(|| {
             format!(
                 "{} bytes, tag {:?}, is not a transition this build can name",
@@ -331,26 +309,20 @@ impl MembershipCommand {
 /// `actor.membership`).
 ///
 /// The payload rides `EntryPayload::App` inside the stamped `actor.raft.log`, whose
-/// revision covers the **envelope** and not this, so without a stamp of its own a
-/// build meeting a transition from a later build stops on a nine-byte payload whose
-/// tag it does not know: indistinguishable from a truncated or damaged one. With
-/// one it stops naming a revision, and the difference is what an operator reads: a
-/// mixed-version rollout, or corruption.
-///
-/// `ACMEMB` cannot be confused with the unstamped predecessor, whose first byte is
-/// a transition tag in `0..=4`. `A` is `0x41`, so the confusion the magic has to
-/// rule out is ruled out by construction rather than by arithmetic.
+/// version covers the **envelope** and not this, so without a stamp of its own a
+/// build meeting a transition from another build stops on a nine-byte payload
+/// whose tag it does not know: indistinguishable from a truncated or damaged one.
+/// With one it stops naming a version, and the difference is what an operator
+/// reads: a build skew, or corruption.
 ///
 /// **The nine bytes are the argument against, and they lose.** A magic and a
-/// revision more than double the payload, the widest relative cost of any stamp in
+/// version more than double the payload, the widest relative cost of any stamp in
 /// the tree. In absolute terms it is eight bytes on a record written once per join,
 /// drain, resume, leave, or downing (a few thousand over a cluster's life) against
-/// a refusal an operator can act on at the one boundary whose misread costs a
-/// member set. And a stamp cannot wait for the revision that needs it: it goes on
-/// bytes that outlive the build that wrote them, so a transition committed today is
-/// one a later build reads.
+/// a refusal an operator can act on at the one format whose misread costs a
+/// member set.
 pub(crate) const MEMBERSHIP: compat::Stamp =
-    compat::Stamp::new(b"ACMEMB", compat::Window::at("actor.membership", 1));
+    compat::Stamp::new(b"ACMEMB", compat::Format::new("actor.membership", 1));
 
 /// The leader-based control plane (spec §9.4.3): membership transitions are
 /// entries of a self-hosted replicated log, committed by quorum through an
@@ -1367,55 +1339,12 @@ mod tests {
         );
     }
 
-    /// A stamped transition, encoded the way this build *reads* one: written here
-    /// rather than taken from `encode`, so the fixture cannot move with the writer.
-    /// That the writer agrees with it is asserted separately, by
-    /// `a_transition_is_written_stamped`.
-    fn stamped(command: MembershipCommand) -> Vec<u8> {
-        let mut bytes = MEMBERSHIP.magic().to_vec();
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&command.body());
-        bytes
-    }
-
-    #[test]
-    fn actor_membership_v1_still_applies() {
-        // The golden corpus (compatibility §4): bytes checked in at this boundary's
-        // current revision, decoded by this build. A renumbered tag or a widened
-        // field would compile and break every committed log at once; this is what
-        // notices.
-        let bytes = crate::corpus::golden("actor.membership", 1, || {
-            stamped(MembershipCommand::Down(B))
-        });
-        assert_eq!(
-            MembershipCommand::admit(&bytes),
-            Ok(MembershipCommand::Down(B)),
-            "the v1 fixture no longer decodes to the transition it recorded",
-        );
-    }
-
-    /// The writer emits the stamped form, and this build reads back what it writes
-    /// (**V3**). Both halves matter: a writer that stopped stamping would leave
-    /// every new transition indistinguishable from the predecessor, and a stamp the
-    /// reader did not accept would stop the node's control plane on its own output.
+    /// The writer emits the stamped form, and this build reads back what it
+    /// writes. Both halves matter: a writer that stopped stamping would leave every
+    /// new transition unreadable, and a stamp the reader did not accept would stop
+    /// the node's control plane on its own output.
     #[test]
     fn a_transition_is_written_stamped() {
-        let bytes = MembershipCommand::Down(B).encode();
-        assert!(
-            MEMBERSHIP.is_stamped(&bytes),
-            "transitions must go on the wire stamped, or the boundary names nothing",
-        );
-        assert_eq!(
-            MembershipCommand::admit(&bytes),
-            Ok(MembershipCommand::Down(B)),
-            "the writer's own form did not survive a round trip through `admit`",
-        );
-    }
-
-    #[test]
-    fn an_unstamped_transition_is_adopted_as_revision_1() {
-        // Every transition committed before the stamp existed is still in some
-        // cluster's log. A build that refused them would refuse its own history.
         for command in [
             MembershipCommand::Admit(B),
             MembershipCommand::Drain(B),
@@ -1423,44 +1352,55 @@ mod tests {
             MembershipCommand::Leave(B),
             MembershipCommand::Down(B),
         ] {
-            let bare = command.body();
+            let bytes = command.encode();
             assert!(
-                !MEMBERSHIP.is_stamped(&bare),
-                "a bare transition must not read as stamped, or adoption is \
-                 untestable",
+                bytes.starts_with(MEMBERSHIP.magic()),
+                "transitions must go on the wire stamped, or the stamp names nothing",
             );
             assert_eq!(
-                MembershipCommand::admit(&bare),
+                MembershipCommand::admit(&bytes),
                 Ok(command),
-                "the unstamped predecessor was not adopted",
+                "the writer's own form did not survive a round trip through `admit`",
             );
         }
     }
 
     #[test]
-    fn a_stamped_transition_from_a_later_revision_is_refused_by_name() {
-        // The whole point of the boundary: a payload this build cannot read stops
-        // it on a *revision*, not on a tag it cannot name, which reads exactly
-        // like a truncated entry. Note the body is a transition this build knows,
-        // so only the revision can be doing the refusing.
+    fn an_unstamped_transition_is_refused_rather_than_decoded() {
+        // A bare body decodes to a transition this build knows, and reading it
+        // anyway is the misparse the stamp exists to stop.
+        let bare = MembershipCommand::Down(B).body();
+        let why = MembershipCommand::admit(&bare).expect_err("a bare payload admitted");
+        assert!(
+            why.contains("actor.membership"),
+            "the refusal must name the format: {why}",
+        );
+    }
+
+    #[test]
+    fn a_stamped_transition_from_another_version_is_refused_by_name() {
+        // The whole point of the stamp: a payload this build cannot read stops it
+        // on a *version*, not on a tag it cannot name, which reads exactly like a
+        // truncated entry. Note the body is a transition this build knows, so only
+        // the version can be doing the refusing.
         let mut future = MEMBERSHIP.magic().to_vec();
         future.extend_from_slice(&2u16.to_le_bytes());
         future.extend_from_slice(&MembershipCommand::Down(B).body());
-        let why = MembershipCommand::admit(&future).expect_err("revision 2 admitted");
+        let why = MembershipCommand::admit(&future).expect_err("version 2 admitted");
         assert!(
-            why.contains("actor.membership") && why.contains("v1"),
-            "the refusal names neither the boundary nor the revisions it accepts: {why}",
+            why.contains("actor.membership") && why.contains("v2") && why.contains("v1"),
+            "the refusal names neither the format nor the versions: {why}",
         );
     }
 
     #[test]
     fn an_unreadable_transition_says_what_it_found() {
-        // The other refusal, and it must not read like the one above: a tag from a
-        // later build is a *transition* this one cannot name, whatever revision it
-        // arrived under.
-        let mut from_a_later_build = vec![5u8];
-        from_a_later_build.extend_from_slice(&B.uid().to_le_bytes());
-        let why = MembershipCommand::admit(&from_a_later_build).expect_err("tag 5 admitted");
+        // The other refusal, and it must not read like the one above: a tag this
+        // build cannot name, under this build's own stamp, is a *transition* it
+        // cannot name, not a version skew.
+        let mut body = vec![5u8];
+        body.extend_from_slice(&B.uid().to_le_bytes());
+        let why = MembershipCommand::admit(&MEMBERSHIP.stamp(&body)).expect_err("tag 5 admitted");
         assert!(
             why.contains("tag") && !why.contains("actor.membership"),
             "an unnameable transition was reported as a version skew: {why}",

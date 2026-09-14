@@ -1,6 +1,6 @@
 [package]
 name = "compat"
-description = "The compatibility-boundary vocabulary: a format revision, the window of revisions a build accepts, the negotiation rule, and the named refusal outside it."
+description = "The format-stamp vocabulary: a named format at one version, the magic-prefixed stamp that carries it, and the named refusal of anything else."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

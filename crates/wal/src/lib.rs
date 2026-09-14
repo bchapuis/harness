@@ -5,7 +5,7 @@
 //!
 //! # The log
 //!
-//! [`Wal<T>`] is a 16-byte header followed by an append-only run of postcard-encoded
+//! [`Wal<T>`] is a 12-byte header followed by an append-only run of postcard-encoded
 //! `T` records, each framed
 //! `[u32 little-endian length][postcard payload][u64 little-endian checksum]`
 //! and fsynced before the call that wrote it returns. It exposes four operations:
@@ -32,15 +32,15 @@
 //!
 //! # The header
 //!
-//! The header carries a magic, the **frame layout's** revision and the **checksum
-//! kind** (this crate's own secrets), and a **record-schema** revision that belongs
-//! to the caller and that this crate admits against the caller's window and never
-//! interprets. That last field is the load-bearing one: a `Wal<T>`'s records are
-//! postcard, which is positional and has no field names, so `T` cannot gain a field
-//! and its revision has nowhere to live except outside the payload.
+//! The header carries a magic, the **frame layout's** version (this crate's own), and
+//! a **record-schema** version that belongs to the caller and that this crate admits
+//! against the caller's [`compat::Format`] and never interprets. That last field is
+//! the load-bearing one: a `Wal<T>`'s records are postcard, which is positional and
+//! has no field names, so `T` cannot gain a field and its version has nowhere to
+//! live except outside the payload.
 //!
-//! [`open`](Wal::open) therefore takes the caller's [`compat::Window`] and does the
-//! refusing itself, rather than exposing the header for a caller to check.
+//! [`open`](Wal::open) therefore takes the caller's format and does the refusing
+//! itself, rather than exposing the header for a caller to check.
 //!
 //! # Sidecars
 //!
@@ -61,8 +61,8 @@
 //! [`open`](Wal::open) has a second failure that is not an I/O event at all: a file
 //! this build cannot read. The bytes are intact and the disk is fine; the refusal is
 //! policy. It surfaces as [`io::ErrorKind::InvalidData`] whose message names the
-//! boundary and the revision found (compatibility §3.5), so a caller that logs it
-//! says which file and which build disagree.
+//! format and the version found (compatibility §2), so a caller that logs it says
+//! which file and which build disagree.
 
 use std::fs;
 use std::fs::File;
@@ -79,84 +79,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// FNV-1a 64, for a caller framing its own sidecar bytes (e.g. a fixed-width value
-/// file). Detects torn and partial writes, not adversarial tampering.
+/// The digest closing every frame and covering every sidecar value: XXH3-64.
 ///
-/// **This function's output is frozen for any sidecar that still has no header.** A bare
-/// `[value][checksum]` gives a reader no way to ask which digest wrote it (it can only
-/// recompute and compare), so changing what this returns would make every such sidecar
-/// silently read as missing, and a durable fence coming back as *no fence* is a safety
-/// property lost.
-///
-/// Giving a sidecar a header is what lifts that, and entity's fence and seal have since
-/// taken it: `entity.store.fence` and `entity.store.seal` carry a magic and a revision
-/// (compatibility §3), so a digest change there becomes an ordinary revision bump, and a
-/// mismatch is a *refusal naming the file* rather than an absence.
-///
-/// The log's own frames do not use this. They carry a checksum-kind field in the header
-/// naming which digest closed them, so they are free to move to a faster one and still be
-/// read. A digest behind a version field may change; a digest without one may not.
+/// Detects torn and partial writes, not adversarial tampering, which is all a local
+/// log needs. Exposed so a caller can frame its own sidecar bytes. About 17.5 GB/s on a
+/// 4 KiB frame, so a large log's recovery is read-bound rather than digest-bound.
 pub fn checksum(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    hash
-}
-
-/// The digest closing a log's frames: the value the header's checksum-kind field names.
-///
-/// A file records which digest wrote it, so a build that computes a different one can
-/// still read it: the scan uses the digest the header names, never the one this build
-/// prefers. That is what makes moving to a faster digest an upgrade rather than a
-/// migration: a log written before the move opens and replays untouched, and appends to
-/// it stay in its own digest so a file is never a mix of two.
-///
-/// Private, and deliberately so: nothing outside may depend on what these return, because
-/// the set may grow again. A caller framing its own bytes wants [`checksum`], which is
-/// frozen precisely because it has no header to record a choice in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Digest {
-    /// Kind 1. What this crate wrote before [`Xxh3`](Digest::Xxh3); read-only in the sense
-    /// that no new log is stamped with it, though a log already stamped keeps using it.
-    Fnv1a,
-    /// Kind 2. ~17.5 GB/s on a 4 KiB frame against FNV-1a's ~0.6 GB/s: FNV is a serial
-    /// multiply chain, one byte per multiply, which made a large log's recovery
-    /// digest-bound. Not the weaker check for the change: both are 64 bits wide, and XXH3
-    /// has the better avalanche.
-    Xxh3,
-}
-
-impl Digest {
-    /// The digest a log created by this build is stamped with.
-    const WRITES: Digest = Digest::Xxh3;
-
-    /// The header value naming this digest.
-    const fn kind(self) -> u16 {
-        match self {
-            Digest::Fnv1a => 1,
-            Digest::Xxh3 => 2,
-        }
-    }
-
-    /// The digest a header names, or `None` for one this build cannot compute, which is
-    /// refused by name rather than left to fail every frame as if the log were corrupt.
-    const fn from_kind(kind: u16) -> Option<Digest> {
-        match kind {
-            1 => Some(Digest::Fnv1a),
-            2 => Some(Digest::Xxh3),
-            _ => None,
-        }
-    }
-
-    /// Digest `bytes`.
-    fn of(self, bytes: &[u8]) -> u64 {
-        match self {
-            Digest::Fnv1a => checksum(bytes),
-            Digest::Xxh3 => xxhash_rust::xxh3::xxh3_64(bytes),
-        }
-    }
+    xxhash_rust::xxh3::xxh3_64(bytes)
 }
 
 /// Make a directory entry durable (a freshly created or renamed file). File *data* is
@@ -239,28 +168,16 @@ fn parent_dir(path: &Path) -> &Path {
 /// A stamped **sidecar**: one `u64` written whole to a small file of its own (§5),
 /// the shape of a fence term, a seal bound, or a tombstone's deletion stamp.
 ///
-/// The body behind the stamp is positional `postcard`: a checksum over the value,
-/// the value, and an extension area (compatibility §2.1), so the record can gain a
-/// field without a revision bump. The checksum is [`checksum`], FNV-1a, frozen
-/// because the unstamped predecessor below has no header to name another; it covers
-/// the value, so a torn or bit-rotted value cannot pass unnoticed.
-///
-/// [`read`](Sidecar::read) accepts the stamped form and the 16-byte unstamped
-/// predecessor, `[u64 value][u64 checksum]` little-endian, which every sidecar in
-/// the tree had before it carried a stamp; nothing writes that form. The order is
-/// the contract (compatibility **V2**): bytes carrying the magic are *this* format,
-/// so their revision is admitted before any field is read, and a revision this
-/// build refuses is never handed to the older decoder. Only bytes without the magic
-/// are read as the predecessor.
+/// The body behind the stamp is positional `postcard`: a [`checksum`] over the value,
+/// then the value, so a torn or bit-rotted value cannot pass unnoticed. The stamp's
+/// version is admitted before any field is read (compatibility **V2**).
 ///
 /// `None` means one thing only: **the file is absent**. A short file, a long file,
-/// or a checksum mismatch is an `InvalidData` refusal naming the boundary and the
+/// or a checksum mismatch is an `InvalidData` refusal naming the format and the
 /// path, never an absence, because a durable fence coming back as *no fence* is a
 /// safety property lost with no diagnostic anywhere.
 pub struct Sidecar {
     stamp: compat::Stamp,
-    /// The critical extension keys this build implements (compatibility §2.1).
-    known_ext: &'static [u16],
 }
 
 /// A sidecar's body, behind the stamp.
@@ -268,17 +185,12 @@ pub struct Sidecar {
 struct SidecarBody {
     checksum: u64,
     value: u64,
-    ext: compat::Extensions,
 }
 
-/// Bytes of an unstamped sidecar: the value and its checksum, both `u64` LE.
-const SIDECAR_LEGACY_BYTES: usize = 16;
-
 impl Sidecar {
-    /// A sidecar format under `stamp`, implementing the critical extension keys
-    /// `known_ext` (compatibility §2.1).
-    pub const fn new(stamp: compat::Stamp, known_ext: &'static [u16]) -> Sidecar {
-        Sidecar { stamp, known_ext }
+    /// A sidecar format under `stamp`.
+    pub const fn new(stamp: compat::Stamp) -> Sidecar {
+        Sidecar { stamp }
     }
 
     /// The stamp on this sidecar's files.
@@ -286,12 +198,11 @@ impl Sidecar {
         &self.stamp
     }
 
-    /// `value`'s bytes, stamped at the revision this build writes.
+    /// `value`'s bytes, stamped at this build's version.
     pub fn encode(&self, value: u64) -> Vec<u8> {
         let body = postcard::to_allocvec(&SidecarBody {
             checksum: checksum(&value.to_le_bytes()),
             value,
-            ext: compat::Extensions::new(),
         })
         .expect("a sidecar body is plain owned data");
         self.stamp.stamp(&body)
@@ -318,8 +229,8 @@ impl Sidecar {
     /// # Errors
     ///
     /// Any filesystem error other than absence; or `InvalidData` for bytes that
-    /// are neither a stamped record this build accepts nor the unstamped
-    /// predecessor, or whose checksum does not cover their value.
+    /// are not a stamped record this build accepts, or whose checksum does not
+    /// cover their value.
     pub fn read(&self, path: &Path) -> io::Result<Option<u64>> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -330,38 +241,26 @@ impl Sidecar {
     }
 
     fn decode(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        let boundary = self.stamp.window().boundary();
         let named = |msg: String| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{boundary} at {}: {msg}", path.display()),
+                format!(
+                    "{} at {}: {msg}",
+                    self.stamp.format().name(),
+                    path.display()
+                ),
             )
         };
-        if self.stamp.is_stamped(bytes) {
-            let (_, body) = self.stamp.unstamp(bytes).map_err(|err| named(err.to_string()))?;
-            let body: SidecarBody = postcard::from_bytes(body)
-                .map_err(|err| named(format!("body did not decode: {err}")))?;
-            body.ext
-                .admit(boundary, self.known_ext)
-                .map_err(|err| named(err.to_string()))?;
-            if body.checksum != checksum(&body.value.to_le_bytes()) {
-                return Err(named("checksum mismatch".to_string()));
-            }
-            return Ok(body.value);
+        let body = self
+            .stamp
+            .unstamp(bytes)
+            .map_err(|err| named(err.to_string()))?;
+        let body: SidecarBody = postcard::from_bytes(body)
+            .map_err(|err| named(format!("body did not decode: {err}")))?;
+        if body.checksum != checksum(&body.value.to_le_bytes()) {
+            return Err(named("checksum mismatch".to_string()));
         }
-        if bytes.len() == SIDECAR_LEGACY_BYTES {
-            let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
-            let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
-            if check != checksum(&raw.to_le_bytes()) {
-                return Err(named("unstamped record's checksum mismatch".to_string()));
-            }
-            return Ok(raw);
-        }
-        Err(named(format!(
-            "neither a `{}` record nor a {SIDECAR_LEGACY_BYTES}-byte unstamped one ({} bytes)",
-            String::from_utf8_lossy(self.stamp.magic()),
-            bytes.len(),
-        )))
+        Ok(body.value)
     }
 }
 
@@ -387,9 +286,7 @@ const SCRATCH_OFFSETS: usize = 256;
 /// prefix's own type so the write path ([`frame_onto`]) and the recovery path
 /// ([`scan`]) frame from one definition and cannot drift apart on the layout.
 const LEN_BYTES: usize = size_of::<u32>();
-/// Width of the little-endian checksum that closes every frame. One width for every
-/// [`Digest`]: they are all 64 bits, so which one a file uses is a header question, not a
-/// layout one; the reason moving between them leaves the frame revision alone.
+/// Width of the little-endian checksum that closes every frame.
 const CHECKSUM_BYTES: usize = size_of::<u64>();
 
 /// The magic that opens every log file, in the PNG convention: a high-bit byte, the
@@ -402,110 +299,57 @@ const CHECKSUM_BYTES: usize = size_of::<u64>();
 /// instead of scanned for frames that happen to parse.
 const MAGIC: &[u8] = b"\x89WAL\r\n\x1a\n";
 
-/// The frame layout's revisions, and the one this build writes (compatibility spec
-/// §3). Revision 1 is the `[len][payload][checksum]` framing of §2.
-const FRAME: compat::Stamp =
-    compat::Stamp::new(MAGIC, compat::Window::at("wal.frame", 1));
+/// The frame layout's version (compatibility spec §3). Version 1 is the
+/// `[len][payload][checksum]` framing of §2.
+const FRAME: compat::Stamp = compat::Stamp::new(MAGIC, compat::Format::new("wal.frame", 1));
 
-/// The checksum kinds this build can compute, for the refusal that names them.
-///
-/// An *identity*, not a revision: there is no ordering over hash functions, so a kind is
-/// matched, not compared, and one outside this set is refused by name rather than left to
-/// fail every frame as if the file were corrupt.
-///
-/// Reserving the field is what made adding [`Digest::Xxh3`] beside [`Digest::Fnv1a`] a
-/// header change rather than a layout one: both are 64 bits wide, so the frame layout
-/// never had to mention which filled the field. Both are accepted, so a log stamped kind 1
-/// opens and replays on a build that prefers kind 2; refusing it would have made a routine
-/// upgrade unreadable for every Raft log, entity segment, and blob log at once.
-const ACCEPTED_CHECKSUMS: compat::Accepted =
-    compat::Accepted::new(Digest::Fnv1a.kind(), Digest::Xxh3.kind());
-
-/// Width of the header **at frame revision 1**: the overhead a log written by this
-/// build carries before its first frame. Public so a caller sizing a store, or
-/// reaching past the header in a test, can account for it.
-///
-/// ```text
-/// [magic 8][frame revision u16][checksum kind u16][record schema u16][reserved u16]
-/// ```
-///
-/// The width belongs to the revision, not to the format: a later revision may define
-/// a different header entirely, because a revision-1 reader refuses a revision-2 file
-/// before reaching its header. Only the magic and the `u16` after it are fixed across
-/// revisions, since a reader consults those *before* it knows which layout applies.
-/// Code that must work across revisions should take the width from the revision it
-/// admitted rather than from this constant.
-///
-/// The header has no checksum of its own. Every field is validated against a known
-/// value or window, so detectable damage is refused; the reserved `u16` is where a
-/// header digest would go.
 /// The file header's width: the frames begin after it (§2.1). Public because a
 /// caller that edits a log's bytes (a crash-point test, a corruption fixture)
 /// needs the offset the framing starts at, and a second copy of it would not
 /// move when the header does.
-pub const HEADER_LEN: usize = 16;
+///
+/// ```text
+/// [magic 8][frame version u16][record schema u16]
+/// ```
+///
+/// The header has no checksum of its own. Every field is validated against a known
+/// value, so detectable damage is refused.
+pub const HEADER_LEN: usize = 12;
 
 /// Build the header a new log opens with. `records` is the caller's schema
-/// revision: this crate stores and returns it without interpreting it (§2).
-fn header(records: compat::Version, digest: Digest) -> Vec<u8> {
-    let mut tail = Vec::with_capacity(6);
-    tail.extend_from_slice(&digest.kind().to_le_bytes());
-    tail.extend_from_slice(&records.0.to_le_bytes());
-    tail.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    let bytes = FRAME.stamp(&tail);
+/// version: this crate stores and returns it without interpreting it (§2).
+fn header(records: compat::Version) -> Vec<u8> {
+    let bytes = FRAME.stamp(&records.0.to_le_bytes());
     debug_assert_eq!(bytes.len(), HEADER_LEN, "the header is a fixed width");
     bytes
 }
 
-/// Admit a log's header, returning the digest it names and the frame bytes that follow it.
+/// Admit a log's header, returning the frame bytes that follow it.
 ///
-/// The order is the contract: the magic, then the frame revision, then the checksum
-/// kind, then the caller's record schema. Nothing is scanned until all four are
-/// accepted (compatibility **V2**), so a file this build cannot read is never
-/// partially interpreted.
-///
-/// The digest comes back rather than being checked against a single expected value,
-/// because the file's own header is the authority on which one closes its frames.
+/// The order is the contract: the magic, then the frame version, then the caller's
+/// record schema. Nothing is scanned until all three are accepted (compatibility
+/// **V2**), so a file this build cannot read is never partially interpreted.
 fn admit_header<'a>(
     bytes: &'a [u8],
-    records: &compat::Window,
-) -> Result<(Digest, &'a [u8]), compat::Incompatible> {
-    let (_frame, tail) = FRAME.unstamp(bytes)?;
-    if tail.len() < HEADER_LEN - MAGIC.len() - size_of::<u16>() {
+    records: &compat::Format,
+) -> Result<&'a [u8], compat::Incompatible> {
+    let tail = FRAME.unstamp(bytes)?;
+    let Some(schema) = tail.get(..size_of::<u16>()) else {
         // A header cut short. Unreachable through `open`, which initializes a file
         // too short to hold one, but the check keeps this function sound on its own.
         return Err(compat::Incompatible::Unstamped {
-            boundary: FRAME.window().boundary(),
-            accepted: FRAME.window().accepted(),
-        });
-    }
-    let field = |i: usize| u16::from_le_bytes([tail[i * 2], tail[i * 2 + 1]]);
-    let Some(digest) = Digest::from_kind(field(0)) else {
-        return Err(compat::Incompatible::Version {
-            boundary: "wal.checksum",
-            found: compat::Version(field(0)),
-            accepted: ACCEPTED_CHECKSUMS,
+            format: FRAME.format().name(),
+            expected: FRAME.format().version(),
         });
     };
-    records.admit(compat::Version(field(1)))?;
-    if field(2) != 0 {
-        // Revision 1 defines the reserved field as zero, and the frame revision gates
-        // the layout, so a later revision that gives it meaning bumps that. Requiring
-        // it here keeps all sixteen header bytes self-validating: without it,
-        // corruption in this field would be the one header damage that passes
-        // silently.
-        return Err(compat::Incompatible::Version {
-            boundary: "wal.reserved",
-            found: compat::Version(field(2)),
-            accepted: compat::Accepted::only(0),
-        });
-    }
-    Ok((digest, &bytes[HEADER_LEN..]))
+    let schema = u16::from_le_bytes(schema.try_into().expect("a two-byte slice"));
+    records.admit(compat::Version(schema))?;
+    Ok(&bytes[HEADER_LEN..])
 }
 
 /// A policy refusal as an I/O error: `InvalidData`, because the bytes are not what
-/// this build reads, with the refusal's own message naming the boundary and the
-/// revision it found.
+/// this build reads, with the refusal's own message naming the format and the
+/// version it found.
 fn refused(err: compat::Incompatible) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
@@ -527,12 +371,7 @@ fn refused(err: compat::Incompatible) -> io::Error {
 /// record that scan would reject must never be written: it would be acknowledged here
 /// and silently lost on the next open. The half-framed record is discarded with `buf`,
 /// which the panic unwinds past before any of it reaches the file.
-fn frame_onto<T: Serialize>(
-    mut buf: Vec<u8>,
-    value: &T,
-    max_record: u32,
-    digest: Digest,
-) -> Vec<u8> {
+fn frame_onto<T: Serialize>(mut buf: Vec<u8>, value: &T, max_record: u32) -> Vec<u8> {
     let frame = buf.len();
     buf.extend_from_slice(&0u32.to_le_bytes()); // back-patched below
     let mut buf = postcard::to_extend(value, buf).expect("a WAL record always serializes");
@@ -542,7 +381,7 @@ fn frame_onto<T: Serialize>(
         "WAL record of {payload} bytes exceeds the {max_record}-byte limit; recovery \
          would discard it, so it must not be written",
     );
-    let check = digest.of(&buf[frame + LEN_BYTES..]);
+    let check = checksum(&buf[frame + LEN_BYTES..]);
     buf[frame..frame + LEN_BYTES].copy_from_slice(&(payload as u32).to_le_bytes());
     buf.extend_from_slice(&check.to_le_bytes());
     buf
@@ -557,12 +396,7 @@ fn frame_onto<T: Serialize>(
 /// where that region starts in the file, so the returned offsets are absolute and
 /// [`Wal::truncate`] stays a single `set_len`. The returned length is relative to
 /// `base`.
-fn scan<T: DeserializeOwned>(
-    bytes: &[u8],
-    max_record: u32,
-    base: u64,
-    digest: Digest,
-) -> (Vec<T>, Vec<u64>, u64) {
+fn scan<T: DeserializeOwned>(bytes: &[u8], max_record: u32, base: u64) -> (Vec<T>, Vec<u64>, u64) {
     // Size both vectors from the first frame's width. A log holds one record type, so
     // that width estimates the rest well, and recovery is where it matters: growing from
     // zero across a file of millions of frames recopies the vector on every doubling.
@@ -593,7 +427,7 @@ fn scan<T: DeserializeOwned>(
         let Some(check) = bytes.get(check_start..check_start + CHECKSUM_BYTES) else {
             break;
         };
-        if u64::from_le_bytes(check.try_into().expect("checksum slice")) != digest.of(payload) {
+        if u64::from_le_bytes(check.try_into().expect("checksum slice")) != checksum(payload) {
             break;
         }
         let Ok(record) = postcard::from_bytes::<T>(payload) else {
@@ -618,15 +452,6 @@ pub struct Wal<T> {
     offsets: Vec<u64>,
     /// The file's current (valid) length, where the next frame lands.
     end: u64,
-    /// The digest closing *this file's* frames, as its header names it, not necessarily
-    /// the one this build prefers.
-    ///
-    /// Held per log rather than taken from a constant so a file opened at an older kind
-    /// keeps being read *and appended to* in its own digest. A header names one digest for
-    /// the whole file, so a mixed file would be unreadable; the way a log moves to a newer
-    /// digest is [`rewrite`](Wal::rewrite), which restamps the header it replaces. That
-    /// mirrors how the `records` schema below is restamped, and for the same reason.
-    digest: Digest,
     /// The buffer [`append_batch`](Wal::append_batch) frames into, kept across calls so a
     /// steady-state append allocates nothing: it reaches the high-water mark of the
     /// batches this log sees and stays there. Empty between calls: it holds no state,
@@ -644,13 +469,8 @@ pub struct Wal<T> {
     /// rejected loudly) and on recovery (a larger length is treated as corruption), so
     /// the write path and the scan path agree on what is a valid record.
     max_record: u32,
-    /// The record-schema revision this build *writes*, held so
-    /// [`rewrite`](Wal::rewrite) can stamp the replacement it produces. This crate
-    /// never interprets it.
-    ///
-    /// Not the revision stamped in the file that was opened: once a caller's window
-    /// spans two revisions the stamp understates until a [`rewrite`](Wal::rewrite)
-    /// restamps it, and the rule for that is wal §2.1 rule 6.
+    /// The caller's record-schema version, held so [`rewrite`](Wal::rewrite) can
+    /// stamp the replacement it produces. This crate never interprets it.
     records: compat::Version,
     _marker: PhantomData<fn() -> T>,
 }
@@ -670,13 +490,12 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     ///
     /// Any filesystem error reading, opening, or truncating the file; or
     /// `InvalidData` for a file this build cannot read (a foreign file, a frame
-    /// layout from another revision, a checksum this build does not compute, or a
-    /// record schema outside the caller's window), its message naming the boundary
-    /// and the revision found.
+    /// layout from another version, or a record schema other than the caller's),
+    /// its message naming the format and the version found.
     pub fn open(
         path: impl Into<PathBuf>,
         max_record: u32,
-        records: &compat::Window,
+        records: &compat::Format,
     ) -> io::Result<(Wal<T>, Vec<T>)> {
         // What keeps the unstamped-file refusal sound: a headerless file begins with
         // a frame length at or below `max_record`, so it cannot begin with `MAGIC`
@@ -704,12 +523,12 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         // The prefix test bounds that: a short file that is *not* heading toward this
         // header falls through to the refusal below instead of being silently
         // truncated.
-        let fresh = header(records.writes(), Digest::WRITES);
+        let fresh = header(records.version());
         if bytes.len() < HEADER_LEN {
             if !fresh.starts_with(&bytes) {
                 return Err(refused(compat::Incompatible::Unstamped {
-                    boundary: FRAME.window().boundary(),
-                    accepted: FRAME.window().accepted(),
+                    format: FRAME.format().name(),
+                    expected: FRAME.format().version(),
                 }));
             }
             if !bytes.is_empty() {
@@ -730,11 +549,10 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
                     file,
                     offsets: Vec::new(),
                     end: HEADER_LEN as u64,
-                    digest: Digest::WRITES,
                     scratch: Vec::new(),
                     staged: Vec::new(),
                     max_record,
-                    records: records.writes(),
+                    records: records.version(),
                     _marker: PhantomData,
                 },
                 Vec::new(),
@@ -742,9 +560,8 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         }
 
         // The header is admitted whole before a single frame is scanned (**V2**).
-        let (digest, frames) = admit_header(&bytes, records).map_err(refused)?;
-        let (recovered, offsets, valid_body) =
-            scan::<T>(frames, max_record, HEADER_LEN as u64, digest);
+        let frames = admit_header(&bytes, records).map_err(refused)?;
+        let (recovered, offsets, valid_body) = scan::<T>(frames, max_record, HEADER_LEN as u64);
         let valid_end = HEADER_LEN as u64 + valid_body;
         if (valid_end as usize) < bytes.len() {
             // A torn tail: the write never returned, so the record was never
@@ -758,11 +575,10 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
                 file,
                 offsets,
                 end: valid_end,
-                digest,
                 scratch: Vec::new(),
                 staged: Vec::new(),
                 max_record,
-                records: records.writes(),
+                records: records.version(),
                 _marker: PhantomData,
             },
             recovered,
@@ -814,7 +630,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         let mut staged = std::mem::take(&mut self.staged);
         for record in records {
             staged.push(self.end + buf.len() as u64);
-            buf = frame_onto(buf, record, self.max_record, self.digest);
+            buf = frame_onto(buf, record, self.max_record);
         }
         let written = buf.len() as u64;
         let result = self
@@ -888,12 +704,11 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         // compacted segment rather than by one batch, and with a log per entity, parking
         // that capacity on every `Wal` for the life of the process would trade a bounded
         // allocation on a cold path for unbounded resident memory.
-        self.digest = Digest::WRITES;
-        let mut buf = header(self.records, self.digest);
+        let mut buf = header(self.records);
         let mut offsets = Vec::with_capacity(records.len());
         for record in records {
             offsets.push(buf.len() as u64);
-            buf = frame_onto(buf, record, self.max_record, self.digest);
+            buf = frame_onto(buf, record, self.max_record);
         }
         let dir = parent_dir(&self.path);
         let name = self
@@ -929,7 +744,7 @@ mod tests {
         }
     }
 
-    const RECORDS: compat::Window = compat::Window::at("wal.test", 1);
+    const RECORDS: compat::Format = compat::Format::new("wal.test", 1);
 
     fn open(path: &Path) -> (Wal<Rec>, Vec<Rec>) {
         Wal::<Rec>::open(path, MAX, &RECORDS).unwrap()
@@ -1152,50 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn a_log_at_an_older_digest_still_opens_and_keeps_its_digest() {
-        // The reserved field earning its keep. A log stamped kind 1 was written by a build
-        // that computed FNV-1a; this build prefers XXH3 and must still read it.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log");
-
-        // A kind-1 file, framed the way the older build framed it.
-        let mut bytes = header(RECORDS.writes(), Digest::Fnv1a);
-        for i in 1..=3u64 {
-            bytes = frame_onto(bytes, &rec(i, b"old"), MAX, Digest::Fnv1a);
-        }
-        fs::write(&path, &bytes).unwrap();
-
-        let (mut wal, recovered) = Wal::<Rec>::open(&path, MAX, &RECORDS).expect("kind 1 opens");
-        assert_eq!(recovered.len(), 3, "its records replay");
-        assert_eq!(wal.digest, Digest::Fnv1a, "and it keeps the digest it was written at");
-
-        // Appending must not produce a file that is half one digest and half the other:
-        // the header names one for the whole file, so the append stays at kind 1.
-        wal.append(&rec(4, b"new")).unwrap();
-        let (_wal, recovered) = Wal::<Rec>::open(&path, MAX, &RECORDS).expect("reopens");
-        assert_eq!(recovered.len(), 4, "the appended record replays too");
-
-        // A rewrite replaces the whole file, header included, so that is where a log
-        // moves forward.
-        let (mut wal, _) = Wal::<Rec>::open(&path, MAX, &RECORDS).unwrap();
-        wal.rewrite(&[rec(9, b"compacted")]).unwrap();
-        let (wal, recovered) = Wal::<Rec>::open(&path, MAX, &RECORDS).expect("reopens");
-        assert_eq!(wal.digest, Digest::WRITES, "a rewrite restamps to this build's digest");
-        assert_eq!(recovered, vec![rec(9, b"compacted")]);
-    }
-
-    #[test]
-    fn the_sidecar_checksum_is_frozen() {
-        // Pinned against literals, not against a second implementation, because the point
-        // is the *value*: a sidecar carries no header, so a reader can only recompute and
-        // compare, and a caller reads a mismatch as "torn or absent". If this ever changes,
-        // entity's durable fence silently reads back as *no fence* (E15).
-        assert_eq!(checksum(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(checksum(&0u64.to_le_bytes()), 0xa8c7_f832_281a_39c5);
-        assert_eq!(checksum(b"harness"), 0x211f_cbba_fe53_31ab);
-    }
-
-    #[test]
     fn an_unstamped_file_is_refused_rather_than_scanned() {
         // A headerless log, as a build predating the header would have written: one
         // valid-looking frame. It must be refused, not scanned: the frames may parse
@@ -1205,7 +976,7 @@ mod tests {
         let payload = postcard::to_allocvec(&rec(1, b"a")).unwrap();
         let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
         bytes.extend_from_slice(&payload);
-        bytes.extend_from_slice(&Digest::WRITES.of(&payload).to_le_bytes());
+        bytes.extend_from_slice(&checksum(&payload).to_le_bytes());
         fs::write(&path, &bytes).unwrap();
 
         let err = Wal::<Rec>::open(&path, MAX, &RECORDS)
@@ -1213,13 +984,13 @@ mod tests {
             .expect("an unstamped file must not open");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            err.to_string().contains("unstamped"),
-            "expected an Unstamped refusal, got {err}"
+            err.to_string().contains("not a stamped wal.frame record"),
+            "expected an Unstamped refusal naming the format, got {err}"
         );
     }
 
     #[test]
-    fn a_record_schema_outside_the_window_is_refused_by_name() {
+    fn a_record_schema_other_than_the_callers_is_refused_by_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
         {
@@ -1228,37 +999,15 @@ mod tests {
         }
         // Reopen under a caller whose records have moved on. The frames are intact and
         // this build simply cannot interpret them.
-        const LATER: compat::Window = compat::Window::new("wal.test", 4, 5, 4);
+        const LATER: compat::Format = compat::Format::new("wal.test", 4);
         let err = Wal::<Rec>::open(&path, MAX, &LATER)
             .err()
-            .expect("a schema outside the window must not open");
+            .expect("another schema version must not open");
         let msg = err.to_string();
         assert!(
-            msg.contains("wal.test") && msg.contains("v1"),
-            "the refusal must name the boundary and what it found: {msg}"
+            msg.contains("wal.test") && msg.contains("v1") && msg.contains("v4"),
+            "the refusal must name the format and both versions: {msg}"
         );
-    }
-
-    #[test]
-    fn a_foreign_checksum_kind_is_refused_by_name() {
-        // The reserved field doing its job: a log written with a digest this build does
-        // not compute is refused, rather than every frame failing its checksum and the
-        // whole log reading as one torn tail.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log");
-        {
-            let (mut wal, _) = open(&path);
-            wal.append(&rec(1, b"a")).unwrap();
-        }
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[10..12].copy_from_slice(&7u16.to_le_bytes());
-        fs::write(&path, &bytes).unwrap();
-
-        let msg = Wal::<Rec>::open(&path, MAX, &RECORDS)
-            .err()
-            .expect("a foreign checksum must not open")
-            .to_string();
-        assert!(msg.contains("wal.checksum"), "must name the field: {msg}");
     }
 
     #[test]

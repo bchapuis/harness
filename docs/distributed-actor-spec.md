@@ -436,11 +436,9 @@ Rules:
 
 A transport is pluggable behind a trait; the default is TCP with length-delimited framing. Requirements:
 
-1. **Associations.** Before exchanging actor traffic, two nodes MUST complete a handshake that establishes an association: a wire-revision negotiation, a node-identity exchange, codec agreement, and optional authentication (§15).
+1. **Associations.** Before exchanging actor traffic, two nodes MUST complete a handshake that establishes an association: a wire-version check, a node-identity exchange, codec agreement, and optional authentication (§15).
 
-   The revision is **negotiated, not matched**. Each end announces the inclusive range of wire revisions it accepts, and the association settles on the highest revision both accept; a peer whose range does not overlap MUST be refused, naming both ranges ([compatibility](compatibility-spec.md) **V2**). Two adjacent releases must be able to associate, so a format change widens the accepted range in one release and only writes the new revision in a later one (compatibility **V4**).
-
-   The settled revision MUST be reachable from the association it belongs to (`peer_version`), because that is what a sender gates on: during the release where a build accepts two revisions, it writes the higher one only to a peer that settled on it. A transport MUST NOT report a revision for an association that no longer exists: a revision outliving its connection would gate the frames sent to whatever process reconnects in its place.
+   Each end announces the wire version it speaks, and a peer at any other version MUST be refused, naming both ([compatibility](compatibility-spec.md) **V2**), before its codec, secret, or identity is examined, so a version skew is never reported as a security failure. A build speaks exactly one version, and a wire-format change is a new version every node takes at once.
 2. **Multiplexing.** Many actor conversations share one association. Each request carries a correlation id, and each response references it.
 3. **Framing.** Messages are length-delimited; a malformed frame MUST tear down the association, not the node.
 4. **Failure detection.** The transport never decides liveness. Wherever a detector runs (§9.4), SWIM (§10) probes members independently of connection state, so a node whose association merely blipped is never mistaken for a failed one; in static mode without its optional detector (§9.4.1), liveness surfaces only as failed sends (§8). A transport is not required to report association loss. It MAY surface establishment/loss as an *optimization hint* to speed detection (e.g. mark a peer `suspect` early), but such a hint MUST feed only the detector's refutable `suspect` state, never the terminal `down` decision (§9.4).
@@ -452,12 +450,6 @@ pub trait Transport: Clone + Send + Sync + 'static {
     /// Send one frame to `peer` over its association, dialing and completing the
     /// §7.1 handshake on first use. At-most-once (§7.2): never retransmits.
     async fn send(&self, peer: NodeId, frame: Frame) -> Result<(), TransportError>;
-
-    /// The revision settled with `peer` on the association this node sends over,
-    /// or `None` when there is none, including the first send, which is what
-    /// establishes it. `None` obliges the caller to write its oldest accepted
-    /// revision, never its newest (compatibility **V2**).
-    fn peer_version(&self, peer: NodeId) -> Option<compat::Version>;
 
     /// Release listeners, background tasks, and open associations on a graceful
     /// stop (§9.3); closing the inbound path ends the system's receive loop.
@@ -493,7 +485,7 @@ SystemMessage =
     | Receptionist(..)                    // §13
 ```
 
-**The frame vocabulary is a compatibility boundary** (`actor.wire`, [compatibility](compatibility-spec.md) §3, §3.1), and it grows by **appending a variant, never by editing one**. Under a positional encoding an edited variant shifts the layout of everything after it, so a peer a release behind reads every subsequent frame as a different one: it compiles, it round-trips against itself, and both ends agree right up until they are not the same build. An appended variant leaves each prior definition exactly as the release that shipped it saw it, so a peer a release behind can still be sent one.
+**The frame vocabulary is a stamped format** (`actor.wire`, [compatibility](compatibility-spec.md) §3, §3.1). Under a positional encoding any variant inserted, removed, or edited shifts the layout of everything after it, so a change to the vocabulary is a new wire version, which every node takes at once.
 
 ### 7.2 Delivery guarantees
 
@@ -625,7 +617,7 @@ The cluster self-hosts its source of truth as a **replicated log** coordinated t
 
    **A committed entry a member cannot decode MUST stop that member's control plane, never be skipped.** Members apply in log order, so an entry one member skips is one its peers apply: its view is then not a *prefix* of the log but a **gap** in it, holding the transitions after an admission or a downing it never saw, while it remains a full member of the cluster whose membership it has stopped tracking. Skipping leaves item 1's total order gated for everyone but that member. Such a member MUST therefore stop applying transitions, permanently, and MUST NOT proceed as though it had applied one.
 
-   **The transition payload carries its own revision** (`actor.membership`, [compatibility](compatibility-spec.md) §3): it rides `EntryPayload::App` inside the already-stamped `actor.raft.log`, whose revision covers the envelope and not it, so the stamp is what distinguishes a transition a later build defined from a damaged payload, whose fixes are opposite. An unstamped payload is adopted as revision 1, because every transition committed before the stamp existed is still in some cluster's log. What the stamp costs, and why it is paid here, is the compatibility spec's subject.
+   **The transition payload carries its own version** (`actor.membership`, [compatibility](compatibility-spec.md) §3): it rides `EntryPayload::App` inside the already-stamped `actor.raft.log`, whose version covers the envelope and not it, so the stamp is what distinguishes a transition another build defined from a damaged payload, whose fixes are opposite. What the stamp costs, and why it is paid here, is the compatibility spec's subject.
 
    Such a member SHOULD keep replicating and acknowledging the log: the entry is durable either way, and a restart onto a build that can read it applies it, so refusing the append would cost availability and buy no safety. If it leads, it SHOULD hand leadership to a peer that can still apply (item 8): a leader that cannot observe the effect of its own committed decisions will propose them again on every pass, forever. Its condition SHOULD be readable by an operator, for the reason item 2 gives about a voter that has stopped voting. Where the mode also disseminates stamped status by gossip (item 3), such a member SHOULD keep gossiping: a peer that applied the entry can still deliver its *outcome*, which bounds the damage of stopping, though only for transitions the stopped build can name, which excludes the one that stopped it.
 2. **Voters.** A configured, modest subset of members (typically 3 or 5) are **voters**; only they elect leaders and form quorums. Voters MUST persist their Raft state (term, vote, log) durably and MUST keep stable node identities across restarts. Changes to the voter set are themselves committed configuration entries (single-server change or joint consensus). A voter declared `down` MUST be removed from the voter set by a committed change; its replacement joins as a new member with a fresh `NodeId` (§9.1).

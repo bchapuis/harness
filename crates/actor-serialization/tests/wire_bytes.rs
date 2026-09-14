@@ -9,11 +9,10 @@
 //! (`benches/codec.rs`). It was made on the claim that it is *only* a performance
 //! change, and this file is that claim.
 //!
-//! Why it needs stating rather than assuming. The `actor.wire` boundary is at revision
-//! 1, and a change that altered the encoding would have to be a bump: two releases,
-//! the first widening what a build accepts and the second moving what it writes, with
-//! every send to a peer that settled lower gated down in between (compatibility spec
-//! §3.1, **V4**). That is a release cycle, not an edit. This change is not one:
+//! Why it needs stating rather than assuming. A change that altered the encoding
+//! would be a new `actor.wire` version, which every node takes at once
+//! (compatibility spec §3.1). That is a format change, not an edit. This change is
+//! not one:
 //!
 //! - **postcard** has a byte-string form, and it is encoded exactly as its sequence
 //!   form: a varint length then the payload. Same bytes, different code path.
@@ -146,9 +145,8 @@ fn a_vector_of_byte_vectors_is_neutral_too() {
 
 #[test]
 fn each_form_decodes_what_the_other_wrote() {
-    // The rolling-upgrade question, and the one that actually bites: a node running
-    // the tagged build must read a peer running the untagged one, in both directions,
-    // or the change is a flag day however identical the bytes look.
+    // The two forms must read each other in both directions, or entity's
+    // `StoreRecord::records` and its readers could disagree on the same bytes.
     for (name, codec) in CODECS {
         for payload in payloads() {
             let from_untagged = encode(*codec, &plain(&payload)).expect("encodes");

@@ -231,33 +231,14 @@ enum ShardMapCommand {
 /// `entity.shardmap`).
 ///
 /// The payload rides `EntryPayload::App` inside the stamped `actor.raft.log`,
-/// whose revision covers the **envelope** and not this, so without a stamp of its
-/// own a build meeting a command from a later build stops on a serde error:
-/// indistinguishable from a damaged log. With one it stops naming a revision, and
-/// the difference is what an operator reads: a mixed-version rollout, or
-/// corruption.
-///
-/// `GRSMAP` cannot be confused with the unstamped predecessor, which is bare
-/// `serde_json` and so begins with `{`: the one byte a JSON object must open
-/// with, and one this magic does not.
+/// whose version covers the **envelope** and not this, so without a stamp of its
+/// own a build meeting a command from another build stops on a serde error:
+/// indistinguishable from a damaged log. With one it stops naming a version, and
+/// the difference is what an operator reads: a build skew, or corruption.
 pub(crate) const SHARDMAP: compat::Stamp =
-    compat::Stamp::new(b"GRSMAP", compat::Window::at("entity.shardmap", 1));
+    compat::Stamp::new(b"GRSMAP", compat::Format::new("entity.shardmap", 1));
 
 /// Encode a command for the map group's log: the stamped form ([`SHARDMAP`]).
-///
-/// **V4's two-release ordering does not apply to a boundary's introduction here**,
-/// because the thing it protects does not exist. Read-new-first buys one release in
-/// which every peer learns to read a form before any peer writes it, and it pays
-/// exactly when there are peers in the field on the older build, whose oldest node
-/// halts on `GRSMAP…` or, older still, skips the entry and diverges. This tree has
-/// no such deployment: a build of it meets only its own peers. So the boundary lands
-/// in one step, and V4 becomes live again the moment there is a fleet to roll.
-///
-/// That does not change `admit`'s adoption of the unstamped predecessor. That
-/// obligation is **V5**'s and is about bytes at rest, not release cadence: commands
-/// committed by any earlier build of this tree are still in the map group's log on
-/// disk, and a build that refused them would refuse its own history on the next
-/// replay.
 fn encode(command: &ShardMapCommand) -> Vec<u8> {
     SHARDMAP.stamp(&serde_json::to_vec(command).expect("a ShardMapCommand always serializes"))
 }
@@ -275,15 +256,6 @@ fn encode(command: &ShardMapCommand) -> Vec<u8> {
 /// running the shard map through consensus was supposed to make impossible.
 /// [`apply_loop`] stops on it; see there for why stopping is safe where skipping
 /// was not.
-///
-/// **An unstamped payload is adopted as revision 1** ([`SHARDMAP`]). Every command
-/// committed before the stamp existed is still in some cluster's log, and a build
-/// that refused them would refuse its own history: the first rolling upgrade
-/// would stop every node on the oldest entry it replayed. The adoption is asked
-/// the way every other boundary in the tree asks it (compatibility §3): `is_stamped`
-/// first, so a *stamped* payload at an unreadable revision is still refused rather
-/// than handed to the old decoder, which is the misparse a bare
-/// "try the previous format" fallback would introduce.
 fn admit(
     observation: &Committed,
     entity_type: &'static str,
@@ -301,12 +273,10 @@ fn admit(
              rather than skip an entry its peers will apply"
         )
     };
-    // Both forms decode with the same JSON decoder, so adoption is the whole of
-    // the boundary here (**V5**): a stamped entry at a revision this build refuses
-    // is named as a skew (**V2**) rather than half-parsed, and the unstamped
-    // predecessor is read by the decoder it was written for.
+    // The stamp is admitted before the body is decoded (**V2**): an entry from
+    // another build is named as a skew rather than half-parsed.
     let body = SHARDMAP
-        .adopt(command)
+        .unstamp(command)
         .map_err(|err| refusal(err.to_string()))?;
     serde_json::from_slice(body)
         .map(Some)
@@ -2004,45 +1974,16 @@ mod tests {
         }
     }
 
-    /// A stamped command, encoded the way this build reads one: written here
-    /// rather than taken from `encode`, so the fixture cannot move with the
-    /// writer. That the writer agrees with it is asserted separately, by
-    /// `a_command_is_written_stamped`.
-    fn stamped(command: &ShardMapCommand) -> Vec<u8> {
-        let body = serde_json::to_vec(command).expect("encode a command");
-        let mut bytes = SHARDMAP.magic().to_vec();
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&body);
-        bytes
-    }
-
-    #[test]
-    fn entity_shardmap_v1_still_applies() {
-        // The golden corpus (compatibility §4): bytes checked in at this
-        // boundary's current revision, decoded by this build.
-        let bytes = crate::corpus::golden("entity.shardmap", 1, || {
-            stamped(&ShardMapCommand::SplitCommitted { parent: 7 })
-        });
-        let admitted = admit(&applied(1, bytes), "acct").expect("the fixture still decodes");
-        assert!(
-            matches!(
-                admitted,
-                Some(ShardMapCommand::SplitCommitted { parent: 7 })
-            ),
-            "the v1 fixture no longer decodes to the command it recorded",
-        );
-    }
-
-    /// The writer emits the stamped form, and this build reads back what it writes
-    /// (**V3**). Both halves matter: a writer that stopped stamping would leave
-    /// every new command indistinguishable from the predecessor, and a stamp the
-    /// reader did not accept would stop the node on its own output.
+    /// The writer emits the stamped form, and this build reads back what it
+    /// writes. Both halves matter: a writer that stopped stamping would leave every
+    /// new command unreadable, and a stamp the reader did not accept would stop the
+    /// node on its own output.
     #[test]
     fn a_command_is_written_stamped() {
         let bytes = encode(&ShardMapCommand::SplitCommitted { parent: 7 });
         assert!(
-            SHARDMAP.is_stamped(&bytes),
-            "commands must go on the wire stamped, or the boundary names nothing",
+            bytes.starts_with(SHARDMAP.magic()),
+            "commands must go on the wire stamped, or the stamp names nothing",
         );
         assert!(
             matches!(
@@ -2054,31 +1995,27 @@ mod tests {
     }
 
     #[test]
-    fn an_unstamped_command_is_adopted_as_revision_1() {
-        // Every command committed before the stamp existed is still in some
-        // cluster's log. A build that refused them would refuse its own history.
+    fn an_unstamped_command_is_refused_rather_than_decoded() {
+        // Bare JSON for a known variant would decode, and reading it anyway is the
+        // misparse the stamp exists to stop.
         let command = ShardMapCommand::SplitCommitted { parent: 7 };
         let bare = serde_json::to_vec(&command).expect("encode a command");
+        let why = match admit(&applied(1, bare), "acct") {
+            Err(why) => why,
+            Ok(_) => panic!("a bare payload was admitted"),
+        };
         assert!(
-            !SHARDMAP.is_stamped(&bare),
-            "bare JSON must not read as stamped, or adoption is untestable",
-        );
-        let admitted = admit(&applied(1, bare), "acct").expect("an unstamped payload is adopted");
-        assert!(
-            matches!(
-                admitted,
-                Some(ShardMapCommand::SplitCommitted { parent: 7 })
-            ),
-            "the unstamped predecessor was not adopted",
+            why.contains("entity.shardmap"),
+            "the refusal must name the format: {why}",
         );
     }
 
     #[test]
-    fn a_stamped_command_from_a_later_revision_is_refused_by_name() {
-        // The whole point of the boundary: a payload this build cannot read stops
-        // it on a *revision*, not on a parse failure that reads like corruption.
-        // Note the body is valid JSON for a known variant (only the revision is
-        // out of range), so nothing but the stamp can be doing the refusing.
+    fn a_stamped_command_from_another_version_is_refused_by_name() {
+        // The whole point of the stamp: a payload this build cannot read stops it
+        // on a *version*, not on a parse failure that reads like corruption. Note
+        // the body is valid JSON for a known variant (only the version differs),
+        // so nothing but the stamp can be doing the refusing.
         let mut future = SHARDMAP.magic().to_vec();
         future.extend_from_slice(&2u16.to_le_bytes());
         future.extend_from_slice(
@@ -2087,12 +2024,17 @@ mod tests {
         );
         let why = match admit(&applied(9, future), "acct") {
             Err(why) => why,
-            Ok(_) => panic!("a revision this build does not accept was admitted"),
+            Ok(_) => panic!("a version this build does not accept was admitted"),
         };
         assert!(
-            why.contains("entity.shardmap") && why.contains("v1"),
-            "the refusal names neither the boundary nor the revisions it accepts: {why}",
+            why.contains("entity.shardmap") && why.contains("v2") && why.contains("v1"),
+            "the refusal names neither the format nor the versions: {why}",
         );
+    }
+
+    /// This build's stamp ahead of an arbitrary JSON body.
+    fn encode_body(body: &[u8]) -> Vec<u8> {
+        SHARDMAP.stamp(body)
     }
 
     #[test]
@@ -2110,9 +2052,9 @@ mod tests {
 
     #[test]
     fn a_committed_command_this_build_cannot_decode_is_refused() {
-        // The shape a mixed-version cluster produces: a peer on a later build
-        // proposes a variant this one has never heard of, and it commits.
-        let from_a_later_build = br#"{"Retired":{"shard":3}}"#.to_vec();
+        // A committed entry whose body names a variant this build has never
+        // heard of, under this build's own stamp.
+        let from_a_later_build = encode_body(br#"{"Retired":{"shard":3}}"#);
         let why = match admit(&applied(9, from_a_later_build), "acct") {
             Err(why) => why,
             Ok(_) => panic!("a command from a later build was admitted rather than refused"),

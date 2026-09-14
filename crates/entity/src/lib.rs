@@ -105,8 +105,6 @@ mod blobs;
 mod blocking;
 mod cdc;
 mod config;
-#[cfg(test)]
-mod corpus;
 mod disk;
 mod election;
 mod entity;

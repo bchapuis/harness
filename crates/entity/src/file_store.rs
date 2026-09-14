@@ -51,10 +51,10 @@
 //!   rewritten (atomically) only when the term advances (on failover and recovery
 //!   `prepare`, never on a steady-state append), and loaded eagerly on open, so the
 //!   fence is known before any entity's records load lazily. A stamped format,
-//!   `entity.store.fence` (compatibility §3), whose reader also accepts the
-//!   unstamped predecessor. A file this build cannot read is a **refusal that fails
-//!   `open`**, not an absent fence: reading a damaged fence as "no fence" would
-//!   withdraw **E1** with no diagnostic, and there is nothing safe to guess.
+//!   `entity.store.fence` (compatibility §3). A file this build cannot read is a
+//!   **refusal that fails `open`**, not an absent fence: reading a damaged fence
+//!   as "no fence" would withdraw **E1** with no diagnostic, and there is nothing
+//!   safe to guess.
 //! - `seals/<shard>`, the per-shard **append bound** (§7.7): refuse appends at or
 //!   above this name hash. Durable and loaded eagerly for the same reason as the
 //!   fence: a restart that forgot the bound could let a stale leader assemble a
@@ -180,16 +180,16 @@ const DEFAULT_SEGMENT_CAPACITY: usize = 65536;
 /// an instance (the directory admits one writer); two types never do (§8.2).
 type StoreCache = Mutex<HashMap<(String, NodeId), Arc<FileEntityStore>>>;
 
-/// The schema revisions of this store's two log record types, stamped into each log's
-/// header (compatibility spec §3). They are separate boundaries because the two logs
+/// The schema versions of this store's two log record types, stamped into each log's
+/// header (compatibility spec §3). They are separate formats because the two logs
 /// evolve independently: adding a field to [`SegOp`] says nothing about
 /// [`ManifestEntry`].
 ///
-/// Both are `postcard`, so neither type can gain or reorder a field within a revision.
+/// Both are `postcard`, so neither type can gain or reorder a field within a version.
 /// An enum may still grow variants at its **end**, which `postcard` encodes as a higher
 /// discriminant and which no existing record can carry; that needs no bump.
-const MANIFEST_RECORDS: compat::Window = compat::Window::at("entity.store.manifest", 1);
-const SEGMENT_RECORDS: compat::Window = compat::Window::at("entity.store.segment", 1);
+const MANIFEST_RECORDS: compat::Format = compat::Format::new("entity.store.manifest", 1);
+const SEGMENT_RECORDS: compat::Format = compat::Format::new("entity.store.segment", 1);
 
 /// One mutating call on an entity's segment, as logged and replayed. Replaying a
 /// segment's ops through a fresh [`EntityRecords`] reproduces its state exactly (the
@@ -659,7 +659,7 @@ fn acquire_lock(_dir: &Path) -> io::Result<Option<fs::File>> {
 /// bytes on the hottest durable path in the tree to answer the same question a
 /// million times.
 pub(crate) const STORE: compat::Stamp =
-    compat::Stamp::new(b"GRSTOR", compat::Window::at("entity.store", 1));
+    compat::Stamp::new(b"GRSTOR", compat::Format::new("entity.store", 1));
 
 /// The stamp file's name inside the store directory.
 const STORE_FILE: &str = "store";
@@ -674,68 +674,44 @@ struct StoreBody {
     /// deployment's codec, and an entity with records past its last snapshot (or no
     /// snapshot at all) has nothing else that would notice the codec changing.
     codec: String,
-    /// Room to grow without a revision bump (compatibility spec §2.1). The body is
-    /// `postcard`, which is positional, so without this any added field would be a
-    /// new revision with a second decoder to keep.
-    ext: compat::Extensions,
 }
-
-/// The critical extension keys this build implements: none yet. An unknown critical
-/// key is refused (**V2**): its writer said a reader must understand it.
-const STORE_EXT_KNOWN: &[u16] = &[];
 
 /// The stamp on a `fences/<shard>` file (compatibility §3, `entity.store.fence`).
 ///
 /// A per-file stamp rather than a field of [`STORE`]'s. A fence file is a durable
 /// byte sequence in its own right (restored from a backup, copied between
-/// directories, left behind by a half-finished upgrade), and delegating its identity
-/// to a neighbouring file is what a stamp exists to stop (**V1**). It would also
-/// couple two formats that evolve apart (**V6**), and `admit_store_stamp` adopts an
-/// unstamped directory without inspecting anything, so the store's revision would
-/// end up asserting a fence layout nothing had looked at, on the one boundary whose
-/// misread costs a safety property rather than a decode.
-///
-/// The granularity rule prices this per *item*, and here it rounds to nothing: one
-/// file per shard, rewritten only when the term advances, on a write whose real
-/// expense is the fsync of a block it already occupies.
-///
-/// `GRFNCE` cannot be confused with the unstamped predecessor, whose leading eight
-/// bytes are a term: aliasing it needs term 0x45434E465247, some 7.6e13 elections
-/// away. The width is a second, independent discriminator.
-pub(crate) const FENCE: wal::Sidecar = wal::Sidecar::new(
-    compat::Stamp::new(b"GRFNCE", compat::Window::at("entity.store.fence", 1)),
-    &[],
-);
+/// directories), and delegating its identity to a neighbouring file is what a stamp
+/// exists to stop (**V1**). The cost rounds to nothing: one file per shard,
+/// rewritten only when the term advances, on a write whose real expense is the
+/// fsync of a block it already occupies.
+pub(crate) const FENCE: wal::Sidecar = wal::Sidecar::new(compat::Stamp::new(
+    b"GRFNCE",
+    compat::Format::new("entity.store.fence", 1),
+));
 
 /// The stamp on a `seals/<shard>` file (compatibility §3, `entity.store.seal`).
 ///
-/// A separate boundary from [`FENCE`] for the reason [`MANIFEST_RECORDS`] and
+/// A separate format from [`FENCE`] for the reason [`MANIFEST_RECORDS`] and
 /// [`SEGMENT_RECORDS`] are separate: a fence term (§8) and an append bound (§7.7)
-/// mean different things and evolve apart, and **V6** says a bump at one must not
-/// invalidate the other. They share a body and a reader (`wal::Sidecar`, wal §5),
-/// not a revision.
-pub(crate) const SEAL: wal::Sidecar = wal::Sidecar::new(
-    compat::Stamp::new(b"GRSEAL", compat::Window::at("entity.store.seal", 1)),
-    &[],
-);
+/// mean different things and evolve apart. They share a body and a reader
+/// (`wal::Sidecar`, wal §5), not a version.
+pub(crate) const SEAL: wal::Sidecar = wal::Sidecar::new(compat::Stamp::new(
+    b"GRSEAL",
+    compat::Format::new("entity.store.seal", 1),
+));
 
-/// Confirm `dir` holds records `codec` can read, stamping it if it is not stamped.
+/// Confirm `dir` holds records `codec` can read, stamping a fresh directory.
 ///
-/// **An unstamped directory is adopted, not refused.** Refusing would make this
-/// check a migration for every store that predates it; adoption records the codec
-/// running now. Adoption cannot verify the claim it writes down, so a store whose
-/// codec was *already* swapped is stamped with the wrong answer and its records
-/// still fail one entity at a time. The stamp protects every swap after it, never
-/// one that already happened, which is why the compatibility spec files this as
-/// worth having *before* a codec change.
+/// A directory with no `store` file is a fresh store: the codec running now is
+/// written down, and every later open is held to it.
 fn admit_store_stamp(dir: &Path, codec: &str) -> io::Result<()> {
     let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
     let path = dir.join(STORE_FILE);
     match fs::read(&path) {
         Ok(bytes) => {
-            // Revision first, then the extension area, then the body: nothing reads a
-            // field until the bytes have been admitted as this format at all.
-            let (_, body) = STORE
+            // Version first, then the body: nothing reads a field until the bytes
+            // have been admitted as this format at all.
+            let body = STORE
                 .unstamp(&bytes)
                 .map_err(|err| invalid(format!("entity store at {}: {err}", dir.display())))?;
             let body: StoreBody = postcard::from_bytes(body).map_err(|err| {
@@ -744,9 +720,6 @@ fn admit_store_stamp(dir: &Path, codec: &str) -> io::Result<()> {
                     dir.display()
                 ))
             })?;
-            body.ext
-                .admit(STORE.window().boundary(), STORE_EXT_KNOWN)
-                .map_err(|err| invalid(format!("entity store at {}: {err}", dir.display())))?;
             if body.codec != codec {
                 return Err(invalid(format!(
                     "entity store at {}: written with codec '{}', but this node runs \
@@ -764,7 +737,6 @@ fn admit_store_stamp(dir: &Path, codec: &str) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             let body = postcard::to_allocvec(&StoreBody {
                 codec: codec.to_string(),
-                ext: compat::Extensions::new(),
             })
             .expect("the stamp body is plain owned data");
             wal::atomic_replace(dir, STORE_FILE, &STORE.stamp(&body))
@@ -1324,146 +1296,6 @@ mod tests {
         EntityName::new("test.Entity", key)
     }
 
-    // --- Golden corpus (compatibility spec §4) --------------------------------
-    //
-    // Both logs stamp a *record schema* into their header, and both record types
-    // are `postcard`, which is positional: adding or reordering a field compiles
-    // cleanly and makes every stored segment unreadable. These fixtures are the
-    // only thing that notices. See `crate::corpus` for why they are never
-    // regenerated.
-
-    /// Stage checked-in bytes as a log file and hand back its path.
-    ///
-    /// Never opened in place: `Wal::open` truncates a torn tail, so a build that
-    /// could not read the fixture would rewrite it and erase the failure.
-    fn stage(dir: &tempfile::TempDir, bytes: &[u8]) -> std::path::PathBuf {
-        let path = dir.path().join("log");
-        std::fs::write(&path, bytes).expect("stage the fixture");
-        path
-    }
-
-    /// Write `records` into a fresh log under `window` and return its bytes.
-    fn produce_log<T: Serialize + serde::de::DeserializeOwned>(
-        records: &[T],
-        window: &compat::Window,
-    ) -> Vec<u8> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log");
-        let (mut log, _) = Wal::<T>::open(&path, MAX_RECORD, window).expect("open a fresh log");
-        log.append_batch(records).expect("append");
-        drop(log);
-        std::fs::read(&path).expect("read back the produced log")
-    }
-
-    /// The corpus manifest entries, and they must never change: the checked-in
-    /// bytes *are* these values. The v1 fixture predates the entity rename and
-    /// carries the type string it was written with.
-    fn corpus_manifest() -> Vec<ManifestEntry> {
-        vec![
-            ManifestEntry {
-                shard: 0,
-                entity: EntityName::new("test.Grain", "a"),
-                id: 0,
-            },
-            ManifestEntry {
-                shard: 7,
-                entity: EntityName::new("test.Other", ""),
-                id: 42,
-            },
-        ]
-    }
-
-    #[test]
-    fn entity_store_manifest_v1_still_replays_its_entries() {
-        let bytes = crate::corpus::golden("entity.store.manifest", 1, || {
-            produce_log(&corpus_manifest(), &MANIFEST_RECORDS)
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_log, entries) =
-            Wal::<ManifestEntry>::open(stage(&dir, &bytes), MAX_RECORD, &MANIFEST_RECORDS)
-                .expect("this build must read an entity.store.manifest v1 log it accepts");
-
-        let found: Vec<(u32, EntityName, u64)> = entries
-            .into_iter()
-            .map(|e| (e.shard, e.entity, e.id))
-            .collect();
-        let expected: Vec<(u32, EntityName, u64)> = corpus_manifest()
-            .into_iter()
-            .map(|e| (e.shard, e.entity, e.id))
-            .collect();
-        assert_eq!(
-            found, expected,
-            "manifest entries decoded to different values than they were written from",
-        );
-    }
-
-    /// The corpus segment ops: every [`SegOp`] variant, in an order whose replay
-    /// leaves a state worth asserting; a checkpoint, two appends past it, a
-    /// snapshot that advances the base, and a truncate that drops the last append.
-    fn corpus_segment() -> Vec<SegOp> {
-        let mut records = EntityRecords::default();
-        records.store_record(
-            Seq::ZERO,
-            Term::new(1),
-            vec![b"e1".to_vec(), b"e2".to_vec()],
-            WriteKind::Append,
-        );
-        vec![
-            SegOp::Checkpoint(records.export()),
-            SegOp::Record {
-                after: Seq::new(2),
-                term: Term::new(1),
-                records: vec![b"e3".to_vec()],
-                kind: WriteKind::Append,
-            },
-            SegOp::Record {
-                after: Seq::new(3),
-                term: Term::new(1),
-                records: vec![b"e4".to_vec()],
-                kind: WriteKind::Append,
-            },
-            SegOp::Snapshot {
-                at: Seq::new(2),
-                term: Term::new(1),
-                state: b"snap".to_vec(),
-            },
-            SegOp::Truncate {
-                after: Seq::new(3),
-                term: Term::new(1),
-            },
-        ]
-    }
-
-    #[test]
-    fn entity_store_segment_v1_still_replays_to_the_same_segment() {
-        let bytes = crate::corpus::golden("entity.store.segment", 1, || {
-            produce_log(&corpus_segment(), &SEGMENT_RECORDS)
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = stage(&dir, &bytes);
-        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
-        std::fs::rename(&path, dir.path().join("segments").join("0")).unwrap();
-
-        // Replayed through the real `open_segment`, so the fixture pins the whole
-        // read path (the header's schema stamp, the frame scan, and the fold)
-        // rather than just `postcard`.
-        let segment = open_segment(dir.path(), 0)
-            .expect("this build must read an entity.store.segment v1 log it accepts");
-        let inner = segment.inner.lock().unwrap();
-        assert_eq!(
-            inner.records.head(),
-            Seq::new(3),
-            "the replayed head moved: an op decoded to something else",
-        );
-        assert_eq!(
-            inner.records.snapshot(),
-            Some((Seq::new(2), b"snap".to_vec())),
-            "the replayed snapshot moved: a Snapshot op decoded to something else",
-        );
-    }
-
     // --- The store stamp (spec §7.4, compatibility spec §3.4) -----------------
 
     #[test]
@@ -1515,13 +1347,13 @@ mod tests {
     }
 
     #[test]
-    fn a_store_from_another_revision_is_refused_as_a_revision() {
+    fn a_store_from_another_version_is_refused_as_a_version() {
         // Not as a corrupt store, and without the body being decoded at all: the
-        // revision is admitted before anything downstream sees a byte (**V2**).
+        // version is admitted before anything downstream sees a byte (**V2**).
         let dir = tempfile::tempdir().unwrap();
         FileEntityStore::open(dir.path(), TEST_CODEC).expect("open");
         let mut bytes = std::fs::read(dir.path().join(STORE_FILE)).expect("read the stamp");
-        // The revision is a little-endian `u16` immediately after the magic.
+        // The version is a little-endian `u16` immediately after the magic.
         let head = b"GRSTOR".len();
         bytes[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
         std::fs::write(dir.path().join(STORE_FILE), &bytes).expect("rewrite the stamp");
@@ -1532,50 +1364,25 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("entity.store") && msg.contains("v9"),
-            "the refusal must name the boundary and what it found: {msg}",
+            "the refusal must name the format and what it found: {msg}",
         );
     }
 
     #[test]
-    fn an_unstamped_store_is_adopted_rather_than_refused() {
-        // A store predating the stamp keeps working; adoption writes down the codec
-        // running now. It cannot verify that claim (see `admit_store_stamp`), so
-        // what this pins is that the check is not a migration.
+    fn an_unstamped_store_is_refused_rather_than_guessed_at() {
+        // A `store` file that is not a stamped record is not a fresh store and not
+        // this build's: the codec that wrote the directory is unknown, and guessing
+        // it is the per-entity failure storm the stamp exists to prevent.
         let dir = tempfile::tempdir().unwrap();
-        let store = FileEntityStore::open(dir.path(), TEST_CODEC).expect("open");
-        drop(store);
-        std::fs::remove_file(dir.path().join(STORE_FILE)).expect("un-stamp the store");
+        drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
+        std::fs::write(dir.path().join(STORE_FILE), b"json").expect("un-stamp the store");
 
-        FileEntityStore::open(dir.path(), TEST_CODEC).expect("an unstamped store must still open");
+        let Err(err) = FileEntityStore::open(dir.path(), TEST_CODEC) else {
+            panic!("an unstamped store file must not open");
+        };
         assert!(
-            dir.path().join(STORE_FILE).exists(),
-            "adoption must leave the store stamped, so the next codec change is caught",
-        );
-    }
-
-    #[test]
-    fn entity_store_v1_still_admits_its_codec() {
-        let bytes = crate::corpus::golden("entity.store", 1, || {
-            let body = postcard::to_allocvec(&StoreBody {
-                codec: "json".to_string(),
-                ext: compat::Extensions::new(),
-            })
-            .expect("encode the corpus body");
-            STORE.stamp(&body)
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(STORE_FILE), &bytes).expect("stage the fixture");
-        admit_store_stamp(dir.path(), "json")
-            .expect("this build must read an entity.store v1 stamp it accepts");
-
-        // And the fixture pins the refusal too: the same bytes under another codec
-        // are what an operator would hit after a swap.
-        let err = admit_store_stamp(dir.path(), "postcard")
-            .expect_err("the fixture must not admit another codec");
-        assert!(
-            err.to_string().contains("json"),
-            "the refusal must name the codec that wrote the store: {err}",
+            err.to_string().contains("entity.store"),
+            "the refusal must name the format: {err}",
         );
     }
 
@@ -1585,73 +1392,9 @@ mod tests {
         std::fs::write(dir.join(kind).join("0"), bytes).expect("stage a sidecar");
     }
 
-    /// A fence or seal in the shape both files had before they carried a stamp.
-    fn legacy_sidecar(value: u64) -> Vec<u8> {
-        let mut bytes = value.to_le_bytes().to_vec();
-        bytes.extend_from_slice(&wal::checksum(&value.to_le_bytes()).to_le_bytes());
-        bytes
-    }
-
-    /// A stamped fence or seal, encoded the way this build writes one. The corpus
-    /// fixture is what pins these bytes across builds (`crate::corpus::golden`), so
-    /// the encoder is shared with the writer rather than transcribed here; that the
-    /// *store* writes stamped at all is asserted separately, by
-    /// `a_fence_and_a_seal_are_written_stamped`.
+    /// A stamped fence or seal, encoded the way this build writes one.
     fn stamped_sidecar(sidecar: &wal::Sidecar, value: u64) -> Vec<u8> {
         sidecar.encode(value)
-    }
-
-    #[test]
-    fn entity_store_fence_v1_still_reads_its_term() {
-        let bytes = crate::corpus::golden("entity.store.fence", 1, || stamped_sidecar(&FENCE, 7));
-
-        let dir = tempfile::tempdir().unwrap();
-        drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
-        stage_sidecar(dir.path(), "fences", &bytes);
-
-        let store = FileEntityStore::open(dir.path(), TEST_CODEC).expect("reopen with the fixture");
-        assert!(
-            matches!(
-                store.bump_fence(0, Term::new(6)),
-                Err(BumpRefusal::Fenced(fence)) if fence == Term::new(7)
-            ),
-            "the fixture's term must still fence a lower one",
-        );
-    }
-
-    #[test]
-    fn entity_store_seal_v1_still_reads_its_bound() {
-        let bytes = crate::corpus::golden("entity.store.seal", 1, || stamped_sidecar(&SEAL, 4242));
-
-        let dir = tempfile::tempdir().unwrap();
-        drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
-        stage_sidecar(dir.path(), "seals", &bytes);
-
-        let store = FileEntityStore::open(dir.path(), TEST_CODEC).expect("reopen with the fixture");
-        assert_eq!(
-            store.seals.lock().unwrap().get(&0).copied(),
-            Some(4242),
-            "the fixture's bound must still load",
-        );
-    }
-
-    #[test]
-    fn an_unstamped_fence_is_adopted_rather_than_refused() {
-        // A store predating the stamp keeps its fence. Refusing here would make the
-        // stamp a migration for every existing store, and the reader has an
-        // unambiguous predecessor to fall back on.
-        let dir = tempfile::tempdir().unwrap();
-        drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
-        stage_sidecar(dir.path(), "fences", &legacy_sidecar(7));
-
-        let store = FileEntityStore::open(dir.path(), TEST_CODEC).expect("adopt the legacy fence");
-        assert!(
-            matches!(
-                store.bump_fence(0, Term::new(6)),
-                Err(BumpRefusal::Fenced(fence)) if fence == Term::new(7)
-            ),
-            "an adopted fence must fence exactly as it did before",
-        );
     }
 
     /// **The load-bearing one.** Every representable way of getting a fence file
@@ -1668,10 +1411,14 @@ mod tests {
         let last = torn.len() - 1;
         torn[last] ^= 0xff;
 
+        let mut bare = 7u64.to_le_bytes().to_vec();
+        bare.extend_from_slice(&wal::checksum(&7u64.to_le_bytes()).to_le_bytes());
+
         for (what, bytes) in [
-            ("a revision this build does not accept", future),
+            ("a version this build does not accept", future),
             ("a stamped record whose body is damaged", torn),
-            ("a file of no recognized width", vec![0u8; 20]),
+            ("a bare value with no stamp", bare),
+            ("a file of no recognized shape", vec![0u8; 20]),
         ] {
             let dir = tempfile::tempdir().unwrap();
             drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
@@ -1683,36 +1430,11 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert!(
                 err.to_string().contains("entity.store.fence"),
-                "{what}: the refusal must name the boundary: {err}",
+                "{what}: the refusal must name the format: {err}",
             );
         }
     }
 
-    /// The deliberate behaviour change: a torn *legacy* fence used to read as no
-    /// fence, and now refuses. A store that fails to open is recoverable; one that
-    /// silently forgot which terms it had already refused is not.
-    #[test]
-    fn a_torn_legacy_fence_is_refused_rather_than_read_as_no_fence() {
-        let dir = tempfile::tempdir().unwrap();
-        drop(FileEntityStore::open(dir.path(), TEST_CODEC).expect("open"));
-        let mut torn = legacy_sidecar(7);
-        torn[0] ^= 0xff; // the value moves; the checksum no longer covers it
-        stage_sidecar(dir.path(), "fences", &torn);
-
-        let Err(err) = FileEntityStore::open(dir.path(), TEST_CODEC) else {
-            panic!("a torn legacy fence must refuse, not read as no fence");
-        };
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string().contains("checksum"),
-            "the refusal must say what is wrong with it: {err}",
-        );
-    }
-
-    /// **V4**'s write step: the release before this one taught every build to read
-    /// the stamped form, so writing it is now safe. A build predating *that*
-    /// release reads a stamped fence as no fence, which is why the two steps could
-    /// not be one.
     #[test]
     fn a_fence_and_a_seal_are_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1723,20 +1445,20 @@ mod tests {
 
         for (kind, sidecar) in [("fences", &FENCE), ("seals", &SEAL)] {
             let bytes = std::fs::read(dir.path().join(kind).join("0")).expect("read the sidecar");
-            assert!(
-                sidecar.stamp().is_stamped(&bytes),
-                "{kind} must be written stamped"
-            );
+            sidecar
+                .stamp()
+                .unstamp(&bytes)
+                .unwrap_or_else(|err| panic!("{kind} must be written stamped: {err}"));
         }
 
-        // And what it wrote, it reads back (**V3**).
+        // And what it wrote, it reads back.
         let store = FileEntityStore::open(dir.path(), TEST_CODEC).expect("reopen");
         assert!(
             matches!(
                 store.bump_fence(0, Term::new(2)),
                 Err(BumpRefusal::Fenced(fence)) if fence == Term::new(3)
             ),
-            "a stamped fence must fence exactly as an unstamped one did",
+            "the fence must read back as it was written",
         );
         assert_eq!(store.seals.lock().unwrap().get(&0).copied(), Some(99));
     }

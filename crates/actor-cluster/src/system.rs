@@ -686,10 +686,10 @@ where
             // can still perform them (`raft_driver`).
             //
             // `admit` rather than `decode`, so the reason an operator reads names a
-            // *revision* where there is one (`actor.membership`, compatibility §3).
+            // *version* where there is one (`actor.membership`, compatibility §3).
             //
             // Two `admit`s meet here, one word from each spec's vocabulary: this
-            // one admits a payload's revision (compatibility §2, bytes at rest),
+            // one admits a payload's version (compatibility §2, bytes at rest),
             // while `ClusterSystem::admit`, whose committed
             // `MembershipCommand::Admit` this decodes, admits a *member* (§9.3).
             let command = match MembershipCommand::admit(&command) {

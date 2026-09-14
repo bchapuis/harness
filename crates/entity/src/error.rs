@@ -24,7 +24,7 @@ pub enum EntityError {
     Call(CallError),
     /// Leadership moved off the contacted node; the runtime retries against the
     /// hint and surfaces this only once the bounded redirect is exhausted (§5.4,
-    /// §8). Unreachable in the `Local` single-node journal, kept for API stability.
+    /// §8). Unreachable in the `Local` single-node journal.
     NotLeader(NodeId),
     /// The entity's shard could not reach a quorum, **or** the commit timed out
     /// (§11). CP, not AP: the caller retries or fails over rather than forking.
@@ -38,7 +38,7 @@ pub enum EntityError {
     /// idempotence (§2.2). Contrast [`NotLeader`], which the spec does pin as
     /// never committing.
     ///
-    /// Unreachable in the `Local` single-node journal, kept for API stability.
+    /// Unreachable in the `Local` single-node journal.
     ///
     /// [`NotLeader`]: EntityError::NotLeader
     Unavailable(String),

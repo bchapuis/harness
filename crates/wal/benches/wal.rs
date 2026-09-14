@@ -47,21 +47,12 @@ impl Rec {
 /// [`wal::Wal::open`] requires.
 const MAX_RECORD: u32 = 1 << 20;
 
-/// The caller's record schema. The benchmarks never cross a revision, so any fixed
-/// window does.
-const RECORDS: compat::Window = compat::Window::at("bench.records", 1);
+/// The caller's record schema; any fixed format does.
+const RECORDS: compat::Format = compat::Format::new("bench.records", 1);
 
-/// The sidecar digest, at the width sidecars actually are.
-///
-/// [`wal::checksum`](wal::checksum) is frozen: a sidecar has no header naming which
-/// digest wrote it, so its value cannot change without every existing one reading back as
-/// missing. It is benchmarked at eight bytes because that is the only size anything calls
-/// it with (a fence term, a seal bound, a tombstone timestamp), and at that width a
-/// byte-at-a-time loop is already a handful of cycles. The number is here so a future
-/// change to this function is visible.
-///
-/// The frame digest is a different function and is deliberately private. Its throughput
-/// reaches the product through `replay`, below, which is where it is measured.
+/// The digest at the width a sidecar value has. Sidecars are the only caller at eight
+/// bytes (a fence term, a seal bound, a tombstone timestamp); the digest's throughput on
+/// frames reaches the product through `replay`, below, which is where it is measured.
 #[divan::bench]
 fn sidecar_checksum(bencher: Bencher) {
     let bytes = 0u64.to_le_bytes();

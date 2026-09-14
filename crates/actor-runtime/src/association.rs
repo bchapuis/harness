@@ -141,9 +141,9 @@ impl<A: Association> Slots<A> {
     }
 
     /// Offer a freshly created association for `peer`. If a live one already
-    /// holds the slot (a concurrent dial won) it is kept whole (its
-    /// negotiated revision is the one whose frames will travel) and the
-    /// candidate loses; otherwise the candidate takes the slot.
+    /// holds the slot (a concurrent dial won) it is kept whole (it is the one
+    /// whose frames will travel) and the candidate loses; otherwise the candidate
+    /// takes the slot.
     pub(crate) fn admit(&mut self, peer: NodeId, candidate: A) -> Admitted<A> {
         if let Some(existing) = self.slots.get(&peer).filter(|a| a.is_live()) {
             return Admitted::Lost(existing.clone());

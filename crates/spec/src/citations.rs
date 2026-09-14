@@ -45,7 +45,7 @@
 //!   while a bare `spec §6.1` stays unprefixed. The search crosses a line break,
 //!   because a wrapped paragraph splits `sandbox` from its `spec §3.4`, but not a
 //!   blank line.
-//! - **A markdown link is a prefix.** The compatibility spec's boundary table
+//! - **A markdown link is a prefix.** The compatibility spec's format table
 //!   writes `[entity](entity-spec.md) §7.12`, naming the document by link rather
 //!   than by short prefix.
 //! - **A prefix carries across separators.** `actor §18.5/§18.6` cites the actor

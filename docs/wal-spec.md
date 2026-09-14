@@ -34,7 +34,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
    where `payload` is the `postcard` encoding of the record and `length` is the payload's byte length.
 
-2. The checksum MUST be 64 bits over the payload bytes only, computed with the digest the file's header names (§2.1): kind `1` is **FNV-1a** (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), kind `2` is **XXH3-64**. A build MUST scan a file with the digest that file records, never with the one it prefers, and MUST NOT append to a file in a digest other than its own header's: a file is one digest throughout, and a log moves to another only through `rewrite`, which replaces the header with the frames. New logs are stamped kind `2`; kind `1` is read but not stamped. Either digest detects torn and partial writes, **not** adversarial tampering, which is all a local log needs. Each MUST be stable: a given kind MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
+2. The checksum MUST be 64 bits over the payload bytes only, **XXH3-64**. It detects torn and partial writes, **not** adversarial tampering, which is all a local log needs. It MUST be stable: it MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore unacceptable.)
 
 3. The log file is a **header** (§2.1) followed by the concatenation of zero or more such frames in append order. There is no trailer and no global checksum: past the header, the file's meaning is the maximal sequence of valid frames (§3.1).
 
@@ -43,22 +43,20 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 1. Every log file MUST open with:
 
    ```
-   [magic 8] [u16 frame revision] [u16 checksum kind] [u16 record schema] [u16 reserved]
+   [magic 8] [u16 frame version] [u16 record schema]
    ```
 
    all little-endian. The magic is `89 57 41 4C 0D 0A 1A 0A` (`\x89WAL\r\n\x1a\n`), the PNG convention: a high-bit byte, the name, then a CRLF/EOF trap that catches a text-mode transfer.
 
-2. `open` MUST admit the whole header (magic, then frame revision, then checksum kind, then record schema) **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
+2. `open` MUST admit the whole header (magic, then frame version, then record schema) **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
 
-3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, because a revision-1 reader refuses a revision-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across revisions: they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
+3. The header's **length and layout belong to the frame version**, not to the format for all time. Version 1 is the twelve bytes above; a later version may define a different header entirely, because a version-1 reader refuses a version-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across versions: they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is twelve bytes.
 
-4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest (§2 rule 2); it is matched, not compared, being an identity rather than an ordering, and a kind this build cannot compute is refused by name rather than left to fail every frame as though the file were corrupt. Every 64-bit digest shares the frame layout, so kind `2` joined kind `1` as a header change rather than a layout one, and both stay readable. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
+4. **Frame version** versions §2's framing; version 1 is the layout above. Every header byte is validated against a known value, so no detectable damage passes silently. The header carries no checksum of its own.
 
-5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
+5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Format`, stamps its version into a new file, admits the field on an existing one, and never interprets it. `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a version and its version has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
 
-6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. A file `open` refuses surfaces as `std::io::ErrorKind::InvalidData`, its message naming the boundary and the revision found, so a caller that logs it says which file and which build disagree.
-
-   `append` does **not** update the record-schema field; `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. This is fail-closed: every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
+6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. A file `open` refuses surfaces as `std::io::ErrorKind::InvalidData`, its message naming the format and the version found, so a caller that logs it says which file and which build disagree. `rewrite` stamps the header afresh, since the replacement is a whole file.
 
 7. A file whose bytes are a **prefix** of the header `open` would write MUST be stamped in place rather than refused: the header is written and fsynced before any frame can follow it, so such a file holds no records and stamping it loses nothing. This covers a missing file, an empty one, and a header torn by a crash between creating the file and syncing it, which would otherwise turn a benign crash into a log that can never be opened. Any other file too short to hold a header MUST be refused, so the rule is not a licence to overwrite a foreign file.
 
@@ -116,11 +114,11 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
    Concurrent calls on one `name` MUST therefore all succeed, and the file that lands MUST be exactly one caller's whole bytes. Which one is unspecified: this replaces atomically, it does not serialize. A crash between create and rename MAY leave a scratch file behind, so a caller that enumerates such a directory MUST skip names it cannot decode.
 
-2. `checksum(bytes)` MUST be FNV-1a, 64-bit, exposed so a caller can frame its own sidecar bytes (e.g. a fixed-width `[u64 value][u64 checksum]` record). **Its output is frozen**, and unlike a frame's digest (§2 rule 2) it MUST NOT change: a sidecar carries no header, so a reader cannot ask which digest wrote it and can only recompute and compare; callers read a mismatch as *torn or absent* rather than as a refusal. Changing it would make every existing sidecar read as missing, so a durable fence would come back as no fence: a safety failure, not a compatibility one. A digest behind a version field may change; a digest without one may not.
+2. `checksum(bytes)` is the frame digest of §2 rule 2, exposed so a caller can frame its own sidecar bytes.
 
 3. `sync_dir(dir)` MUST make a directory entry durable: on unix, fsync the directory; elsewhere (where directories cannot be opened for sync) the rename is itself the durability point and the call is a no-op. Exposed for a caller that creates its own subdirectories to hold logs.
 
-4. `Sidecar` is the stamped `u64` sidecar: one value written whole to a file of its own under a caller-owned `compat::Stamp` (a fence term, a seal bound, a deletion stamp). `write` MUST persist it through `atomic_replace`. The body behind the stamp is positional `postcard`, `{ checksum, value, ext }`, the checksum being rule 2's `checksum` over the value's little-endian bytes and `ext` an extension area whose critical keys the caller declares ([compatibility](compatibility-spec.md) §2.1). `read` MUST accept the stamped form and the unstamped predecessor, a 16-byte `[u64 value][u64 checksum]`, admitting a stamped record's revision before reading any field (**V2**) and reading only magic-less bytes as the predecessor; nothing writes the predecessor. `read` MUST answer `None` for an absent file only: a short file, a long file, or a checksum mismatch is an `InvalidData` refusal naming the boundary and the path, because a durable fence read as *no fence* is a safety property lost with no diagnostic.
+4. `Sidecar` is the stamped `u64` sidecar: one value written whole to a file of its own under a caller-owned `compat::Stamp` (a fence term, a seal bound, a deletion stamp). `write` MUST persist it through `atomic_replace`. The body behind the stamp is positional `postcard`, `{ checksum, value }`, the checksum being rule 2's `checksum` over the value's little-endian bytes. `read` MUST admit the stamp's version before reading any field (**V2**), and MUST answer `None` for an absent file only: a short file, a long file, a foreign or missing magic, or a checksum mismatch is an `InvalidData` refusal naming the format and the path, never an absence, because a durable fence coming back as *no fence* is a safety property lost with no diagnostic anywhere.
 
 ---
 
@@ -144,7 +142,6 @@ The catalogue is machine-readable beside those suites, guarded by the drift test
 | L2 | **Acknowledged-record durability.** A record acknowledged by a returned `append`/`append_batch`/`rewrite` is recovered byte-identically across a reopen, unless a later `truncate` or `rewrite` removes it; each such call fsyncs its effect (and the directory entry on file creation) before returning. | §3.2–§3.4 | `records_round_trip_across_a_reopen`, `truncate_drops_a_conflicting_suffix`, `rewrite_replaces_the_whole_file_and_reopens`; across crash points, `every_truncation_recovers_a_prefix_and_stays_recovered` (the recovered prefix is rewritten to disk and still appends) |
 | L3 | **Atomic whole-file replacement.** `rewrite` and `atomic_replace` leave, after any crash, either the whole prior file or the whole new file, never a torn intermediate. Concurrent `atomic_replace` calls on one name all succeed, and the file that lands is one caller's whole bytes. | §3.4, §5 | `rewrite_replaces_the_whole_file_and_reopens`, `atomic_replace_round_trips_a_sidecar`, `concurrent_replaces_of_one_name_all_succeed_and_none_tears`, `rewrite_restamps_the_replacement` |
 | L4 | **Write/recovery bound agreement.** `max_record` bounds a frame's payload identically at both ends: a payload recovery would reject for size cannot be written: the write panics instead of acknowledging a record the next `open` would silently drop. | §4 | `appending_a_record_past_the_limit_panics_instead_of_losing_it` |
-| L5 | **A file is read at the digest it records.** A log opens, scans, and continues to be appended with the checksum kind its own header names, whichever kind this build prefers; a kind the build cannot compute is refused by name. A file is never a mix of two digests, and only `rewrite` restamps one. | §2 rule 2, §2.1 rule 4 | `a_log_at_an_older_digest_still_opens_and_keeps_its_digest`, `a_foreign_checksum_kind_is_refused_by_name` |
 
 ---
 
@@ -153,7 +150,7 @@ The catalogue is machine-readable beside those suites, guarded by the drift test
 Non-goals (today and by design):
 
 - **No concurrency.** One handle, one writer; the caller provides single-writer discipline. The crate adds no locking.
-- **No tamper resistance.** Both digests catch accidental corruption, not a malicious edit.
+- **No tamper resistance.** The digest catches accidental corruption, not a malicious edit.
 - **No segmentation or rotation.** A `Wal<T>` is one file. A caller that wants bounded files segments above the crate (§1) and compacts with `rewrite`.
 
 Possible future work, only if a caller needs it:

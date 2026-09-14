@@ -14,8 +14,8 @@
 //!   (`actor.raft.term`, compatibility §3) answers a different question (that
 //!   the bytes are this format at all), so a build skew is refused *by name*
 //!   rather than reported as the corruption this JSON body exists to detect. The
-//!   two have opposite fixes: roll the binary back, versus re-seed the node and
-//!   lose its vote history. The reader also accepts the unstamped predecessor.
+//!   two have opposite fixes: run the matching build, versus re-seed the node and
+//!   lose its vote history.
 //! - **`log`**: a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
 //!   entry)` records. Carrying the absolute index makes a crash mid-compaction
 //!   self-healing (below). Raft's truncate-then-append maps to
@@ -25,10 +25,10 @@
 //!   prefix (§9), rewritten by the same atomic replace as `term`. Written *before*
 //!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
 //!   than the log but never the reverse. Stamped as `actor.raft.snapshot`
-//!   (compatibility §3), with the reader accepting the unstamped predecessor. This
-//!   is the boundary where a *missing* stamp was most dangerous: an unstamped
-//!   `postcard` body has no first byte a reader can reject, so a wrong-format file
-//!   decodes to a plausible index and `open` then discards the log prefix below it.
+//!   (compatibility §3). This is the format where a *missing* stamp would be most
+//!   dangerous: a bare `postcard` body has no first byte a reader can reject, so a
+//!   wrong-format file decodes to a plausible index and `open` then discards the
+//!   log prefix below it.
 //!
 //! **Recovery.** At [`open`](FileRaftWAL::open), the snapshot is loaded, then the log
 //! is recovered by [`Wal::open`](wal::Wal::open) (which discards a torn tail). Records
@@ -78,27 +78,18 @@ use wal::Wal;
 /// scanning: a length above this is treated as corruption, not an allocation.
 const MAX_RECORD: u32 = 1 << 20;
 
-/// The schema revision of this log's `(index, RaftEntry)` records, stamped into the
-/// log's header (compatibility spec §3).
-///
-/// A node that cannot read its own log cannot rejoin without losing committed
-/// state, so bumping this follows **V4** without exception: widen the accepted
-/// range one release before anything writes the new revision.
-const LOG_RECORDS: compat::Window = compat::Window::at("actor.raft.log", 1);
+/// The schema version of this log's `(index, RaftEntry)` records, stamped into the
+/// log's header (compatibility spec §3). A node that cannot read its own log cannot
+/// rejoin without losing committed state.
+const LOG_RECORDS: compat::Format = compat::Format::new("actor.raft.log", 1);
 
 /// The stamp on the `term` file (compatibility spec §3, `actor.raft.term`).
 ///
-/// `\x89RFTERM\n` is `wal::MAGIC`'s convention, and the discrimination it buys
-/// here is total in both directions: the rare case. A `term` file that predates
-/// the stamp is `serde_json` of a struct, so it always begins `{`, and no JSON
-/// value may begin `0x89`. A stamped reader can never take the predecessor for a
-/// stamp, and a build predating the stamp fails at byte 0 rather than parsing part
-/// of one.
+/// `\x89RFTERM\n` follows `wal::MAGIC`'s convention. The body behind it is JSON,
+/// which always begins `{`, and no JSON value may begin `0x89`, so a stamped file
+/// and a bare body can never be taken for one another.
 const TERM: compat::Stamp =
-    compat::Stamp::new(b"\x89RFTERM\n", compat::Window::at("actor.raft.term", 1));
-
-/// The critical extension keys the `term` file implements: none yet.
-const TERM_EXT_KNOWN: &[u16] = &[];
+    compat::Stamp::new(b"\x89RFTERM\n", compat::Format::new("actor.raft.term", 1));
 
 /// The `term` file's content (spec §9.4.3 item 2): the current term and the
 /// vote cast in it, always written together; they are one atomic decision.
@@ -106,70 +97,27 @@ const TERM_EXT_KNOWN: &[u16] = &[];
 struct TermRecord {
     term: u64,
     voted_for: Option<NodeId>,
-    /// Room to grow without a revision bump (compatibility spec §2.1).
-    ///
-    /// JSON already tolerates a field a reader does not know, so the *ancillary*
-    /// half of the rule comes free. What it cannot express is the other half
-    /// ("a reader that does not know this MUST refuse"), and the term file is
-    /// exactly where a silently-ignored field would cost election safety. A
-    /// pre-vote term or a lease recorded here and skipped by an older build is a
-    /// double vote waiting to happen.
-    ///
-    /// `default` is what makes adoption free: a legacy record with no such field
-    /// decodes into this struct with no second decoder anywhere.
-    /// `skip_serializing_if` keeps revision 1's bytes identical to what this file
-    /// held before the stamp, which the corpus fixture then pins.
-    #[serde(default, skip_serializing_if = "compat::Extensions::is_empty")]
-    ext: compat::Extensions,
 }
 
 /// The stamp on the `snapshot` file (compatibility spec §3, `actor.raft.snapshot`).
 ///
-/// The magic buys less here than at any other boundary in the tree. A `snapshot`
-/// file predating the stamp begins with a `postcard` varint, so *every* byte is a
-/// possible first byte of one: no magic can make the older decoder safe against
-/// stamped bytes. Read as a [`SnapshotRecord`], `\x89RFSNAP\n` decodes to
-/// `index = 10505`, `term = 70`, and a payload length of 83, and
-/// `postcard::from_bytes` ignores trailing bytes, so a snapshot with 83 bytes of
-/// state or more decodes *successfully* to a wrong index, after which
-/// [`FileRaftWAL::open`] drops every log record at or below it. Committed entries,
-/// gone silently.
-///
-/// What the magic buys is the forward direction, which is the one this build
-/// controls: a reader that has it never takes a stamped file for an unstamped one.
-/// The backward direction is why the writer flips a release later than the reader
-/// (**V4**), and `a_stamped_snapshot_misparses_under_the_older_decoder` pins the
-/// hazard so the ordering is not mistaken for ceremony.
+/// The stamp matters most here. A `postcard` body begins with a varint, so *every*
+/// byte is a possible first byte of one: read as a bare [`SnapshotBody`],
+/// `\x89RFSNAP\n` decodes to `index = 10505`, `term = 70`, and a payload length
+/// of 83, and `postcard::from_bytes` ignores trailing bytes. Without the magic
+/// being checked first, a wrong-format file with 83 bytes of state or more decodes
+/// *successfully* to a wrong index, after which [`FileRaftWAL::open`] drops every
+/// log record at or below it. Committed entries, gone silently.
+/// `a_stamped_snapshot_misparses_under_a_bare_decoder` pins the hazard.
 const SNAPSHOT: compat::Stamp = compat::Stamp::new(
     b"\x89RFSNAP\n",
-    compat::Window::at("actor.raft.snapshot", 1),
+    compat::Format::new("actor.raft.snapshot", 1),
 );
-
-/// The critical extension keys the `snapshot` file implements: none yet.
-const SNAPSHOT_EXT_KNOWN: &[u16] = &[];
 
 /// The `snapshot` file's content behind the stamp (spec §9): the compacted
 /// prefix's last index and term, and the application snapshot taken at it.
-///
-/// A second type rather than a field added to [`SnapshotRecord`], because
-/// `postcard` is positional: adding one there would change what every stored
-/// snapshot means, and **V4** wants the previous definition kept behind its own
-/// decoder anyway.
 #[derive(Serialize, Deserialize)]
 struct SnapshotBody {
-    index: u64,
-    term: u64,
-    data: Vec<u8>,
-    /// Room to grow without a revision bump (compatibility spec §2.1). Mandatory
-    /// here: the body is positional, so without it every added field is a revision
-    /// with a second decoder to keep.
-    ext: compat::Extensions,
-}
-
-/// The `snapshot` file's content **before** it carried a stamp: the shape a
-/// reader adopts, kept verbatim so the predecessor decodes exactly as it did.
-#[derive(Serialize, Deserialize)]
-struct SnapshotRecord {
     index: u64,
     term: u64,
     data: Vec<u8>,
@@ -218,13 +166,11 @@ impl FileRaftWAL {
         let term_path = dir.join("term");
         let (term, voted_for) = match fs::read(&term_path) {
             Ok(bytes) => {
-                // Both forms decode with the same JSON decoder, so the whole of the
-                // adoption is choosing the body (**V5**): a stamped file at a
-                // revision outside the window is refused as a skew (**V2**) and
-                // never reaches the decoder, while the unstamped predecessor is
-                // read exactly as it always was.
+                // The stamp is admitted before the body is decoded (**V2**): a file
+                // from another build is refused as a skew and never reaches the
+                // JSON decoder, whose failure means corruption.
                 let body = TERM
-                    .adopt(&bytes)
+                    .unstamp(&bytes)
                     .map_err(|err| skew_error("raft term file", &term_path, err))?;
                 let record: TermRecord = serde_json::from_slice(body).map_err(|err| {
                     corrupt_error(
@@ -234,10 +180,6 @@ impl FileRaftWAL {
                         err,
                     )
                 })?;
-                record
-                    .ext
-                    .admit(TERM.window().boundary(), TERM_EXT_KNOWN)
-                    .map_err(|err| ext_error("raft term file", &term_path, err))?;
                 (record.term, record.voted_for)
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => (0, None),
@@ -246,29 +188,14 @@ impl FileRaftWAL {
 
         let snapshot_path = dir.join("snapshot");
         let (snapshot_index, snapshot_term, snapshot) = match fs::read(&snapshot_path) {
-            // As with the term file: the magic decides which decoder runs, so a
-            // revision this build refuses is a named skew (**V2**) rather than
-            // bytes fed to the predecessor's decoder.
-            Ok(bytes) if SNAPSHOT.is_stamped(&bytes) => {
-                let (_, body) = SNAPSHOT
+            // As with the term file: the stamp is admitted first, so a file from
+            // another build is a named skew (**V2**) rather than bytes fed to a
+            // decoder that would read them as a plausible index (see `SNAPSHOT`).
+            Ok(bytes) => {
+                let body = SNAPSHOT
                     .unstamp(&bytes)
                     .map_err(|err| skew_error("raft snapshot file", &snapshot_path, err))?;
                 let record: SnapshotBody = postcard::from_bytes(body).map_err(|err| {
-                    corrupt_error(
-                        "raft snapshot file",
-                        &snapshot_path,
-                        "a compacted prefix",
-                        err,
-                    )
-                })?;
-                record
-                    .ext
-                    .admit(SNAPSHOT.window().boundary(), SNAPSHOT_EXT_KNOWN)
-                    .map_err(|err| ext_error("raft snapshot file", &snapshot_path, err))?;
-                (record.index, record.term, Some(record.data))
-            }
-            Ok(bytes) => {
-                let record: SnapshotRecord = postcard::from_bytes(&bytes).map_err(|err| {
                     corrupt_error(
                         "raft snapshot file",
                         &snapshot_path,
@@ -381,11 +308,7 @@ impl FileRaftWAL {
     /// The fallible body of [`RaftWAL::save_term_and_vote`]: atomic
     /// replace of the `term` file.
     fn persist_term(&self, term: u64, voted_for: Option<NodeId>) -> io::Result<()> {
-        let record = TermRecord {
-            term,
-            voted_for,
-            ext: compat::Extensions::new(),
-        };
+        let record = TermRecord { term, voted_for };
         let bytes = serde_json::to_vec(&record).expect("a TermRecord always serializes");
         wal::atomic_replace(&self.dir, "term", &TERM.stamp(&bytes))?;
         // In memory only after the disk write landed, so `load` after a failure
@@ -438,7 +361,6 @@ impl FileRaftWAL {
             index,
             term,
             data: data.to_vec(),
-            ext: compat::Extensions::new(),
         };
         let body = postcard::to_allocvec(&record).expect("a SnapshotBody always serializes");
         wal::atomic_replace(&self.dir, "snapshot", &SNAPSHOT.stamp(&body))?;
@@ -460,9 +382,9 @@ impl FileRaftWAL {
     }
 }
 
-/// A version-skew refusal (**V2**): the file is this format, from a revision
-/// this build does not accept. Deliberately worded as a skew and never as
-/// corruption: the remedy is a compatible build, and the state must be kept.
+/// A version-skew refusal (**V2**): the file is not this build's format, or not
+/// its version. Deliberately worded as a skew and never as corruption: the remedy
+/// is the matching build, and the state must be kept.
 fn skew_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -472,16 +394,6 @@ fn skew_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error
              keep the node's state",
             path.display()
         ),
-    )
-}
-
-/// An extension refusal (compatibility spec §2.1): the file carries a critical
-/// extension this build does not implement, so reading on could silently skip
-/// state that matters. The `err` already names the key and the remedy.
-fn ext_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("{what} {}: {err}", path.display()),
     )
 }
 
@@ -824,101 +736,40 @@ mod tests {
         assert_eq!(final_state.load(), mirror.load(), "diverged at the end");
     }
 
-    // --- Golden corpus (compatibility spec §4) --------------------------------
-
-    /// The corpus log records, and they must never change: the checked-in bytes
-    /// *are* these values.
-    ///
-    /// One of each [`EntryPayload`] variant, because `postcard` encodes a variant
-    /// as a positional discriminant, inserting a variant anywhere but the end
-    /// silently reinterprets every entry written under the ones after it. `App`
-    /// carries the `serde_bytes` shape whose encoding must stay byte-identical
-    /// (see its own note), so the fixture pins that too.
-    fn corpus_log() -> Vec<(u64, RaftEntry)> {
-        vec![
-            (1, entry(1, EntryPayload::Noop)),
-            (2, entry(1, EntryPayload::AddVoter(node(2)))),
-            (3, entry(2, EntryPayload::RemoveVoter(node(3)))),
-            (4, entry(2, app(0xA5, 9))),
-        ]
-    }
-
-    #[test]
-    fn actor_raft_log_v1_still_recovers_its_entries() {
-        let bytes = crate::corpus::golden("actor.raft.log", 1, || {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("log");
-            let (mut log, _) = wal::Wal::<(u64, RaftEntry)>::open(&path, MAX_RECORD, &LOG_RECORDS)
-                .expect("open a fresh log");
-            log.append_batch(&corpus_log()).expect("append");
-            drop(log);
-            std::fs::read(&path).expect("read back the produced log")
-        });
-
-        // Staged, never opened in place: `Wal::open` truncates a torn tail, so a
-        // build that could not read the fixture would rewrite it and erase the
-        // failure it is here to catch.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log");
-        std::fs::write(&path, &bytes).unwrap();
-
-        let (_log, records) = wal::Wal::<(u64, RaftEntry)>::open(&path, MAX_RECORD, &LOG_RECORDS)
-            .expect("this build must read an actor.raft.log v1 log it accepts");
-        assert_eq!(
-            records,
-            corpus_log(),
-            "a node cannot read its own log: the entry schema moved without a \
-             revision bump (compatibility V4, §3.2.1)",
-        );
-    }
-
-    /// A `term` file in the shape it had before the format carried a stamp.
-    fn legacy_term(term: u64, voted_for: Option<NodeId>) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({ "term": term, "voted_for": voted_for }))
-            .expect("encode a legacy term record")
-    }
+    // --- The stamped files (compatibility spec §3) ----------------------------
 
     /// A stamped `term` file, encoded the way this build reads one. Written here
-    /// rather than taken from `persist_term` so the fixture cannot move with the
-    /// writer: bytes generated by the code under test pin nothing. That the writer
-    /// agrees is asserted separately, by `a_term_is_written_stamped`.
+    /// rather than taken from `persist_term` so the bytes cannot move with the
+    /// writer; that the writer agrees is asserted separately, by
+    /// `a_term_is_written_stamped`.
     fn stamped_term(term: u64, voted_for: Option<NodeId>) -> Vec<u8> {
-        let body = serde_json::to_vec(&TermRecord {
-            term,
-            voted_for,
-            ext: compat::Extensions::new(),
-        })
-        .expect("encode a term record");
+        let body =
+            serde_json::to_vec(&TermRecord { term, voted_for }).expect("encode a term record");
         TERM.stamp(&body)
     }
 
+    /// A `term` file without the stamp is refused as a skew, not read as a term:
+    /// the JSON body would decode, and that is exactly the misparse the stamp
+    /// exists to stop.
     #[test]
-    fn actor_raft_term_v1_still_loads_its_term_and_vote() {
-        let bytes = crate::corpus::golden("actor.raft.term", 1, || stamped_term(7, Some(node(3))));
-
+    fn an_unstamped_term_file_is_refused_as_a_skew() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("term"), &bytes).expect("stage the fixture");
+        let bare = serde_json::to_vec(&TermRecord {
+            term: 4,
+            voted_for: Some(node(2)),
+        })
+        .expect("encode a bare record");
+        std::fs::write(dir.path().join("term"), bare).expect("stage a bare record");
 
-        let wal =
-            FileRaftWAL::open(dir.path()).expect("this build must read an actor.raft.term v1");
-        let state = wal.load();
-        assert_eq!(state.term, 7);
-        assert_eq!(state.voted_for, Some(node(3)));
-    }
-
-    /// A `term` file predating the stamp is *adopted*: read by the JSON decoder it
-    /// always had. Refusing would make the stamp a migration for every node, and
-    /// the operator advice attached to that refusal destroys vote history.
-    #[test]
-    fn an_unstamped_term_file_is_adopted_rather_than_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("term"), legacy_term(4, Some(node(2))))
-            .expect("stage a legacy record");
-
-        let wal = FileRaftWAL::open(dir.path()).expect("an unstamped term file must still load");
-        let state = wal.load();
-        assert_eq!(state.term, 4);
-        assert_eq!(state.voted_for, Some(node(2)));
+        let Err(err) = FileRaftWAL::open(dir.path()) else {
+            panic!("a bare term file must not load");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(
+            message.contains("actor.raft.term") && !message.contains("remove the"),
+            "the refusal must name the format and not read as corruption: {message}",
+        );
     }
 
     /// A version skew and a corrupt file must not read alike: corruption says
@@ -940,7 +791,7 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("actor.raft.term") && message.contains("v9"),
-            "the refusal must name the boundary and what it found: {message}",
+            "the refusal must name the format and what it found: {message}",
         );
         assert!(
             !message.contains("remove the"),
@@ -949,7 +800,6 @@ mod tests {
         );
     }
 
-    /// **V4**'s write step, now that every build reads both forms.
     #[test]
     fn a_term_is_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
@@ -958,78 +808,27 @@ mod tests {
         drop(wal);
 
         let bytes = std::fs::read(dir.path().join("term")).expect("read the term file");
-        assert!(TERM.is_stamped(&bytes), "the term file must be stamped");
+        let body = TERM.unstamp(&bytes).expect("the term file must be stamped");
         assert!(
-            bytes[TERM.magic().len() + 2..].starts_with(b"{"),
+            body.starts_with(b"{"),
             "and the body must still be the JSON whose parse failure is the \
              corruption check protecting election safety",
         );
 
-        // And what it wrote, it reads back (**V3**).
+        // And what it wrote, it reads back.
         let state = FileRaftWAL::open(dir.path()).expect("reopen").load();
         assert_eq!(state.term, 5);
         assert_eq!(state.voted_for, Some(node(1)));
     }
 
-    /// A `snapshot` file in the shape it had before the format carried a stamp.
-    fn legacy_snapshot(index: u64, term: u64, data: Vec<u8>) -> Vec<u8> {
-        postcard::to_allocvec(&SnapshotRecord { index, term, data })
-            .expect("encode a legacy snapshot record")
-    }
-
     /// A stamped `snapshot` file, encoded the way this build reads one. Written
-    /// here rather than taken from `persist_snapshot` so the fixture cannot move
+    /// here rather than taken from `persist_snapshot` so the bytes cannot move
     /// with the writer (see `stamped_term`). That the writer agrees is asserted
     /// separately, by `a_snapshot_is_written_stamped`.
     fn stamped_snapshot(index: u64, term: u64, data: Vec<u8>) -> Vec<u8> {
-        let body = postcard::to_allocvec(&SnapshotBody {
-            index,
-            term,
-            data,
-            ext: compat::Extensions::new(),
-        })
-        .expect("encode a snapshot body");
+        let body = postcard::to_allocvec(&SnapshotBody { index, term, data })
+            .expect("encode a snapshot body");
         SNAPSHOT.stamp(&body)
-    }
-
-    #[test]
-    fn actor_raft_snapshot_v1_still_loads_its_compacted_prefix() {
-        // The payload is deliberately longer than 83 bytes, which is what the
-        // magic's own bytes decode as a length under the older decoder. That makes
-        // this fixture double as the input to
-        // `a_stamped_snapshot_misparses_under_the_older_decoder`: shorten it and
-        // that test stops demonstrating anything.
-        let data: Vec<u8> = (0u8..=199).collect();
-        let bytes = crate::corpus::golden("actor.raft.snapshot", 1, || {
-            stamped_snapshot(4, 2, data.clone())
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("snapshot"), &bytes).expect("stage the fixture");
-
-        let wal = FileRaftWAL::open(dir.path())
-            .expect("this build must read an actor.raft.snapshot v1 it accepts");
-        let state = wal.load();
-        assert_eq!(state.snapshot_index, 4);
-        assert_eq!(state.snapshot_term, 2);
-        assert_eq!(state.snapshot.as_deref(), Some(&data[..]));
-    }
-
-    #[test]
-    fn an_unstamped_snapshot_file_is_adopted_rather_than_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = b"the compacted prefix".to_vec();
-        std::fs::write(
-            dir.path().join("snapshot"),
-            legacy_snapshot(6, 3, data.clone()),
-        )
-        .expect("stage a legacy record");
-
-        let wal = FileRaftWAL::open(dir.path()).expect("an unstamped snapshot must still load");
-        let state = wal.load();
-        assert_eq!(state.snapshot_index, 6);
-        assert_eq!(state.snapshot_term, 3);
-        assert_eq!(state.snapshot.as_deref(), Some(&data[..]));
     }
 
     #[test]
@@ -1047,7 +846,7 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("actor.raft.snapshot") && message.contains("v9"),
-            "the refusal must name the boundary and what it found: {message}",
+            "the refusal must name the format and what it found: {message}",
         );
         assert!(
             !message.contains("remove the"),
@@ -1055,20 +854,20 @@ mod tests {
         );
     }
 
-    /// Why the writer flips a release after the reader (**V4**), demonstrated
-    /// rather than asserted.
+    /// Why the stamp is checked *before* the body is decoded, demonstrated rather
+    /// than asserted.
     ///
-    /// A stamped snapshot handed to the decoder that predates the stamp does not
-    /// fail: it *succeeds*, at a fabricated index, because the magic's own bytes
-    /// are a valid `postcard` prefix and `from_bytes` ignores whatever trails. A
-    /// build reading that would then drop every log record at or below index
-    /// 10505: committed entries destroyed with no diagnostic. Nothing but the
-    /// release ordering stands between that and a rollback.
+    /// A stamped snapshot handed straight to the body decoder does not fail: it
+    /// *succeeds*, at a fabricated index, because the magic's own bytes are a
+    /// valid `postcard` prefix and `from_bytes` ignores whatever trails. A build
+    /// reading that would then drop every log record at or below index 10505:
+    /// committed entries destroyed with no diagnostic. The payload is deliberately
+    /// longer than 83 bytes, which is what the magic's bytes decode as a length.
     #[test]
-    fn a_stamped_snapshot_misparses_under_the_older_decoder() {
+    fn a_stamped_snapshot_misparses_under_a_bare_decoder() {
         let bytes = stamped_snapshot(4, 2, (0u8..=199).collect());
-        let misread: SnapshotRecord = postcard::from_bytes(&bytes)
-            .expect("the older decoder accepts these bytes: that is the hazard");
+        let misread: SnapshotBody = postcard::from_bytes(&bytes)
+            .expect("a bare decoder accepts these bytes: that is the hazard");
 
         assert_eq!(
             misread.index, 10505,
@@ -1078,10 +877,6 @@ mod tests {
         assert_ne!(misread.index, 4, "and it is not the index that was written");
     }
 
-    /// **V4**'s write step, now that every build reads both forms, and the one
-    /// place the ordering was not optional: a build predating the read release
-    /// decodes these bytes to index 10505 and truncates its log, as
-    /// `a_stamped_snapshot_misparses_under_the_older_decoder` shows.
     #[test]
     fn a_snapshot_is_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1091,9 +886,11 @@ mod tests {
         drop(wal);
 
         let bytes = std::fs::read(dir.path().join("snapshot")).expect("read the snapshot file");
-        assert!(SNAPSHOT.is_stamped(&bytes), "the snapshot must be stamped");
+        SNAPSHOT
+            .unstamp(&bytes)
+            .expect("the snapshot must be stamped");
 
-        // And what it wrote, it reads back (**V3**).
+        // And what it wrote, it reads back.
         let state = FileRaftWAL::open(dir.path()).expect("reopen").load();
         assert_eq!(state.snapshot_index, 1);
         assert_eq!(state.snapshot_term, 1);

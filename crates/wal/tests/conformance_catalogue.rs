@@ -1,4 +1,4 @@
-//! Catalogue drift test (wal spec §7): the machine-readable L1–L5 table stays
+//! Catalogue drift test (wal spec §7): the machine-readable L1–L4 table stays
 //! complete, and every test it names still exists.
 //!
 //! # Why this one is self-contained
@@ -76,15 +76,6 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
         property: "Write/recovery bound agreement: max_record bounds a frame's payload identically at both ends, so a payload recovery would reject for size cannot be written; the write panics instead of acknowledging a record the next open would silently drop",
         tests: &["appending_a_record_past_the_limit_panics_instead_of_losing_it"],
     },
-    CatalogueEntry {
-        invariant: 5,
-        spec: "wal §2 rule 2, §2.1 rule 4",
-        property: "A file is read at the digest it records: a log opens, scans, and continues to be appended with the checksum kind its own header names; a kind the build cannot compute is refused by name, and only rewrite restamps one",
-        tests: &[
-            "a_log_at_an_older_digest_still_opens_and_keeps_its_digest",
-            "a_foreign_checksum_kind_is_refused_by_name",
-        ],
-    },
 ];
 
 /// Every source file in this crate that may define a `#[test]`.
@@ -103,13 +94,13 @@ fn crate_sources() -> String {
 }
 
 #[test]
-fn every_invariant_l1_through_l5_is_present_exactly_once() {
+fn every_invariant_l1_through_l4_is_present_exactly_once() {
     let mut numbers: Vec<u8> = L_CATALOGUE.iter().map(|e| e.invariant).collect();
     numbers.sort_unstable();
     assert_eq!(
         numbers,
-        (1..=5).collect::<Vec<u8>>(),
-        "the catalogue must list L1..=L5, each exactly once",
+        (1..=4).collect::<Vec<u8>>(),
+        "the catalogue must list L1..=L4, each exactly once",
     );
 }
 
@@ -150,8 +141,8 @@ fn every_named_test_exists() {
 /// is claimed by some invariant.
 ///
 /// Only `crash_points.rs` is held to this. `src/lib.rs` legitimately carries tests
-/// that pin no numbered invariant (the frozen sidecar digest, the header
-/// re-stamping rule, the `max_record`/magic aliasing assert), and requiring an
+/// that pin no numbered invariant (the header re-stamping rule, the
+/// `max_record`/magic aliasing assert), and requiring an
 /// L-number for each would push those numbers into the spec to satisfy a test,
 /// which is backwards. The crash-point suite has no such cases: it exists solely
 /// to decide L1 and L2.

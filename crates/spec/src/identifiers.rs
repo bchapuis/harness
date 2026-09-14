@@ -36,13 +36,12 @@
 //! three kinds, and [`EXEMPT`] records each with its reason:
 //!
 //! - **Not this tree's**: `Option`, `HashMap`, `Serialize`, Akka's `ClusterClient`.
-//! - **Not an identifier**: the `Rev` column of a table, the `TODO` the docs
-//!   promise you will not find, SQL's `TRUNCATE`.
+//! - **Not an identifier**: the `TODO` the docs promise you will not find, SQL's
+//!   `TRUNCATE`.
 //! - **Named to say it does not exist**: the agent runtime "mints no `RunResumed` event
-//!   of its own"; `Transport::local_window` is a seam compatibility §4 records as
-//!   built and pulled back. This kind is the reason a plain "every name must
-//!   resolve" rule would be wrong: a specification says what a system does *not*
-//!   have, in the same voice it says what it does.
+//!   of its own". This kind is the reason a plain "every name must resolve" rule
+//!   would be wrong: a specification says what a system does *not* have, in the
+//!   same voice it says what it does.
 //!
 //! An exemption is an assertion that a name is absent, so it is checked in that
 //! direction too: [`stale`] reports any exemption the tree has since started to
@@ -140,11 +139,6 @@ pub const EXEMPT: &[Exempt] = &[
     ),
     // Not identifiers.
     e(
-        "Rev",
-        Why::NotAnIdentifier,
-        "a column of compatibility §3's boundary registry",
-    ),
-    e(
         "TRUNCATE",
         Why::NotAnIdentifier,
         "SQL, in the SQL facet's discussion",
@@ -162,12 +156,6 @@ pub const EXEMPT: &[Exempt] = &[
         Why::DeclaredAbsent,
         "agent §10: a resume is recognized from Activated plus ModelCompleted, so \
          \"the agent runtime mints no RunResumed event of its own\"",
-    ),
-    e(
-        "Transport::local_window",
-        Why::DeclaredAbsent,
-        "compatibility §4: one of the seams the pulled-back version machinery left \
-         behind, listed as removed",
     ),
     e(
         "Quorum",
@@ -297,7 +285,7 @@ fn harvest(text: &str, names: &mut BTreeSet<String>) {
             ) && let Some(next) = words.peek()
             {
                 // The name is what the word *starts* with: `EntityHandler<M>:` and
-                // `peer_version(&self)` both carry their name in front of the
+                // `shutdown(&self)` both carry their name in front of the
                 // punctuation, not behind it.
                 if let Some(name) = leading_ident(next) {
                     names.insert(name.to_string());
@@ -387,7 +375,7 @@ pub fn claimed(token: &str) -> Option<(&str, &str)> {
         ) {
             // `ReadReply::head`: the member is the part that moves.
             (true, false) => is_ident(right).then_some((token, right)),
-            // `compat::Window`: a crate path; the type is the part that moves.
+            // `compat::Stamp`: a crate path; the type is the part that moves.
             (false, true) => Some((token, right)),
             _ => None,
         };
@@ -556,8 +544,8 @@ mod tests {
     #[test]
     fn a_crate_path_is_checked_on_its_type() {
         assert_eq!(
-            claimed("compat::Window"),
-            Some(("compat::Window", "Window"))
+            claimed("compat::Stamp"),
+            Some(("compat::Stamp", "Stamp"))
         );
     }
 

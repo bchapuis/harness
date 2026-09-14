@@ -30,7 +30,6 @@ use actor_cluster::RegistryMode;
 use actor_cluster::SwimConfig;
 use actor_cluster::Transport;
 use actor_cluster::TransportError;
-use actor_cluster::WIRE;
 use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::EventSink;
@@ -71,14 +70,6 @@ pub(crate) struct NetInner {
     /// Last scheduled delivery time per directed pair, kept strictly increasing
     /// so per-pair FIFO survives latency jitter (spec §7.2, invariant #3).
     pair_clock: BTreeMap<(NodeId, NodeId), Instant>,
-    /// Nodes running a wire window other than [`WIRE`]: what a simulated node's
-    /// *build* accepts and writes (spec §7.1, compatibility spec §3).
-    ///
-    /// Holds only the overrides, so a node absent here is one running the window
-    /// this build ships, and a run that never sets one behaves exactly as before.
-    /// Keyed by node and **not** cleared by `restart`, because a restart is how a
-    /// rolling upgrade is modelled: set the window, then replace the process.
-    windows: BTreeMap<NodeId, compat::Window>,
 }
 
 impl NetInner {
@@ -129,7 +120,6 @@ impl SimNetwork {
                 processes: Vec::new(),
                 blocked: BTreeSet::new(),
                 pair_clock: BTreeMap::new(),
-                windows: BTreeMap::new(),
             })),
             clock: sim.clock(),
             entropy: sim.entropy(),
@@ -232,56 +222,12 @@ impl SimNetwork {
     }
 
     /// The [`Transport`] handle `node`'s system sends through: the same one
-    /// [`bring_up`](SimNetwork::join) hands it, so asking this what it would settle
-    /// with a peer asks the running node's own send path.
+    /// [`bring_up`](SimNetwork::join) hands it.
     pub fn transport(&self, node: NodeId) -> SimTransport {
         SimTransport {
             net: self.clone(),
             from: node,
         }
-    }
-
-    /// Move `node` to another release's wire window and record it as an injected
-    /// fault (spec §18.3): the nemesis's rolling upgrade, as distinct from
-    /// [`set_wire_window`](SimNetwork::set_wire_window), which a scenario uses to
-    /// set a run's starting shape and which nothing counts.
-    pub(crate) fn upgrade(&self, node: NodeId, window: compat::Window) {
-        self.set_wire_window(node, window);
-        self.stats.record_upgrade();
-    }
-
-    /// Run `node` on a wire window other than the one this build ships (spec
-    /// §7.1, compatibility spec §3, §4).
-    ///
-    /// This is what makes a **mixed-version** run possible: with every node on
-    /// [`WIRE`] there is exactly one revision in the cluster and negotiation has
-    /// nothing to settle, so a rolling upgrade cannot be simulated at all. Give one
-    /// node `Window::new("actor.wire", 1, 2, 1)` and it reads the next revision
-    /// without writing it, which is the first half of **V4**; move `writes` up and
-    /// it is the second.
-    ///
-    /// Takes effect on the next [`peer_version`](Transport::peer_version): the
-    /// simulator holds no association, so there is no handshake to redo. To model
-    /// the upgrade as a process replacement instead, set the window and then
-    /// [`restart`](SimNetwork::restart) the node.
-    pub fn set_wire_window(&self, node: NodeId, window: compat::Window) {
-        self.inner
-            .lock()
-            .expect("network mutex poisoned")
-            .windows
-            .insert(node, window);
-    }
-
-    /// The wire window `node` is running: its override, or [`WIRE`] for a node
-    /// that has never been given one.
-    pub fn wire_window(&self, node: NodeId) -> compat::Window {
-        self.inner
-            .lock()
-            .expect("network mutex poisoned")
-            .windows
-            .get(&node)
-            .copied()
-            .unwrap_or(WIRE)
     }
 
     /// Route a frame from `from` to `to`. A blocked pair drops the frame
@@ -389,29 +335,5 @@ pub struct SimTransport {
 impl Transport for SimTransport {
     async fn send(&self, peer: NodeId, frame: Frame) -> Result<(), TransportError> {
         self.net.route(self.from, peer, frame)
-    }
-
-    /// The revision this node and `peer` would settle on (spec §7.1,
-    /// compatibility spec §3.1): the same `negotiate` over the same two ranges
-    /// the TCP handshake runs, against whatever windows the two nodes are running
-    /// ([`SimNetwork::set_wire_window`]).
-    ///
-    /// The simulator keeps no association, so what stands in for one is the
-    /// condition under which a real one would exist: the peer is a node on this
-    /// network, and the directed pair is not blocked. That makes a partition
-    /// answer `None`: a gate must not keep writing a revision agreed with a peer
-    /// it can no longer reach, because whatever comes back may not be the process
-    /// that agreed to it.
-    fn peer_version(&self, peer: NodeId) -> Option<compat::Version> {
-        let inner = self.net.inner.lock().expect("network mutex poisoned");
-        if inner.process(peer).is_none() || inner.blocked.contains(&(self.from, peer)) {
-            return None;
-        }
-        let ours = inner.windows.get(&self.from).copied().unwrap_or(WIRE);
-        let theirs = inner.windows.get(&peer).copied().unwrap_or(WIRE);
-        // Disjoint ranges are a refused association (**V2**), which reaches a
-        // caller as no association at all: the same `None` an unreachable peer
-        // gives, and the same conservative send it must produce.
-        ours.negotiate(theirs.accepted()).ok()
     }
 }

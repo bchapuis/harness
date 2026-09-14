@@ -9,7 +9,7 @@
 //! **Tagged records, one order, one barrier (E19).** Every record an entity
 //! journals carries a one-byte facet tag; tag `EVENT_TAG` (0) is *facet 0*, the
 //! entity's own event fold. Tags run to `MAX_TAG`, the high bit being reserved as
-//! the escape into a later envelope revision (`RECORD`). All records a command
+//! the mark of another envelope version (`RECORD`). All records a command
 //! produces (its events plus every facet's staged operations) append as one
 //! atomic batch (§6), so a command that touches state, the KV map, and the
 //! filesystem commits everywhere or nowhere. Replay dispatches each record to its
@@ -91,29 +91,22 @@ use crate::facet_blobs::RootSet;
 /// The record tag of facet 0: the entity's own event fold (spec §7.12).
 pub(crate) const EVENT_TAG: u8 = 0;
 
-/// The record envelope's revisions, and the one this build writes (spec §9,
-/// compatibility spec §3).
+/// The record envelope's format (spec §9, compatibility spec §3).
 ///
-/// Revision 1 is `[tag][payload]` with `tag <= MAX_TAG`, so the window costs **no
-/// bytes on disk**. The boundary is stamped through the tag space rather than
-/// through a version byte because a version *prefix* could not be retrofitted
-/// unambiguously: `[version 1][tag 1][payload]` and `[tag 1][payload starting
-/// 0x01]` are the same bytes.
-///
-/// A future revision announces itself by setting the high bit of the leading byte
-/// (see `MAX_TAG`), which no revision-1 record can do.
-pub(crate) const RECORD: compat::Window = compat::Window::at("entity.record", 1);
+/// Version 1 is `[tag][payload]` with `tag <= MAX_TAG`, so the stamp costs **no
+/// bytes on disk**: the format is marked through the tag space rather than through
+/// a version byte, and a leading byte with its high bit set is a record this build
+/// did not write (see `MAX_TAG`).
+pub(crate) const RECORD: compat::Format = compat::Format::new("entity.record", 1);
 
 /// The largest facet tag a record envelope may carry.
 ///
-/// The high bit of the leading byte is **reserved**: a byte at or above `0x80`
-/// is not a tag but the escape into a later envelope revision (`[0x80 | revision]`
-/// followed by that revision's own header), which is what lets the envelope change
-/// later without a migration.
+/// The high bit of the leading byte is **reserved**: a byte at or above `0x80` is
+/// not a tag but the mark of another envelope version, which a version-1 reader
+/// refuses by name rather than reporting as a facet it is missing.
 ///
 /// This does not version a facet's **payload** schema: `postcard` appends enum
-/// variants safely, so a facet's op enum grows at its end indefinitely. This
-/// escape is for changing the *envelope*.
+/// variants safely, so a facet's op enum grows at its end indefinitely.
 pub(crate) const MAX_TAG: u8 = 0x7F;
 
 /// The largest tag this crate will ever assign to a built-in facet.
@@ -145,8 +138,8 @@ impl std::error::Error for FacetError {}
 /// record wears (spec §7.12).
 ///
 /// Panics on a tag above `MAX_TAG`, mirroring the refusal in [`split_record`]:
-/// the high bit means "a later envelope revision" to every reader, so a record
-/// carrying it must never be written by a build whose envelope is revision 1.
+/// the high bit means "another envelope version" to every reader, so a record
+/// carrying it must never be written by this build.
 pub(crate) fn tag_record(tag: u8, payload: &[u8]) -> Vec<u8> {
     assert!(
         tag <= MAX_TAG,
@@ -165,16 +158,15 @@ pub(crate) fn split_record(bytes: &[u8]) -> Result<(u8, &[u8]), FacetError> {
         .split_first()
         .ok_or_else(|| FacetError("empty record (missing facet tag)".into()))?;
     if lead > MAX_TAG {
-        // The high bit escapes into a later envelope revision (§9), which
-        // revision 1 never sets, so these bytes come from a newer build. Refuse
-        // by name: "unrecognized facet tag 129" would send an operator hunting for
-        // a missing facet, when the fault is a version skew at the other end.
-        return Err(FacetError(
-            RECORD
-                .admit(compat::Version(u16::from(lead & MAX_TAG)))
-                .map(|v| format!("record envelope {v} has no reader in this build"))
-                .unwrap_or_else(|err| err.to_string()),
-        ));
+        // The high bit marks another envelope version (§9), which version 1 never
+        // sets, so these bytes come from another build. Refuse by name:
+        // "unrecognized facet tag 129" would send an operator hunting for a
+        // missing facet, when the fault is a version skew at the other end.
+        return Err(FacetError(format!(
+            "{}: leading byte {lead:#04x} is not a {} envelope (tags are 0..={MAX_TAG:#04x})",
+            RECORD.name(),
+            RECORD.version(),
+        )));
     }
     Ok((lead, payload))
 }
@@ -197,13 +189,13 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
 
 /// The composite snapshot's stamp (spec §9, compatibility spec §3).
 ///
-/// A snapshot gets a full magic and revision rather than the record envelope's
+/// A snapshot gets a full magic and version rather than the record envelope's
 /// reserved bit (`RECORD`): `postcard` gives its leading bytes no structure a
-/// reader could use to recognize the format otherwise. Reading the revision
-/// **before** the body is what lets a snapshot from another revision be refused
+/// reader could use to recognize the format otherwise. Reading the version
+/// **before** the body is what lets a snapshot from another version be refused
 /// instead of misparsed.
 pub(crate) const SNAPSHOT: compat::Stamp =
-    compat::Stamp::new(b"GRSNAP", compat::Window::at("entity.snapshot", 1));
+    compat::Stamp::new(b"GRSNAP", compat::Format::new("entity.snapshot", 1));
 
 /// The composite snapshot's on-disk body (spec §7.12), inside the [`SNAPSHOT`]
 /// stamp.
@@ -216,45 +208,14 @@ struct SnapshotBody {
     /// deployment's codec (§4.1, §5), while facet payloads are deliberately
     /// `postcard`. Without it, a codec change reads as a corrupt entity.
     codec: String,
-    parts: SnapshotParts,
-    /// Room to grow without a revision bump (compatibility spec §2.1).
-    ///
-    /// This body is `postcard`, which is positional: it cannot gain a field, so
-    /// without this area every future addition would be a new revision carrying a
-    /// second decoder forever. A change that reinterprets bytes already here is
-    /// still a revision; this is only for carrying *more*.
-    ext: compat::Extensions,
-}
-
-/// The body's positional payload: facet 0's inline state and the facet
-/// contributions, in facet-set order. The wire shape, fixed by revision 1; how the
-/// host handles the same snapshot is [`CompositeSnapshot`].
-#[derive(Serialize, Deserialize)]
-struct SnapshotParts {
-    /// Facet 0's state when it travels inline, **empty** when
-    /// [`EXT_STATE_CHUNKS`] carries it instead.
-    state: Vec<u8>,
+    /// Facet 0's state, inline or as the manifest of its chunks.
+    state: StatePayload,
+    /// The facet contributions, in facet-set order.
     facets: Vec<(u8, Vec<u8>)>,
 }
 
-/// Facet 0's state travels as content-addressed chunks, and this entry is the
-/// [`StateManifest`] naming them ([`StatePayload`]).
-///
-/// **Critical.** A reader that skipped it would find [`SnapshotParts::state`]
-/// empty and rebuild the entity with a default `State`: a silent, total misread of
-/// an entity's history, the case the criticality bit exists for (compatibility spec
-/// §2.1). It is an extension rather than a revision because it reinterprets no byte
-/// already defined: a snapshot without the entry means what it has always meant.
-const EXT_STATE_CHUNKS: u16 = compat::Extensions::CRITICAL | 0x0001;
-
-/// The critical extension keys this build implements.
-///
-/// A snapshot carrying a critical key outside this list is refused (**V2**): its
-/// writer marked that entry as one a reader must understand, so skipping it would be
-/// exactly the silent misread the stamp exists to prevent.
-const SNAPSHOT_EXT_KNOWN: &[u16] = &[EXT_STATE_CHUNKS];
-
-/// Where facet 0's encoded `State` lives in a snapshot (spec §7.12).
+/// Where facet 0's encoded `State` lives in a snapshot (spec §7.12), as the
+/// snapshot body carries it.
 ///
 /// Small states ride inline in the snapshot record, as they always have. Past
 /// [`SNAPSHOT_INLINE_MAX`] the state is cut into content-defined chunks ([`crate::cdc`]),
@@ -262,6 +223,7 @@ const SNAPSHOT_EXT_KNOWN: &[u16] = &[EXT_STATE_CHUNKS];
 /// so a snapshot of an entity that grew by one turn puts one or two chunks instead of
 /// broadcasting the whole folded transcript to every replica (`docs/hardware-envelope.md`
 /// §3.9).
+#[derive(Serialize, Deserialize)]
 pub(crate) enum StatePayload {
     Inline(Vec<u8>),
     Chunked(StateManifest),
@@ -373,21 +335,10 @@ impl CompositeSnapshot {
     /// encoded [`state`](CompositeSnapshot::state), recorded so a later read can
     /// tell a codec change from a corrupt entity.
     pub(crate) fn encode(self, codec: &str) -> Result<Vec<u8>, FacetError> {
-        let mut ext = compat::Extensions::new();
-        let state = match self.state {
-            StatePayload::Inline(bytes) => bytes,
-            StatePayload::Chunked(manifest) => {
-                ext.insert(EXT_STATE_CHUNKS, encode_payload(&manifest));
-                Vec::new()
-            }
-        };
         let body = SnapshotBody {
             codec: codec.to_string(),
-            parts: SnapshotParts {
-                state,
-                facets: self.facets,
-            },
-            ext,
+            state: self.state,
+            facets: self.facets,
         };
         postcard::to_allocvec(&body)
             .map(|bytes| SNAPSHOT.stamp(&bytes))
@@ -395,20 +346,17 @@ impl CompositeSnapshot {
     }
 
     /// Admit the stamp, decode the body, and confirm it was encoded with `codec`,
-    /// in that order, so nothing downstream sees bytes from a revision or a codec
+    /// in that order, so nothing downstream sees bytes from a version or a codec
     /// this build cannot read (compatibility **V2**).
     ///
     /// Facet 0's state comes back as a [`StatePayload`]; the caller resolves it
     /// against the entity's blob area, which is why that is not done here.
     pub(crate) fn decode(bytes: &[u8], codec: &str) -> Result<CompositeSnapshot, FacetError> {
-        let (_revision, body) = SNAPSHOT
+        let body = SNAPSHOT
             .unstamp(bytes)
             .map_err(|e| FacetError(e.to_string()))?;
         let body: SnapshotBody =
             postcard::from_bytes(body).map_err(|e| FacetError(format!("snapshot decode: {e}")))?;
-        body.ext
-            .admit(SNAPSHOT.window().boundary(), SNAPSHOT_EXT_KNOWN)
-            .map_err(|e| FacetError(e.to_string()))?;
         if body.codec != codec {
             return Err(FacetError(format!(
                 "entity.snapshot: encoded with codec '{}', but this node runs '{codec}': \
@@ -416,22 +364,9 @@ impl CompositeSnapshot {
                 body.codec
             )));
         }
-        let state = match body.ext.get(EXT_STATE_CHUNKS) {
-            None => StatePayload::Inline(body.parts.state),
-            Some(entry) => {
-                // Both forms at once is a writer this build cannot reconcile: it
-                // would have to guess which one is the state.
-                if !body.parts.state.is_empty() {
-                    return Err(FacetError(
-                        "entity.snapshot: carries both an inline state and a chunk manifest".into(),
-                    ));
-                }
-                StatePayload::Chunked(decode_payload("snapshot state manifest", entry)?)
-            }
-        };
         Ok(CompositeSnapshot {
-            state,
-            facets: body.parts.facets,
+            state: body.state,
+            facets: body.facets,
         })
     }
 }
@@ -887,7 +822,7 @@ impl<FS: FacetSet> FacetCell<FS> {
     /// A fresh cell with empty forms and no armed stage. Asserts the declared
     /// tags are distinct, nonzero, and within the tag space (a duplicated tag
     /// would make record dispatch ambiguous; tag 0 is facet 0's; the high bit is
-    /// the envelope-revision escape, `MAX_TAG`).
+    /// the envelope-version mark, `MAX_TAG`).
     pub(crate) fn new() -> FacetCell<FS> {
         let mut seen = BTreeSet::new();
         for &tag in FS::TAGS {
@@ -1112,26 +1047,26 @@ mod tests {
     }
 
     #[test]
-    fn every_revision_1_record_is_already_stamped() {
+    fn every_version_1_record_is_already_stamped() {
         for tag in [EVENT_TAG, 1, 6, MAX_TAG] {
             let record = tag_record(tag, &[7]);
-            assert_eq!(record.len(), 2, "revision 1 adds one byte, the tag");
+            assert_eq!(record.len(), 2, "version 1 adds one byte, the tag");
             assert_eq!(split_record(&record).unwrap(), (tag, &[7][..]));
         }
     }
 
     #[test]
-    fn a_later_envelope_revision_is_refused_as_a_version_skew() {
-        let err = split_record(&[0x80 | 2, 9, 9]).expect_err("revision 2 is unreadable here");
+    fn another_envelope_version_is_refused_as_a_version_skew() {
+        let err = split_record(&[0x80 | 2, 9, 9]).expect_err("the high bit is unreadable here");
         assert!(
-            err.0.contains("entity.record") && err.0.contains("v2"),
-            "the refusal must name the boundary and the revision: {err}"
+            err.0.contains("entity.record") && err.0.contains("0x82") && err.0.contains("v1"),
+            "the refusal must name the format, the byte, and this build's version: {err}"
         );
     }
 
     #[test]
     #[should_panic(expected = "reserved envelope-escape bit")]
-    fn writing_an_escape_tag_panics_instead_of_forging_a_revision() {
+    fn writing_an_escape_tag_panics_instead_of_forging_a_version() {
         tag_record(0x80, &[1]);
     }
 
@@ -1154,13 +1089,6 @@ mod tests {
         match payload {
             StatePayload::Inline(bytes) => bytes,
             StatePayload::Chunked(_) => panic!("expected an inline state"),
-        }
-    }
-
-    fn parts() -> SnapshotParts {
-        SnapshotParts {
-            state: vec![9, 9],
-            facets: vec![(1, vec![4]), (2, vec![])],
         }
     }
 
@@ -1211,85 +1139,29 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_carrying_both_state_forms_is_refused() {
-        // Neither form can be preferred without guessing, so the reader refuses
-        // rather than rebuilding an entity from the wrong one.
-        let mut ext = compat::Extensions::new();
-        ext.insert(
-            EXT_STATE_CHUNKS,
-            encode_payload(&StateManifest {
-                bytes: 3,
-                chunks: vec![BlobId::of(b"x")],
-            }),
-        );
-        let body = SnapshotBody {
-            codec: "json".into(),
-            parts: parts(),
-            ext,
-        };
-        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
-
-        let err = CompositeSnapshot::decode(&bytes, "json")
-            .err()
-            .expect("an ambiguous state carriage must not decode");
-        assert!(
-            err.0.contains("both an inline state and a chunk manifest"),
-            "the refusal must say what is ambiguous: {err}"
-        );
-    }
-
-    #[test]
-    fn a_build_without_the_chunk_extension_refuses_a_chunked_snapshot() {
-        // What a downgrade sees. `EXT_STATE_CHUNKS` is critical, so a reader whose
-        // known-key list predates it refuses the whole snapshot instead of
-        // rebuilding the entity from the empty inline state beside the manifest.
-        let bytes = CompositeSnapshot {
-            state: StatePayload::Chunked(StateManifest {
-                bytes: 3,
-                chunks: vec![BlobId::of(b"x")],
-            }),
-            facets: Vec::new(),
-        }
-        .encode("json")
-        .unwrap();
-        let (_revision, body) = SNAPSHOT.unstamp(&bytes).unwrap();
-        let body: SnapshotBody = postcard::from_bytes(body).unwrap();
-
-        let err = body
-            .ext
-            .admit(SNAPSHOT.window().boundary(), &[])
-            .expect_err("a build that predates the key must refuse");
-        assert!(
-            format!("{err}").contains("0x8001"),
-            "the refusal must name the key: {err}"
-        );
-    }
-
-    #[test]
-    fn a_snapshot_from_a_later_revision_is_refused_by_name() {
+    fn a_snapshot_from_another_version_is_refused_by_name() {
         let mut bytes = composite().encode("json").unwrap();
-        // A revision above the window, as a future release would write.
+        // Another version, as another release would write.
         bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
         let err = CompositeSnapshot::decode(&bytes, "json")
             .err()
-            .expect("an unreadable revision must not decode");
+            .expect("an unreadable version must not decode");
         assert!(
             err.0.contains("entity.snapshot") && err.0.contains("v9"),
-            "the refusal must name the boundary and the revision: {err}"
+            "the refusal must name the format and the version: {err}"
         );
     }
 
     #[test]
     fn unstamped_bytes_are_refused_rather_than_misparsed() {
-        // What a pre-stamp snapshot, or another format's bytes, look like. The
-        // magic check runs before any decode, so nothing tries to read this as a
-        // composite (**V2**).
+        // What another format's bytes look like. The magic check runs before any
+        // decode, so nothing tries to read this as a composite (**V2**).
         let err = CompositeSnapshot::decode(&[2, 9, 9, 0], "json")
             .err()
             .expect("unstamped bytes must not decode");
         assert!(
             err.0.contains("entity.snapshot"),
-            "the refusal must name the boundary: {err}"
+            "the refusal must name the format: {err}"
         );
     }
 
@@ -1304,118 +1176,6 @@ mod tests {
         assert!(
             err.0.contains("'json'") && err.0.contains("'postcard'"),
             "the refusal must name both codecs: {err}"
-        );
-    }
-
-    #[test]
-    fn an_unknown_ancillary_snapshot_extension_is_ignored() {
-        let mut body = SnapshotBody {
-            codec: "json".into(),
-            parts: parts(),
-            ext: compat::Extensions::new(),
-        };
-        body.ext.insert(0x0001, vec![1, 2, 3]);
-        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
-
-        let back =
-            CompositeSnapshot::decode(&bytes, "json").expect("an ancillary entry is skipped");
-        assert_eq!(inline(back.state), vec![9, 9]);
-    }
-
-    #[test]
-    fn an_unknown_critical_snapshot_extension_is_refused() {
-        let mut body = SnapshotBody {
-            codec: "json".into(),
-            parts: parts(),
-            ext: compat::Extensions::new(),
-        };
-        body.ext.insert(compat::Extensions::CRITICAL | 0x7, vec![]);
-        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
-
-        let err = CompositeSnapshot::decode(&bytes, "json")
-            .err()
-            .expect("a critical entry this build does not know must be refused");
-        assert!(
-            err.0.contains("entity.snapshot") && err.0.contains("0x8007"),
-            "the refusal must name the boundary and the key: {err}"
-        );
-    }
-
-    #[test]
-    fn the_extension_area_costs_one_byte_while_empty() {
-        let stamped = composite().encode("json").unwrap();
-        let bare =
-            SNAPSHOT.stamp(&postcard::to_allocvec(&(String::from("json"), parts())).unwrap());
-        assert_eq!(stamped.len(), bare.len() + 1);
-    }
-
-    // --- Golden corpus (compatibility spec §4) --------------------------------
-
-    /// The corpus record, and it must never change: the checked-in bytes *are*
-    /// this value, so editing it silently redefines the fixture instead of
-    /// testing against it. A different shape belongs to a different revision.
-    ///
-    /// Tag 1 with a payload whose leading byte is itself 1: the ambiguity the
-    /// envelope's tag-space stamp exists to avoid (a version prefix could not tell
-    /// `[rev 1][tag 1]` from `[tag 1][payload 0x01]`), so the fixture pins that
-    /// the leading byte is read as a tag and nothing else.
-    fn corpus_record() -> (u8, Vec<u8>) {
-        (1, vec![0x01, 0x7F, 0x80, 0xFF])
-    }
-
-    #[test]
-    fn entity_record_v1_still_splits_into_its_tag_and_payload() {
-        let (tag, payload) = corpus_record();
-        let bytes = crate::corpus::golden("entity.record", 1, || tag_record(tag, &payload));
-
-        let (found_tag, found_payload) = split_record(&bytes)
-            .expect("this build must read an entity.record v1 envelope it accepts");
-        assert_eq!(found_tag, tag, "the leading byte is the facet tag");
-        assert_eq!(
-            found_payload, payload,
-            "the payload came back changed: the envelope moved a byte",
-        );
-    }
-
-    /// Facet 0 inline, two facet contributions, and an empty extension area: the
-    /// shape every snapshot written by this build has, and the one a later reader
-    /// must keep reading.
-    #[test]
-    fn entity_snapshot_v1_still_decodes_to_its_composite() {
-        let bytes = crate::corpus::golden("entity.snapshot", 1, || {
-            composite()
-                .encode("json")
-                .expect("encode the corpus snapshot")
-        });
-
-        let back = CompositeSnapshot::decode(&bytes, "json")
-            .expect("this build must read an entity.snapshot v1 body it accepts");
-        assert_eq!(
-            inline(back.state),
-            vec![9, 9],
-            "facet 0's state decoded to different bytes than it was written from",
-        );
-        assert_eq!(
-            back.facets,
-            vec![(1, vec![4]), (2, vec![])],
-            "the facet contributions decoded out of order or changed",
-        );
-    }
-
-    #[test]
-    fn the_snapshot_corpus_is_refused_under_another_codec() {
-        // Facet 0's state is codec-encoded (§4.1), so the fixture also pins that a
-        // deployment codec change is reported as itself rather than as a corrupt
-        // entity: the failure `entity.store` is still unstamped against (§5).
-        let bytes = crate::corpus::golden("entity.snapshot", 1, || {
-            composite().encode("json").expect("encode")
-        });
-        let err = CompositeSnapshot::decode(&bytes, "postcard")
-            .err()
-            .expect("a snapshot from another codec must not decode");
-        assert!(
-            err.0.contains("entity.snapshot") && err.0.contains("json"),
-            "the refusal must name the boundary and the codec that wrote it: {err}",
         );
     }
 }

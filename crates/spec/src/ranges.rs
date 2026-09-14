@@ -39,7 +39,7 @@
 //! Together they pin the extent from both sides without a rule about what any one
 //! sentence intended. The second is also what makes a catalogue nothing cites at
 //! all fail rather than pass vacuously: `docs/README.md` rendered the wal
-//! catalogue's column as a bare dash while `wal §7` held L1–L5 and
+//! catalogue's column as a bare dash while `wal §7` held L1–L4 and
 //! `crates/wal/tests/conformance_catalogue.rs` compared them, and the extent went
 //! unstated by the entire set.
 
@@ -90,10 +90,9 @@ pub const LABELS: &[(&str, Owner)] = &[
     (
         "V",
         Owner::Unregistered(
-            "compatibility §2: a two-column table with neither a `Defined in` nor a \
-             `Verified by`, so there is no Rust copy to compare it against: V3 is \
-             held at compile time by `compat::Window` and V4/V5 by the golden corpus \
-             (compatibility §4)",
+            "compatibility §1: a two-column table with neither a `Defined in` nor a \
+             `Verified by`, so there is no Rust copy to compare it against; each \
+             format's own tests hold V1 and V2 for it",
         ),
     ),
 ];

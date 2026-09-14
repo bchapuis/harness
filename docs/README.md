@@ -9,8 +9,8 @@ testing conventions.
 Normative, RFC 2119, each carrying its own invariant catalogue, and all but one
 a drift test that keeps the catalogue mechanically true. The exception is
 compatibility, whose table names neither a defining section nor a verifying
-suite, so there is no Rust copy to hold it against (its V3 is asserted at
-compile time and its V4/V5 by the golden corpus instead, compatibility §4).
+suite, so there is no Rust copy to hold it against: each format's own tests hold
+its stamp to V1 and V2 (compatibility §3).
 
 They layer bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`, `entity §N`, and so on), citations the build resolves rather than trusts (the `spec` crate, under Testing).
 
@@ -18,14 +18,14 @@ They layer bottom-up: every spec cites the ones beneath it by a short prefix (`c
 |---|---|---|---|---|
 | substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, transport, membership, SWIM, supervision, receptionist, deterministic simulation | `actor-core`, `actor-serialization`, `actor-cluster`, `actor-runtime`, `actor-simulation` | #1–#22 |
 | | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | `actor-cluster` | U1–U2 |
-| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | `wal` | L1–L5 |
+| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | `wal` | L1–L4 |
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | `entity` | E1–E21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | `blob-store` | B1–B7 |
 | consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | `workflow` | W1–W7 |
 | | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | `agent`, with `agent-anthropic` and `agent-openai` (model adapters), `agent-http`, `agent-gateway`, `agent-standalone`, `agent-tui` | A1–A8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | `agent-sandbox` | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | `machine-entity`, `machine-host`, `machine-proto`, `machine-frontdoor`, `machine-standalone` | M1–M6 |
-| cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | `compat`; `spec` (the drift gate, under Testing); `tenancy` (the directory of [multi-tenant-edge](multi-tenant-edge.md)) | V1–V6 |
+| cross-cutting | [compatibility-spec](compatibility-spec.md) | format stamps, the format registry, refusal by name | `compat`; `spec` (the drift gate, under Testing); `tenancy` (the directory of [multi-tenant-edge](multi-tenant-edge.md)) | V1–V2 |
 
 One layer has a design note rather than a spec:
 
@@ -103,10 +103,6 @@ blast radius, rather than dropped as a comment beside the code that would have
 to change. So "what is left here?" is answered by reading these sections rather
 than by grepping the code:
 
-- [compatibility §5](compatibility-spec.md), the format machinery that waits on
-  a boundary having a second revision. Every format in the tree is stamped, and
-  no boundary is mid-flight; §4 records what was built and pulled back, and what
-  would reopen it.
 - Each layer's own deferrals, declined with their reasons: [entity
   §16](entity-spec.md), [machine §8](machine-spec.md), [agent
   §13](agent-spec.md), [sandbox §7](sandbox-spec.md),
