@@ -117,8 +117,9 @@ pub struct Exempt {
 /// [`stale`], so the list has to be revisited rather than accumulate.
 pub const EXEMPT: &[Exempt] = &[
     // Not this tree's. Only the ones no crate imports need listing: the index
-    // reads `use` trees, so it already holds `Result`, `String`, and `Dir`.
+    // reads `use` trees, so it already holds `String` and `Dir`.
     e("Option", Why::Elsewhere, "std"),
+    e("Result", Why::Elsewhere, "std"),
     e("HashMap", Why::Elsewhere, "std"),
     e("Copy", Why::Elsewhere, "std, a derive"),
     e("Default", Why::Elsewhere, "std, a derive"),

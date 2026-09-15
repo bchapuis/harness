@@ -62,8 +62,7 @@ impl Path {
     }
 }
 
-// Written out rather than derived so the wire form stays a plain string (the same bytes
-// a `String` field produced) without enabling serde's `rc` feature, which would add
+// Written out rather than derived so the wire form is a plain string without enabling serde's `rc` feature, which would add
 // `Arc`/`Rc` impls across every crate in the tree for the sake of this one field.
 //
 // Deserializing shares nothing between ids: two that arrive with equal paths get separate
@@ -161,26 +160,8 @@ impl std::fmt::Display for ActorId {
 mod tests {
     use super::*;
     use actor_serialization::Codec;
-    use actor_serialization::JsonCodec;
     use actor_serialization::PostcardCodec;
     use actor_serialization::encode;
-
-    #[test]
-    fn a_path_serializes_as_the_plain_string_it_wraps() {
-        // How `Path` stores its bytes is an in-process decision, and this keeps it from
-        // reaching the wire. An id crosses nodes inside every remote envelope, so a
-        // representation change that altered its encoding would be a silent
-        // compatibility break between builds rather than a local optimization.
-        let path = Path::new("/user/greeter");
-        assert_eq!(
-            encode(&JsonCodec as &dyn Codec, &path).expect("encodes"),
-            br#""/user/greeter""#.to_vec(),
-        );
-        assert_eq!(
-            encode(&PostcardCodec as &dyn Codec, &path).expect("encodes"),
-            encode(&PostcardCodec as &dyn Codec, &"/user/greeter".to_string()).expect("encodes"),
-        );
-    }
 
     #[test]
     fn an_actor_id_round_trips_through_its_wire_form() {

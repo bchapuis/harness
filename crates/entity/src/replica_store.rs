@@ -83,7 +83,6 @@ pub(crate) struct StoreRecord {
     pub(crate) after: Seq,
     pub(crate) term: Term,
     /// `ByteBuf` rather than `Vec<u8>` so the codec is told these are bytes: it
-    /// derefs to `Vec<u8>` and encodes identically (see `wire_bytes.rs`), but it
     /// reaches `serialize_bytes`/`deserialize_bytes` instead of serde's default
     /// element-at-a-time sequence path.
     pub(crate) records: Vec<ByteBuf>,

@@ -200,7 +200,7 @@ as JSON (`{"outcome":{"Ok":{…}}}`). The endpoints:
 | `GET  /readyz`                                  | readiness; 200, and 503 from the moment a shutdown signal starts the drain, so a load balancer deregisters the replica before axum finishes the in-flight requests |
 
 Re-issuing the **same** `turn` id is the resume primitive: a completed run
-returns its recorded outcome, a live run re-attaches, never run twice (A7).
+returns its recorded outcome, a live run re-attaches, never run twice (A6).
 
 The records *are* the session: each is one `postcard`-encoded, length-framed,
 checksummed entry in that session's own segment under
@@ -252,7 +252,7 @@ A session survives the machine that was running it.
 
 The journal's fenced append means even a *not actually dead* node (a partition,
 a pause) cannot fork the transcript: the old owner's next append loses the fence
-and hibernates. Re-submitting a turn id is always safe (invariant A7).
+and hibernates. Re-submitting a turn id is always safe (invariant A6).
 
 ## Sizing the host
 
@@ -406,7 +406,7 @@ needs no API key.
 | this deployment | agent runtime spec |
 |---|---|
 | `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
-| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (A7) |
+| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (A6) |
 | the gateway's `EntityRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
 | `--data/workspaces/<node-id>/…`, one directory per session entity | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |

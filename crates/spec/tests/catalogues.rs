@@ -57,23 +57,16 @@ fn every_catalogue_parses_into_rows() {
     }
 }
 
-/// Numbering is per catalogue, unique, and starts at one. Contiguity is not
-/// asserted: the agent catalogue has no A2 (agent §11).
+/// Numbering is per catalogue and runs 1..=n with no gaps: a dropped invariant
+/// renumbers the rest rather than leaving its number behind.
 #[test]
-fn every_catalogue_numbers_its_rows_uniquely() {
+fn every_catalogue_numbers_its_rows_contiguously() {
     for site in CATALOGUES {
         let rows = documented(&root(), site).unwrap_or_else(|e| panic!("{}: {e}", site.id));
         let mut numbers: Vec<u8> = rows.iter().map(|r| r.number).collect();
-        let count = numbers.len();
         numbers.sort_unstable();
-        numbers.dedup();
-        assert_eq!(numbers.len(), count, "{}: a number repeats", site.id);
-        assert_eq!(
-            numbers.first(),
-            Some(&1),
-            "{}: does not start at 1",
-            site.id
-        );
+        let expected: Vec<u8> = (1..=u8::try_from(numbers.len()).expect("fits")).collect();
+        assert_eq!(numbers, expected, "{}: numbering is not 1..=n", site.id);
     }
 }
 

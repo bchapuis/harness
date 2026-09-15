@@ -1,7 +1,7 @@
-//! Cluster conformance (agent spec §7; invariants A3, A6, A7): the Agent
+//! Cluster conformance (agent spec §7; invariants A2, A5, A6): the Agent
 //! entity hosted on a real 3-node `ClusterSystem`, sessions placed by entity's
 //! shard map and driven from several nodes. A session activates on its shard's
-//! leader (§7.2); a re-submitted `TurnId` never starts a second run (A7); the
+//! leader (§7.2); a re-submitted `TurnId` never starts a second run (A6); the
 //! entity's single-writer fence (E1) keeps each transcript one total order: the
 //! harness builds no fence of its own (§6.2). Failover after a leader crash is
 //! the entity's rehydration (§7.5), exercised here by crashing a node and
@@ -163,7 +163,7 @@ fn sessions_run_once_across_a_converged_cluster() {
     }
 
     // Each session ran exactly once (one submitted turn, one terminal outcome)
-    // on the entity's fence (A7, A3, E1).
+    // on the entity's fence (A6, A2, E1).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
         let session = harness
@@ -198,7 +198,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
 
     // Run a session to completion, then crash the node that led its shard. A
     // re-submission of the same TurnId reactivates the session on the new leader
-    // (rehydrate + fold, §7.5) and returns the recorded outcome (A7): the run
+    // (rehydrate + fold, §7.5) and returns the recorded outcome (A6): the run
     // is not re-executed.
     let first = drive(&sim, Duration::from_secs(30), {
         let session = harnesses[0]
@@ -234,7 +234,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
     });
     assert_eq!(again, "done");
 
-    // Still exactly one run on the journal (A7, A3) despite the failover.
+    // Still exactly one run on the journal (A6, A2) despite the failover.
     let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), {
         let session = harnesses[2]
             .session("worker", SessionId::new("s-crash"))
@@ -365,7 +365,7 @@ fn an_orphaned_unknown_tool_call_is_resynthesized_on_resume() {
     net.crash(leader);
     sim.run_for(Duration::from_secs(3)); // re-elect
 
-    // Re-contact from a survivor (A7 attaches): the new leader rehydrates,
+    // Re-contact from a survivor (A6 attaches): the new leader rehydrates,
     // resolves the orphan set, and drives the run to its end.
     let spare = *[A, B, C]
         .iter()
@@ -423,7 +423,7 @@ fn an_orphaned_unknown_tool_call_is_resynthesized_on_resume() {
     assert_invariants(&sink.events());
 }
 
-// -- crash-window cancel propagation (§9.2, A5) ------------------------------
+// -- crash-window cancel propagation (§9.2, A4) ------------------------------
 
 fn delegation_kinds() -> Kinds {
     let entity = || EntityConfig {
@@ -520,7 +520,7 @@ fn await_journal(
     })
 }
 
-/// The R1 crash window (§9.2, A5): `RunEnded { Cancelled }` commits, and the
+/// The R1 crash window (§9.2, A4): `RunEnded { Cancelled }` commits, and the
 /// leader crashes before the propagating send reaches the recorded child. The
 /// owed propagation is a fold fact (`cancels_owed`), so the next contact (a
 /// re-sent `Cancel`, the §7.5 resume trigger) re-derives it on the new leader
@@ -677,7 +677,7 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
         }
     });
 
-    // The child's run ends Cancelled (A5)…
+    // The child's run ends Cancelled (A4)…
     await_journal(
         &sim,
         &surviving,
@@ -853,7 +853,7 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
         .collect();
     assert_eq!(
         submitted, 2,
-        "the re-contact deduped, never re-journaled (A7)"
+        "the re-contact deduped, never re-journaled (A6)"
     );
     assert_eq!(started.len(), 2, "each turn started exactly once");
     assert!(

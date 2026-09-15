@@ -8,7 +8,7 @@
 //! A sandbox is **working state, not session state** (§5.5): the fold never
 //! reads it, no record depends on its contents, and losing it never loses the
 //! session; the loss surfaces to the model as a journaled `WorkspaceReset`,
-//! never as silent corruption (invariant A8).
+//! never as silent corruption (invariant A7).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

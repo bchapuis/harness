@@ -63,7 +63,7 @@ id_string! {
 id_string! {
     /// One submitted turn, and the run it triggers (agent spec §2.2). The
     /// client-chosen idempotency key (§7.4): re-submitting it never starts a
-    /// second run (invariant A7).
+    /// second run (invariant A6).
     TurnId
 }
 id_string! {
@@ -171,7 +171,7 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// A run's terminal outcome, exactly one per run (invariant A3).
+/// A run's terminal outcome, exactly one per run (invariant A2).
 pub type RunOutcome = Result<Completion, RunError>;
 
 /// The label a terminal outcome carries on the event stream (§10.4).
@@ -267,7 +267,7 @@ pub enum RecordBody {
     /// journaled before effect. A record, not a §10.4 event: it is the audit
     /// trail, verified by journal audit (sandbox spec S4).
     TierAcquired { turn: TurnId, tier: Tier },
-    /// The turn's exactly-one terminal outcome (§3.1, invariant A3). For a
+    /// The turn's exactly-one terminal outcome (§3.1, invariant A2). For a
     /// turn cancelled while still queued (§9.2) it is the only record after
     /// acceptance: the turn ends without a run ever starting.
     RunEnded { turn: TurnId, outcome: RunOutcome },
@@ -275,7 +275,7 @@ pub enum RecordBody {
     /// call)` (§9.2): journaled when the child's ack releases, clearing the
     /// owed fact the `RunEnded { Cancelled }` fold captured. Until this record
     /// commits, every activation re-owes the propagation: that is what makes
-    /// A5 survive a crash between the terminal commit and the send.
+    /// A4 survive a crash between the terminal commit and the send.
     CancelDelivered { turn: TurnId, call: CallId },
 }
 
@@ -480,7 +480,7 @@ pub struct SessionState {
     /// clears a run whose `ChildRun` intents lack outcomes, cleared per child
     /// by `CancelDelivered`. Journal-derived, so a crash between the terminal
     /// commit and the propagating send loses nothing: the next activation's
-    /// `advance` finds the debt here and re-sends (A5).
+    /// `advance` finds the debt here and re-sends (A4).
     pub(crate) cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
 }
 
@@ -744,7 +744,7 @@ mod tests {
     fn a_cancelled_run_folds_its_unresolved_children_into_owed_cancels() {
         // The crash-window prefix (§9.2): a delegation intent committed, then
         // `RunEnded { Cancelled }`, and nothing after. The fold alone must
-        // carry the propagation debt (A5).
+        // carry the propagation debt (A4).
         let turn = TurnId::new("t1");
         let call = CallId::new("d1");
         let mut state = SessionState::default();

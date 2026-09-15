@@ -1,5 +1,5 @@
 //! Run-loop conformance (agent spec §3, §5.4, §6.4, §7.4): the happy path,
-//! the tool loop, write-ahead order, idempotent submission (A7), and serialized
+//! the tool loop, write-ahead order, idempotent submission (A6), and serialized
 //! turns; each asserted against the journal, the single source of truth
 //! (§10.1), under the continuous harness checkers (§11).
 
@@ -132,7 +132,7 @@ fn the_tool_loop_journals_intent_before_effect() {
         "intent precedes effect; outcome precedes the next step (§6.4)"
     );
     // The workspace executed exactly the declared call (§5.2) and was released by
-    // the idle stop (§7.2, A8).
+    // the idle stop (§7.2, A7).
     assert_eq!(stats.calls().len(), 1);
     assert_eq!(stats.opened(), 1);
     assert_eq!(stats.released(), 1);
@@ -188,7 +188,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
         .iter()
         .filter(|r| matches!(r.body, RecordBody::TurnSubmitted { .. }))
         .count();
-    assert_eq!(turns, 1, "one journaled turn under duplication (A7)");
+    assert_eq!(turns, 1, "one journaled turn under duplication (A6)");
 }
 
 #[test]

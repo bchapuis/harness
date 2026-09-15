@@ -229,7 +229,7 @@ fn sessions_are_scoped_apart() {
         matches!(missing, Err(ToolError::Sandbox(_))),
         "b must not see a's file, got {missing:?}"
     );
-    // Releasing b leaves a intact (A8's cross-session isolation, by
+    // Releasing b leaves a intact (A7's cross-session isolation, by
     // construction of the provider).
     block_on(b.release());
     let read = call(&a, "read_file", json!({"path": "f"})).expect("read");

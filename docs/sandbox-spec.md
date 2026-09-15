@@ -5,7 +5,7 @@
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the agent runtime specification are cited as **agent §N**, sections of the core specification as **core §N**, sections of the utilities specification as **util §N**, sections of the entity specification ([`entity-spec.md`](entity-spec.md)) as **entity §N**, sections of the machine specification ([`machine-spec.md`](machine-spec.md)) as **machine §N**, and sections of this document as plain **§N**. Invariants defined here are numbered **S1, S2, …**, kept apart from the core catalogue (core §18.5 #1–#22), the utilities catalogue (util §6 U1–U2), and the agent runtime catalogue (agent §11 A1–A8).
+Sections of the agent runtime specification are cited as **agent §N**, sections of the core specification as **core §N**, sections of the utilities specification as **util §N**, sections of the entity specification ([`entity-spec.md`](entity-spec.md)) as **entity §N**, sections of the machine specification ([`machine-spec.md`](machine-spec.md)) as **machine §N**, and sections of this document as plain **§N**. Invariants defined here are numbered **S1, S2, …**, kept apart from the core catalogue (core §18.5 #1–#22), the utilities catalogue (util §6 U1–U2), and the agent runtime catalogue (agent §11 A1–A7).
 
 > **Design stance.** A sandbox that offers everything offers too much: most tool calls read and write files, and granting them a shell grants the kernel's attack surface for free. The tier model makes capability proportional to need. Each tier names one additional dangerous thing (guest code, network, native processes), and a session takes it only through a journaled acquisition, so the tiers that expose kernel attack surface run rarely and the journal records when. Confinement is mandated as a *property* per tier, never as a product: what removes a class of escape is required; which technology removes it is the provider's choice (agent §1.1).
 
@@ -13,7 +13,7 @@ Sections of the agent runtime specification are cited as **agent §N**, sections
 
 ## 1. Scope and layering
 
-This document specifies the semantics of the four tiers the agent runtime declares (agent §5.2), the obligations a `SandboxProvider` (agent §5.3) MUST meet to offer each, and the conformance catalogue (§6) those obligations roll up to. It adds **no seam method and no record**: everything journaled (`TierAcquired`, `WorkspaceReset`, tool outcomes) is agent vocabulary (agent §5.5, §5.6), and the seam shape (one provider, one `Sandbox` per activation, agent A8) is unchanged.
+This document specifies the semantics of the four tiers the agent runtime declares (agent §5.2), the obligations a `SandboxProvider` (agent §5.3) MUST meet to offer each, and the conformance catalogue (§6) those obligations roll up to. It adds **no seam method and no record**: everything journaled (`TierAcquired`, `WorkspaceReset`, tool outcomes) is agent vocabulary (agent §5.5, §5.6), and the seam shape (one provider, one `Sandbox` per activation, agent A7) is unchanged.
 
 ### 1.1 Non-goals
 
@@ -47,7 +47,7 @@ The kind's **tier cap** (agent §5.3 item 4) is a *set* of tiers, not a maximum,
 The agent runtime journals a `TierAcquired` record before the first call at an unheld tier and passes every call's declared tier to `Sandbox::call` (agent §5.6, §6.4). The provider's half of that discipline:
 
 1. **Granted only as journaled.** A provider MUST NOT execute a call at a tier the agent runtime did not pass, and the agent runtime passes only declared, cap-checked tiers; a conforming pair therefore grants nothing the journal does not show (S4).
-2. **Provisioned lazily.** The provider builds a tier's environment on the first call that carries it (agent §5.3 item 1); a session that sits idle or never acquires more holds only its workspace. Providers MAY pool or pre-warm environments across sessions (§7), provided no working state leaks between sessions (agent A8).
+2. **Provisioned lazily.** The provider builds a tier's environment on the first call that carries it (agent §5.3 item 1); a session that sits idle or never acquires more holds only its workspace. Providers MAY pool or pre-warm environments across sessions (§7), provided no working state leaks between sessions (agent A7).
 3. **Additive, activation-scoped.** Held tiers only grow within an activation and all die with it: `release` MUST tear down every provisioned tier's environment and remains idempotent (S5). A fresh activation starts from `Workspace` and re-acquires under new records (agent §5.5).
 
 ---
@@ -70,7 +70,7 @@ Egress is **default-deny**. The only reachable hosts are those on the profile's 
 
 ### 3.4 `Native`: confinement and the threat model
 
-A native environment runs OS processes with the full expressiveness that implies, so its obligation is stated as blast radius: an effect of a native tool MUST be confined to the environment. Filesystem outside the workspace mounts, processes outside the environment's lifetime, and network beyond what the held tiers grant are all unreachable. That is the by-construction leg of agent A8. The code running here is composed by the model from inputs prompt injection makes attacker-influenced: treat it as hostile-code execution.
+A native environment runs OS processes with the full expressiveness that implies, so its obligation is stated as blast radius: an effect of a native tool MUST be confined to the environment. Filesystem outside the workspace mounts, processes outside the environment's lifetime, and network beyond what the held tiers grant are all unreachable. That is the by-construction leg of agent A7. The code running here is composed by the model from inputs prompt injection makes attacker-influenced: treat it as hostile-code execution.
 
 - Production deployments SHOULD confine native environments by OS mechanism (user namespaces, seccomp, Landlock) or by hardware virtualization (a microVM). Shared-kernel confinement is SHOULD-grade because its guarantee is priced by kernel privilege-escalation bugs (the guest still speaks to the host kernel); a microVM converts that residual into a second, far smaller escape problem, at provisioning cost. Multi-tenant deployments SHOULD NOT rely on shared-kernel confinement alone.
 - A development or single-tenant provider MAY run native environments unconfined, and MUST then document itself as **trusted-input only**. The standalone deployment ships no such provider: every shell-capable mode (`docker`, `firecracker`) is confined, and the runtime-free fallback (`durable`) offers typed file tools with no shell.
@@ -123,7 +123,7 @@ Reporting a loss requires detecting it: a provider that can observe that the env
 | Concern | Owner |
 |---|---|
 | `Tier` enum, `ToolDecl.tier`, registry allowlist | agent §5.2 |
-| `Sandbox::call(tier, …)`, lazy open, per-activation binding (A8) | agent §5.3 |
+| `Sandbox::call(tier, …)`, lazy open, per-activation binding (A7) | agent §5.3 |
 | Tier cap and the profile's egress allowlist | agent §5.3 item 4 |
 | Acquisition discipline, `TierAcquired`, write-ahead position | agent §5.6, §6.4 |
 | `WorkspaceReset`, orphaned calls, the divergence window | agent §5.5 |
@@ -149,7 +149,7 @@ The catalogue mirrors the sibling catalogues (core §18.5, util §6, agent §11)
 | S2 | **Compute hermeticity.** A `Compute` environment takes no ambient clock, entropy, network, or OS identity; its outputs are a function of the call, the workspace, and the injected seed. | §3.2 | by construction (the linker exposes only the chosen host functions); differential run, same call + workspace + seed (`agent-sandbox/tests/compute.rs`, `tests/quickjs.rs`); a run under the deterministic simulator *(future)* |
 | S3 | **Granted egress only.** A `Network` environment's egress reaches only hosts on the allowlist its journaled acquisition granted; default-deny; per-session attributable. | §3.3, §2.3 | egress audit scenario tests *(future)*; by construction where the provider owns the dataplane |
 | S4 | **Journaled, monotone, capped acquisition.** A `TierAcquired` record precedes the first effect at its tier within the activation; the held set only grows within an activation, never crosses an activation boundary, and never leaves the kind's cap. | §2.3, §4; agent §5.6, §6.4 | write-ahead-order journal audit at quiescence (agent §6.3, E5) and scripted-sandbox scenario tests (`agent/tests/conformance_sandbox.rs`); registration-time cap check, panicking like a duplicate name |
-| S5 | **Per-tier release.** `release` tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of agent A8). | §2.3; agent §5.3 | provider open/release accounting (`agent-sandbox/tests/workspace.rs`, `tests/compute.rs`), and per-tier teardown (`tests/native.rs`: container removed, idempotent; `tests/firecracker.rs`: VM killed and control directory removed, idempotent); the existing A8 checker covers the binding window |
+| S5 | **Per-tier release.** `release` tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of agent A7). | §2.3; agent §5.3 | provider open/release accounting (`agent-sandbox/tests/workspace.rs`, `tests/compute.rs`), and per-tier teardown (`tests/native.rs`: container removed, idempotent; `tests/firecracker.rs`: VM killed and control directory removed, idempotent); the existing A7 checker covers the binding window |
 
 The first provider is `agent-sandbox`, realizing §3.5's choices for the tiers it offers (and refusing `Network` there, at `open`, as §3.5 states). The catalogue is machine-readable as `s_catalogue()` beside that crate's conformance suite, guarded by the same drift-test pattern as its siblings; the entries still marked *(future)* name the intended method in the established vocabulary (core §17's verification kinds), not an existing test.
 

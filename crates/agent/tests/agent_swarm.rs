@@ -49,7 +49,7 @@ use support::tool_call;
 /// A workload that runs several sessions through the tool loop with seeded model
 /// failures (§12.2). Callers tolerate honest failures (a model error that
 /// survives the policy is a journaled terminal outcome, not a hang), and
-/// re-submit on transport errors, the A3 contact discipline.
+/// re-submit on transport errors, the A2 contact discipline.
 struct FaultyWorkload {
     name: &'static str,
     sessions: usize,

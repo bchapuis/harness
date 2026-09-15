@@ -662,7 +662,7 @@ inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
 above: the wal (L1–L4), entity (E1–E21, plus the facet contract F1–F4), the
-workflow (W1–W7), the agent (A1–A8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
+workflow (W1–W7), the agent (A1–A7), the sandbox (S1–S5), the machine (M1–M6), and the blob store
 (B1–B7). Format compatibility (V1–V2) is the one catalogue with no Rust copy to
 drift from: each format's own tests hold its stamp to them (compatibility §3).
 Assert them; do not re-derive them.

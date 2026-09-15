@@ -37,14 +37,10 @@ pub const WIRE: compat::Format = compat::Format::new("actor.wire", 1);
 /// inside someone else's generic. Changing the alias would be a public-API change
 /// across the workspace for a serialization concern that belongs to this one frame.
 ///
-/// So the representation is mirrored instead, and mirroring is the whole risk: these
-/// enums must serialize *exactly* as serde's own `Result` does or this is a wire-format
-/// change (compatibility spec §3.1). Two properties carry it: two newtype variants, named
-/// `Ok` and `Err`, in that order. The names are what self-describing formats emit
-/// (`{"Ok": …}` under JSON) and the order is what index-based ones emit (variant 0 and
-/// 1 under postcard); the enum's *own* name is not on the wire in either. That is
-/// asserted rather than reasoned about, for both codecs and in both directions, in
-/// `actor-serialization/tests/wire_bytes.rs`.
+/// So the representation is written out instead, as two enums: a borrowing one for the
+/// encode (no copy of the reply bytes) and an owning one for the decode. They are two
+/// declarations of one layout, so their variants must keep the same names and order;
+/// the round trip below holds them to it for both codecs in the tree.
 mod reply_bytes {
     use super::CallError;
     use super::ReplyResult;
@@ -125,10 +121,7 @@ pub enum Frame {
         /// sequence path and the decoder grows a `Vec` one `u8` at a time: ~16 ms a
         /// mebibyte, which measured as the whole per-block cost of replicating a disk
         /// image. `benches/frame.rs` measures this outer layer; annotating it took the
-        /// deduplicated two-node figure from 12.7 ms a block to 1.9. Neutral on the
-        /// wire for both codecs in the tree:
-        /// `actor-serialization/tests/wire_bytes.rs` is that claim, and covers this
-        /// struct-variant shape specifically.
+        /// deduplicated two-node figure from 12.7 ms a block to 1.9.
         #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
@@ -358,21 +351,14 @@ mod tests {
     use actor_serialization::decode;
     use actor_serialization::encode;
 
-    /// Every codec this workspace can be deployed with, as in
-    /// `actor-serialization/tests/wire_bytes.rs`. Both are needed here for the reason
-    /// that file spells out: postcard pins the mirror's variant *order* and JSON pins
-    /// its *names*, and neither pins both.
+    /// Every codec this workspace can be deployed with. postcard reads the variants by
+    /// position and JSON by name, so between them they catch the two halves of
+    /// `reply_bytes` drifting apart either way.
     const CODECS: &[(&str, &dyn Codec)] = &[("postcard", &PostcardCodec), ("json", &JsonCodec)];
 
     /// The outcome as [`Frame::Reply`] writes it: through [`reply_bytes`].
     #[derive(Serialize, Deserialize)]
     struct Mirrored(#[serde(with = "reply_bytes")] ReplyResult);
-
-    /// The outcome as serde writes a `Result` on its own. A newtype struct is
-    /// transparent, so this encodes as the bare `ReplyResult` and the pair differs by
-    /// the module alone.
-    #[derive(Serialize, Deserialize)]
-    struct Plain(ReplyResult);
 
     fn outcomes() -> Vec<ReplyResult> {
         vec![
@@ -385,47 +371,16 @@ mod tests {
         ]
     }
 
-    /// `wire_bytes.rs` proves the *shape* is neutral; this proves **this module** still
-    /// has that shape.
-    ///
-    /// That file compares two types it declares itself, so it would keep passing if
-    /// `reply_bytes` drifted: it is a statement about serde, not about us. This one
-    /// encodes through the real module and compares against what serde does with a
-    /// real `Result`, so a renamed variant or a swapped order fails here, which is
-    /// where the wire break would actually be.
+    /// What the borrowing half writes, the owning half reads back.
     #[test]
-    fn the_reply_module_writes_what_serde_writes_for_a_plain_result() {
+    fn the_reply_module_round_trips() {
         for (name, codec) in CODECS {
             for outcome in outcomes() {
-                let mirrored = encode(*codec, &Mirrored(outcome.clone())).expect("encodes");
-                let plain = encode(*codec, &Plain(outcome.clone())).expect("encodes");
-                assert_eq!(
-                    mirrored, plain,
-                    "{name}: `reply_bytes` no longer encodes as serde's own `Result` \
-                     ({outcome:?}): a wire-format change, which every peer must take \
-                     at once (compatibility spec §3.1)",
-                );
-            }
-        }
-    }
-
-    /// And that a node running this build reads one that does not, in both directions.
-    #[test]
-    fn the_reply_module_round_trips_against_a_plain_result() {
-        for (name, codec) in CODECS {
-            for outcome in outcomes() {
-                let from_plain = encode(*codec, &Plain(outcome.clone())).expect("encodes");
-                let read: Mirrored = decode(*codec, &from_plain).expect("decodes");
+                let bytes = encode(*codec, &Mirrored(outcome.clone())).expect("encodes");
+                let read: Mirrored = decode(*codec, &bytes).expect("decodes");
                 assert_eq!(
                     read.0, outcome,
-                    "{name}: this build misread a peer that wrote a plain `Result`",
-                );
-
-                let from_mirrored = encode(*codec, &Mirrored(outcome.clone())).expect("encodes");
-                let read: Plain = decode(*codec, &from_mirrored).expect("decodes");
-                assert_eq!(
-                    read.0, outcome,
-                    "{name}: a peer reading a plain `Result` would misread this build",
+                    "{name}: `reply_bytes` misread its own encoding",
                 );
             }
         }

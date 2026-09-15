@@ -1,4 +1,4 @@
-//! Cancellation conformance (agent spec §9.2; invariant A5): message
+//! Cancellation conformance (agent spec §9.2; invariant A4): message
 //! granularity, idempotence, straggler discard, and propagation across the
 //! delegation tree.
 
@@ -150,7 +150,7 @@ fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
                 let (a, b, ()) = futures::join!(prompt_a, prompt_b, driver);
                 assert_eq!(a.expect("submit a").expect("run a").text(), "done");
                 assert_eq!(b.expect("submit b"), Err(RunError::Cancelled));
-                // The recorded outcome survives for any later re-contact (A7).
+                // The recorded outcome survives for any later re-contact (A6).
                 let again = session.prompt(Turn::new(TurnId::new("t-b"), "b")).await;
                 assert_eq!(again.expect("re-submit b"), Err(RunError::Cancelled));
                 flush(&system).await;
@@ -325,7 +325,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
     });
     run_seed(&workload, 53).expect("invariants hold");
 
-    // The child's run ended Cancelled within bounded logical time (A5, §9.2 item 2).
+    // The child's run ended Cancelled within bounded logical time (A4, §9.2 item 2).
     assert!(
         child_records.lock().unwrap().iter().any(|r| matches!(
             &r.body,

@@ -1,4 +1,4 @@
-//! Budget and delegation conformance (agent spec §8, §9.1; invariant A4):
+//! Budget and delegation conformance (agent spec §8, §9.1; invariant A3):
 //! pre-call enforcement, carve-outs, the compositional tree bound, and child
 //! failure surfacing as a tool outcome; audited against the journals, where
 //! spend is defined (§9.1 item 4).
@@ -132,7 +132,7 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
     let records = run_single("budget-exhaustion", kinds, model, "s-loop", 23);
 
     let (_, steps) = spend_of(&records);
-    assert_eq!(steps, 3, "exactly the budgeted steps were issued (A4)");
+    assert_eq!(steps, 3, "exactly the budgeted steps were issued (A3)");
     assert!(matches!(
         records.last().expect("records").body,
         RecordBody::RunEnded {
@@ -317,7 +317,7 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
         "the child {child_session} has a journal of its own"
     );
 
-    // The compositional bound (A4): own spend + carve-outs ≤ budget, child within slice.
+    // The compositional bound (A3): own spend + carve-outs ≤ budget, child within slice.
     let (parent_tokens, parent_steps) = spend_of(&parent);
     assert!(parent_tokens <= 10_000 && parent_steps <= 10);
     let (child_tokens, child_steps) = spend_of(&child);

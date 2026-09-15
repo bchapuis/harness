@@ -1,7 +1,7 @@
 //! Shared simulation invariants over agent events (agent spec §11).
 //!
 //! The continuous A-checkers: the event grammar that bounds effects to a live
-//! activation (A6/A8), and run discipline over `(session, turn)` (A3/A4/A5/A7).
+//! activation (A5/A7), and run discipline over `(session, turn)` (A2/A3/A4/A6).
 //! Test support behind the `testing` feature, not part of the agent runtime
 //! API.
 
@@ -25,7 +25,7 @@ fn session_of(name: &EntityName) -> SessionId {
     SessionId::new(name.key())
 }
 
-/// **Effect containment and single per-node activation** (A6 per-node half, A8):
+/// **Effect containment and single per-node activation** (A5 per-node half, A7):
 /// activation is the entity's (`Activated`/`Deactivated` strictly alternate per
 /// session and node, entity §13); the agent runtime's `SandboxBound`/`SandboxReleased`
 /// alternate **within** that window and the sandbox is released before
@@ -66,7 +66,7 @@ impl Invariant for AgentEventGrammar {
                     let w = self.window(session_of(name), *node);
                     if w.1 {
                         return Err(format!(
-                            "deactivation of {name} on {node} with the sandbox still bound (A8)"
+                            "deactivation of {name} on {node} with the sandbox still bound (A7)"
                         ));
                     }
                     *w = (false, false);
@@ -83,11 +83,11 @@ impl Invariant for AgentEventGrammar {
                 let w = self.window(session.clone(), *node);
                 if !w.0 {
                     return Err(format!(
-                        "sandbox bound for {session} on {node} outside an activation (A8)"
+                        "sandbox bound for {session} on {node} outside an activation (A7)"
                     ));
                 }
                 if w.1 {
-                    return Err(format!("second sandbox bound for {session} on {node} (A8)"));
+                    return Err(format!("second sandbox bound for {session} on {node} (A7)"));
                 }
                 w.1 = true;
             }
@@ -95,7 +95,7 @@ impl Invariant for AgentEventGrammar {
                 let w = self.window(session.clone(), *node);
                 if !w.1 {
                     return Err(format!(
-                        "sandbox released for {session} on {node} without a bind (A8)"
+                        "sandbox released for {session} on {node} without a bind (A7)"
                     ));
                 }
                 w.1 = false;
@@ -104,7 +104,7 @@ impl Invariant for AgentEventGrammar {
                 let w = self.window(session.clone(), *node);
                 if !w.0 {
                     return Err(format!(
-                        "model completion for {session} on {node} outside an activation (A6)"
+                        "model completion for {session} on {node} outside an activation (A5)"
                     ));
                 }
             }
@@ -114,7 +114,7 @@ impl Invariant for AgentEventGrammar {
     }
 }
 
-/// **Run discipline** (A3 pairing, A7; the stream half of A4 and A5): per
+/// **Run discipline** (A2 pairing, A6; the stream half of A3 and A4): per
 /// `(session, turn)` exactly one `RunStarted` and at most one `RunEnded`, never
 /// an end without a start. A resume emits no second `RunStarted` (§10.4), and
 /// `ModelCompleted` is scoped to journaled spend (emitted only after the
@@ -140,24 +140,24 @@ impl Invariant for RunDiscipline {
             AgentEvent::RunStarted { session, turn, .. }
                 if !self.started.insert((session.clone(), turn.clone())) =>
             {
-                return Err(format!("second RunStarted for {session}/{turn} (A7)"));
+                return Err(format!("second RunStarted for {session}/{turn} (A6)"));
             }
             AgentEvent::RunEnded { session, turn, .. } => {
                 let key = (session.clone(), turn.clone());
                 if !self.started.contains(&key) {
                     return Err(format!(
-                        "RunEnded without RunStarted for {session}/{turn} (A3)"
+                        "RunEnded without RunStarted for {session}/{turn} (A2)"
                     ));
                 }
                 if !self.ended.insert(key) {
-                    return Err(format!("second RunEnded for {session}/{turn} (A3)"));
+                    return Err(format!("second RunEnded for {session}/{turn} (A2)"));
                 }
             }
             AgentEvent::ModelCompleted { session, turn, .. }
                 if self.ended.contains(&(session.clone(), turn.clone())) =>
             {
                 return Err(format!(
-                    "model call for {session}/{turn} completed after the run ended (A4/A5)"
+                    "model call for {session}/{turn} completed after the run ended (A3/A4)"
                 ));
             }
             AgentEvent::ToolCompleted { session, turn, .. }
@@ -188,22 +188,22 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
 ///
 /// Declared here, beside the checkers, because this is the claim an edit to an
 /// `observe` body falsifies: stop watching `ModelCompleted` outside an
-/// activation and the row saying [`AgentEventGrammar`] carries A6 is what
+/// activation and the row saying [`AgentEventGrammar`] carries A5 is what
 /// became false. `conformance_catalogue` holds these pairs equal to the
 /// catalogue's, **per pair** and in both directions: two names cover six
-/// invariants here, and a set of names cannot see A6 dropping its
-/// `Verify::Checker` while A8 still names the same checker.
+/// invariants here, and a set of names cannot see A5 dropping its
+/// `Verify::Checker` while A7 still names the same checker.
 ///
 /// A bare `(name, number)` rather than `actor_simulation::CheckerCoverage`,
 /// which also records which of *its* two catalogues a number belongs to; every
 /// number here is an A.
 pub fn checker_coverage() -> &'static [(&'static str, u8)] {
     &[
-        ("agent-event-grammar", 6),
-        ("agent-event-grammar", 8),
+        ("agent-event-grammar", 5),
+        ("agent-event-grammar", 7),
+        ("agent-run-discipline", 2),
         ("agent-run-discipline", 3),
         ("agent-run-discipline", 4),
-        ("agent-run-discipline", 5),
-        ("agent-run-discipline", 7),
+        ("agent-run-discipline", 6),
     ]
 }

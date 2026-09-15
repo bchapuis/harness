@@ -1,4 +1,4 @@
-//! Sandbox conformance (agent spec §5.3, §5.5, §5.6; invariant A8; sandbox
+//! Sandbox conformance (agent spec §5.3, §5.5, §5.6; invariant A7; sandbox
 //! spec S4): lazy open, provisioning failure as a transcript value, per-tool
 //! timeouts, environment loss surfacing as a journaled `WorkspaceReset` (never
 //! as silent corruption), and the tier acquisition discipline: journaled,
@@ -176,7 +176,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
         ],
     );
     // The loss tore down one environment; the next call opened a fresh one (§5.5),
-    // and both were released exactly once (A8).
+    // and both were released exactly once (A7).
     assert_eq!(stats.opened(), 2);
     assert_eq!(stats.released(), 2);
 }

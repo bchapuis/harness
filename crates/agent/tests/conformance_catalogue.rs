@@ -1,4 +1,4 @@
-//! Catalogue drift test (agent spec §11): the machine-readable A1–A8
+//! Catalogue drift test (agent spec §11): the machine-readable A1–A7
 //! catalogue and the live checker set must agree; a checker added in code
 //! but not recorded in the catalogue (or vice versa) fails the build, the
 //! same pattern guarding the core and utilities catalogues.
@@ -7,7 +7,7 @@
 //! sets of checker names. Two names carry six A-invariants here, so a name set
 //! is blind to the drift that actually happens: one entry quietly dropping its
 //! `Verify::Checker` while a sibling entry still names the same checker. That is
-//! how §11's A6 row came to understate its verification with every test green.
+//! how §11's A5 row came to understate its verification with every test green.
 
 mod support;
 
@@ -112,10 +112,8 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 
 #[test]
 fn the_catalogue_covers_the_live_a_invariants() {
-    // A2 is retired (§11): the single-writer fence is wholly the entity's (E1),
-    // so it has no agent invariant; A3–A8 keep their numbers.
     let numbers: Vec<u8> = a_catalogue().iter().map(|e| e.invariant).collect();
-    assert_eq!(numbers, vec![1, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(numbers, vec![1, 2, 3, 4, 5, 6, 7]);
     for entry in a_catalogue() {
         assert!(
             !entry.verify.is_empty(),

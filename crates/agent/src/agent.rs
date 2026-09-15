@@ -17,7 +17,7 @@
 //!   I/O inside a handler (§3.2). Both messages are the workflow's now, [`Tick`]
 //!   and [`Settled`], and so is the cycle between them.
 //! - **`on_activate`/`on_deactivate`/`can_hibernate`** (entity §10): resume
-//!   set-up, sandbox release on every deactivation (A8), and the veto that keeps
+//!   set-up, sandbox release on every deactivation (A7), and the veto that keeps
 //!   a live run from hibernating (§7.2).
 //!
 //! Everything else (the journal, the single-writer fence, placement,
@@ -140,10 +140,10 @@ pub enum SubmitStatus {
     /// reaches the head of the session's queue (§7.3).
     Started,
     /// The `TurnId` named a queued or live turn; the `reply_to` was registered
-    /// on it (A7).
+    /// on it (A6).
     Attached,
     /// The `TurnId` named an ended run; its recorded outcome is delivered to the
-    /// `reply_to` immediately (A7).
+    /// `reply_to` immediately (A6).
     Ended,
 }
 
@@ -263,11 +263,11 @@ enum Reconciled {
 
 /// The sandbox binding and tier grants this activation holds (§5.4, §5.6):
 /// fold-external working state, rebuilt per activation and released on
-/// deactivation (A8).
+/// deactivation (A7).
 #[derive(Default)]
 struct SandboxState {
     /// The sandbox handle's lifecycle slot: at most one live sandbox per
-    /// activation (invariant A8). This is the workflow's activation-scoped
+    /// activation (invariant A7). This is the workflow's activation-scoped
     /// binding (workflow §6): opened once on demand, vetoing hibernation while
     /// the open is in flight, released on every deactivation, and never
     /// journaled. The opened handle is not serializable, so the open task fills
@@ -406,7 +406,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// End the live run as one step: owe the §10.4 `RunEnded` event and return
     /// the terminal record to journal. Paired like `fail_call`: the event
     /// without the record would announce a run the journal never ended; the
-    /// record without the event breaks A3's start/end pairing. A turn cancelled
+    /// record without the event breaks A2's start/end pairing. A turn cancelled
     /// while still queued does not come through here: no run started, so no
     /// event is owed.
     fn end_run(
@@ -468,7 +468,7 @@ impl<S: HarnessSystem> Agent<S> {
         let mut act = self.lock();
 
         // Dedup against the journal (§7.4): every accepted turn (queued, live,
-        // or ended) has folded facts, so one check covers all three (A7). The
+        // or ended) has folded facts, so one check covers all three (A6). The
         // digest spans content and the literal budget, so a re-submission that
         // changes either is a conflict, never a silent attach.
         if let Some(facts) = state.turns.get(&turn_id) {
@@ -1114,7 +1114,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Open the sandbox off the command path (§5.3): the task fills the
     /// [`Binding`] under the mutex and re-enters the cycle with a [`Tick`];
-    /// success emits `SandboxBound` (A8).
+    /// success emits `SandboxBound` (A7).
     fn launch_open(
         &self,
         ctx: &EntityCtx<Agent<S>>,
@@ -1197,7 +1197,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     // -- sandbox lifecycle ---------------------------------------------------
 
-    /// Emit `SandboxReleased` for this session (A8): the one place the event is
+    /// Emit `SandboxReleased` for this session (A7): the one place the event is
     /// built, shared by [`release_sandbox`](Self::release_sandbox) and the
     /// deactivation teardown.
     fn emit_sandbox_released(&self, ctx: &EntityCtx<Agent<S>>) {
@@ -1210,7 +1210,7 @@ impl<S: HarnessSystem> Agent<S> {
         );
     }
 
-    /// Drop and release the bound sandbox, emitting `SandboxReleased` (A8).
+    /// Drop and release the bound sandbox, emitting `SandboxReleased` (A7).
     /// Synchronous teardown is launched off the command path.
     fn release_sandbox(&self, act: &mut Activation<S>, ctx: &EntityCtx<Agent<S>>) {
         if let Some(sandbox) = act.env.slot.take() {
@@ -1273,7 +1273,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
 
     async fn on_deactivate(&mut self, ctx: &EntityCtx<Self>) {
         // Release the sandbox on every deactivation: idle hibernation, migration,
-        // or forced step-down (A8). The workspace goes with it (§5.5). Scope the
+        // or forced step-down (A7). The workspace goes with it (§5.5). Scope the
         // lock so the guard is dropped before the async release.
         let release = {
             let mut act = self.lock();
@@ -1406,7 +1406,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
                 // A delegation is control flow, not an effect on the world
                 // (§5.2, §8): an ordinary entity submit with a reply-to mailbox,
                 // retried on transport failure (safe; the derived `TurnId`
-                // dedups, A7). The child's outcome becomes this call's tool
+                // dedups, A6). The child's outcome becomes this call's tool
                 // outcome (§5.4).
                 Effect::Delegate {
                     turn,

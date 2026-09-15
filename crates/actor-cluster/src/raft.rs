@@ -78,11 +78,7 @@ pub enum EntryPayload {
     /// `serde_bytes` because these bytes are already encoded and would otherwise go
     /// through serde's default sequence path in both directions: the cost that
     /// dominated blob replication (`actor-serialization/benches/codec.rs` prices the
-    /// pass; `scripts/bench-machine-cost.sh` priced it end to end). This one is also
-    /// **durable**: a voter persists its log, so the attribute has to leave the encoding
-    /// byte-identical or every existing log file moves with it. It does, for both
-    /// codecs in the tree;
-    /// `actor-serialization/tests/wire_bytes.rs` covers this newtype-variant shape.
+    /// pass; `scripts/bench-machine-cost.sh` priced it end to end).
     App(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 

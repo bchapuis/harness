@@ -47,9 +47,8 @@ fn every_range_names_a_known_catalogue() {
 
 /// No citation names an invariant past the end of the catalogue it names.
 ///
-/// The span may skip a number (the agent runtime catalogue has no A2 and `A1–A8` is
-/// still how its extent is written), but it may not run off the end, whatever the
-/// surrounding sentence meant by it.
+/// A span may stop short of the end (`M1–M3` is a claim about three of six), but it
+/// may not run off the end, whatever the surrounding sentence meant by it.
 #[test]
 fn no_range_runs_past_its_catalogue() {
     let root = root();

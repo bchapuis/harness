@@ -191,7 +191,7 @@ impl actor_simulation::Workload for Scenario {
 }
 
 /// A kind config with an aggressive idle window, so a single test run exercises
-/// idle hibernation and sandbox release (§7.2, A8).
+/// idle hibernation and sandbox release (§7.2, A7).
 pub fn brisk_idle() -> entity::EntityConfig {
     entity::EntityConfig {
         idle_after: Duration::from_secs(1),
@@ -389,7 +389,7 @@ impl Model for FaultyModel {
 // Scripted sandbox (§12.1)
 // ---------------------------------------------------------------------------
 
-/// Observable provider activity, for A8 assertions.
+/// Observable provider activity, for A7 assertions.
 #[derive(Clone, Default)]
 pub struct SandboxStats {
     opened: Arc<AtomicUsize>,
@@ -593,9 +593,7 @@ pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
 
 /// The agent runtime invariant catalogue (agent spec §11): machine readable
 /// alongside the conformance suite, guarded by the drift test in
-/// `conformance_catalogue.rs`. `invariant: n` reads as "An". **A2 is retired**
-/// (§11): the single-writer fence is wholly the entity's (E1), so it has no
-/// agent invariant; the numbers A3–A8 are kept stable rather than renumbered.
+/// `conformance_catalogue.rs`. `invariant: n` reads as "An".
 pub fn a_catalogue() -> &'static [CatalogueEntry] {
     A_CATALOGUE
 }
@@ -610,7 +608,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         )],
     },
     CatalogueEntry {
-        invariant: 3,
+        invariant: 2,
         spec: "agent §3.1, §7.5, §9",
         property: "Run termination: every RunStarted is followed by exactly one RunEnded; once faults cease and a caller re-contacts the session, no run remains pending past its budget's bound",
         verify: &[
@@ -619,7 +617,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
     CatalogueEntry {
-        invariant: 4,
+        invariant: 3,
         spec: "agent §9.1",
         property: "Budget bound: no model call after exhaustion; output spend never exceeds the remainder at call time; own spend plus carve-outs never exceeds the budget at every tree level",
         verify: &[
@@ -628,7 +626,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
     CatalogueEntry {
-        invariant: 5,
+        invariant: 4,
         spec: "agent §9.2",
         property: "Cancellation: after a cancel is journaled, the run and (once faults cease) every descendant run end Cancelled in bounded logical time, issuing no further model calls",
         verify: &[
@@ -637,7 +635,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
     CatalogueEntry {
-        invariant: 6,
+        invariant: 5,
         spec: "agent §7.2, §7.5",
         property: "Single autonomous activation: per-node activations never overlap; a converged healed cluster runs at most one activation per session; an addressed session activates within bounded logical time of contact",
         verify: &[
@@ -646,7 +644,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
     CatalogueEntry {
-        invariant: 7,
+        invariant: 6,
         spec: "agent §7.4",
         property: "Idempotent submission: a re-submitted TurnId never starts a second run; it returns the recorded outcome or attaches to the live run",
         verify: &[
@@ -655,7 +653,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
     CatalogueEntry {
-        invariant: 8,
+        invariant: 7,
         spec: "agent §5.3, §5.5",
         property: "Effect containment: at most one live sandbox per activation, released on deactivation; sandboxed calls execute in their activation's sandbox; loss surfaces in the journal, never as silent corruption",
         verify: &[

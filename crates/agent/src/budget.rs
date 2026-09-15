@@ -5,7 +5,7 @@
 //! Enforcement is pre-call: a model call is issued only while spend is below
 //! the budget, with `max_tokens` clamped to the remainder, so output
 //! overshoot is zero and total overshoot is bounded by one call's input
-//! (invariant A4). The bound is compositional with **no cross-node accounting
+//! (invariant A3). The bound is compositional with **no cross-node accounting
 //! protocol**: a delegation reserves an explicit slice of the parent's
 //! remainder and the child enforces its slice locally, so
 //! `own spend + Σ carve-outs ≤ budget` holds at every node of the tree.
@@ -89,7 +89,7 @@ impl Spend {
 
     /// Clamp a child's requested carve-out to this run's remainder (harness
     /// spec §9.1 item 3): the slice can never exceed what the parent has left,
-    /// which is what makes the tree bound compositional (A4).
+    /// which is what makes the tree bound compositional (A3).
     pub fn carve(&self, budget: &Budget, requested: Budget) -> Budget {
         Budget {
             tokens: requested.tokens.min(self.remaining_tokens(budget)),

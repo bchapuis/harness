@@ -101,7 +101,6 @@ impl GatewayClient {
         #[derive(Deserialize)]
         struct Resp {
             records: Vec<(Seq, Record)>,
-            #[serde(default)]
             base: Seq,
         }
         let resp: Resp = parse(&body)?;

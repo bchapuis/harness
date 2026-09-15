@@ -479,7 +479,7 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// §7.4): `Submit` (ack) plus awaiting the one `RunCompleted` notification.
     /// The deadline bounds this caller's **wait**, never the run: on a lapse it
     /// re-submits the same `TurnId`, which re-attaches or returns the recorded
-    /// outcome (A7).
+    /// outcome (A6).
     pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, EntityError> {
         self.prompt_within(turn, self.config.submit_deadline).await
     }
@@ -809,7 +809,7 @@ pub(crate) enum AttachOutcome {
     /// The run finished and delivered its outcome.
     Completed(RunOutcome),
     /// The submit was accepted but the wait lapsed (or the mailbox dropped):
-    /// re-submitting the same `TurnId` re-attaches (A7).
+    /// re-submitting the same `TurnId` re-attaches (A6).
     Lapsed,
     /// The submit was permanently rejected (§7.4): never worth retrying.
     Rejected(SubmitReject),
@@ -820,7 +820,7 @@ pub(crate) enum AttachOutcome {
 /// One submit-and-await-outcome attempt against an entity (§7.4): spawn an
 /// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
 /// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
-/// because re-submitting the same `TurnId` is idempotent (A7). The mailbox
+/// because re-submitting the same `TurnId` is idempotent (A6). The mailbox
 /// lives exactly as long as the attempt: a [`MailboxGuard`] stops it on every
 /// path that ends without an outcome (including this future being dropped),
 /// so a re-attach replaces the mailbox rather than accumulating one per
@@ -860,7 +860,7 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
 }
 
 /// Submit to a child and await its outcome (§8.1 step 2), with the derived
-/// `TurnId` keeping every re-attempt safe (A7). Re-attaches on the `cadence`
+/// `TurnId` keeping every re-attempt safe (A6). Re-attaches on the `cadence`
 /// (each lapse re-registers on whatever activation now hosts the child, §7.5)
 /// until the budget-scaled `wait` lapses; retries a consecutively unreachable
 /// child up to [`TRANSPORT_RETRIES`] with backoff. Maps the child's

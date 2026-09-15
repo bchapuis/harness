@@ -23,7 +23,7 @@ use crate::session::TurnId;
 pub enum AgentEvent {
     /// A run began for a newly journaled turn: fires once per `(session, turn)`
     /// (on the activation whose append committed the turn) under any
-    /// duplication or retry (A7). A resume emits **no** second `RunStarted`: a
+    /// duplication or retry (A6). A resume emits **no** second `RunStarted`: a
     /// checker recognizes a resume as the entity's `Activated` followed by a
     /// `ModelCompleted` on an already-started turn (§10.4). `parent` is the
     /// delegating session for a run started by delegation (§8.1).
@@ -33,8 +33,8 @@ pub enum AgentEvent {
         parent: Option<SessionId>,
     },
     /// One model call finished and its response committed on a live activation:
-    /// the stream half of A4 (no completion after `RunEnded`) and the per-node
-    /// half of A6. A discarded straggler (run already ended) emits nothing,
+    /// the stream half of A3 (no completion after `RunEnded`) and the per-node
+    /// half of A5. A discarded straggler (run already ended) emits nothing,
     /// keeping the event scoped to journaled spend (§9.1 item 4, §10.4); the
     /// spend itself is audited from records, not from the stream. `node`
     /// attributes the call to its enclosing activation.
@@ -52,7 +52,7 @@ pub enum AgentEvent {
         turn: TurnId,
         node: NodeId,
     },
-    /// The run's exactly-one terminal outcome was journaled (A3). `outcome`
+    /// The run's exactly-one terminal outcome was journaled (A2). `outcome`
     /// is the terminal kind: `"ok"`, `"budget"`, `"cancelled"`, or `"model"`
     /// (§3.1).
     RunEnded {
@@ -62,7 +62,7 @@ pub enum AgentEvent {
     },
     /// The activation opened its sandbox: first sandboxed call (§5.3).
     /// Alternates with [`SandboxReleased`](AgentEvent::SandboxReleased)
-    /// within the entity's activation window (A8).
+    /// within the entity's activation window (A7).
     SandboxBound { session: SessionId, node: NodeId },
     /// That sandbox was torn down: deactivation, loss, or step-down.
     SandboxReleased { session: SessionId, node: NodeId },

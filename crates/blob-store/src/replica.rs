@@ -48,8 +48,7 @@ pub struct StoreBlob {
     pub ns: Namespace,
     pub id: BlobId,
     /// Told to the codec as bytes rather than left to serde's default sequence
-    /// path. Wire-identical under both codecs in the tree (`wire_bytes.rs`), and
-    /// worth ~160x on encode and ~670x on decode at a mebibyte.
+    /// path: worth ~160x on encode and ~670x on decode at a mebibyte.
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
 }
