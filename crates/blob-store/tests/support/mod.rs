@@ -47,7 +47,7 @@ const B_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 3,
         spec: "blob §5.2",
-        property: "Durability target: a put is acknowledged only once at least W copies are stored, so the blob survives losing any R - W owners; a put that cannot reach W is refused rather than acked at one copy",
+        property: "Durability target: a put is acknowledged only once at least W copies are stored, so the blob survives losing any W - 1 owners (R - 1 once all R copies are stored); a put that cannot reach W is refused rather than acked at one copy",
         verify: &[Verify::TestFn(
             "a_blob_put_on_one_node_is_gettable_from_every_node, \
              a_put_below_write_quorum_is_refused",

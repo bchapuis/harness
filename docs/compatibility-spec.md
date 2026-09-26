@@ -83,7 +83,7 @@ Version 1 is `[tag][payload]` with the tag in `0..=0x7F`. A leading byte at or a
 - a record at another version is refused *as a version*, not reported as a facet this build is missing;
 - the write path panics on such a byte, mirroring the read path's refusal, so the two agree on what a valid record is (the discipline `wal` applies to an oversized frame, wal §2, §4).
 
-This versions the **envelope**, not a facet's payload schema, which evolves separately: `postcard` appends enum variants safely, so a facet's operation enum grows at its end.
+This versions the **envelope**, not a facet's payload schema. A payload travels inside a stamped format (a record in an `entity.store.segment` log, §3.2.1; a snapshot contribution in `entity.snapshot`, §3.3), so any change to a facet's payload schema, an appended variant included, is a new version of the format that carries it, refused by name like any other.
 
 ### 3.2.1 A stamp owned by two parties
 

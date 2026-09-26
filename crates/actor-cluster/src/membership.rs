@@ -671,17 +671,17 @@ impl Membership {
 
     /// The gossip-based **coordinator** (spec §9.4.4 item 3): a deterministic
     /// *role*, not an election; it falls to the lowest-address member of this
-    /// node's view that is neither terminal nor departing (`Leaving`,
-    /// `Draining`) and is reachable, this node included. `Joining` members are
-    /// candidates too: that is what lets a fresh cluster bootstrap, since with
-    /// no `Up` member anywhere the lowest-address joiner takes the role and
-    /// admits itself (`advance_lifecycle`). Returns `None` only if this node
-    /// has excluded itself by leaving or being down and sees no other
-    /// candidate.
+    /// node's view that is neither terminal nor `Leaving` and is reachable,
+    /// this node included (gossip mode has no `Draining` cordon, spec §9.4).
+    /// `Joining` members are candidates too: that is what lets a fresh cluster
+    /// bootstrap, since with no `Up` member anywhere the lowest-address joiner
+    /// takes the role and admits itself (`advance_lifecycle`). Returns `None`
+    /// only if this node has excluded itself by leaving or being down and sees
+    /// no other candidate.
     fn compute_coordinator(&self, members: &BTreeMap<NodeId, Member>) -> Option<NodeId> {
         let mut best = None;
         let ss = self.self_status();
-        if !ss.is_terminal() && ss != MemberStatus::Leaving && ss != MemberStatus::Draining {
+        if !ss.is_terminal() && ss != MemberStatus::Leaving {
             best = Some(self.node);
         }
         for (node, m) in members.iter() {
@@ -689,7 +689,6 @@ impl Membership {
             // (spec §9.3, §9.4.4).
             if !m.status.is_terminal()
                 && m.status != MemberStatus::Leaving
-                && m.status != MemberStatus::Draining
                 && m.reachability == Reachability::Reachable
             {
                 best = Some(best.map_or(*node, |b: NodeId| b.min(*node)));

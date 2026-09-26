@@ -257,7 +257,7 @@ A durability claim is only as good as the reply it trusts. Three mistakes recur:
 
 - **A no-op commits nothing.** `tenancy`'s directory entity answers a `Record` whose name is already owned with identical metadata with `Recorded::Unchanged`. That reports what the serving activation believed but journals no record, so entity's output gate never held its reply, and a quorum-less recovery may have seeded that belief with an uncommitted record (entity §7.5). Only outcomes that journal, `Recorded::Created` and `Recorded::Updated`, are acknowledgements.
 - **A read is not a probe.** The entity layer's read contract is read-your-leader (relaxed), *not* linearizable under partition (entity §7.5). To observe committed state, issue a trivial *writing* command rather than a query.
-- **A mutating command needs an idempotency key.** At-most-once delivery means a duplicated frame runs the command twice (§7.2); a deposit without a key deposits twice, and the sweep blames durability for a test bug.
+- **A mutating command needs an idempotency key.** Delivery is at-most-once per attempt (§7.2), but a caller's retry, or the sweep's frame-duplication fault, delivers the same command twice; a deposit without a key deposits twice, and the sweep blames durability for a test bug.
 
 ## Adding a sweep
 

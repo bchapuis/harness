@@ -230,7 +230,7 @@ fn a_tampered_copy_falls_through_to_a_good_owner() {
 #[test]
 fn a_put_below_write_quorum_is_refused() {
     // B3 / §5.2: a put acks only once at least W copies are stored, so the blob
-    // survives losing any R − W owners. Partition A away from {B, C} so A's serving
+    // survives losing any W − 1 owners. Partition A away from {B, C} so A's serving
     // set shrinks to just itself: fewer than W=2 nodes could ever hold a copy. The
     // put must fail with Unavailable rather than ack at one copy, which would
     // silently weaken the durability target when the cluster is under-provisioned.

@@ -105,8 +105,9 @@ pub(crate) const RECORD: compat::Format = compat::Format::new("entity.record", 1
 /// not a tag but the mark of another envelope version, which a version-1 reader
 /// refuses by name rather than reporting as a facet it is missing.
 ///
-/// This does not version a facet's **payload** schema: `postcard` appends enum
-/// variants safely, so a facet's op enum grows at its end indefinitely.
+/// This does not version a facet's **payload** schema: a change to it, an
+/// appended op variant included, is a new version of the format that carries
+/// the payload (compatibility spec §3.2).
 pub(crate) const MAX_TAG: u8 = 0x7F;
 
 /// The largest tag this crate will ever assign to a built-in facet.

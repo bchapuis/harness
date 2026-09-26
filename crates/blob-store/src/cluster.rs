@@ -269,7 +269,7 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         let members = self.inner.system.serving_members();
         let owners = placement::owners(&members, ns, &id, self.r());
         // B3 / §5.2: a `put` acks only once at least W copies are stored, so the
-        // blob then survives the loss of any R − W owners. With fewer than W
+        // blob then survives the loss of any W − 1 owners. With fewer than W
         // candidate owners the target is unreachable, so refuse now rather than ack
         // at min(W, owners) copies, which would weaken the contract silently.
         let need = self.w();
