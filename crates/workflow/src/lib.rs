@@ -213,7 +213,7 @@ impl<S> Perform<S> {
 
 /// An entity that drives itself (spec §2.1, §3, §4).
 ///
-/// A **supertrait of [`Entity`]**, which is what makes `Self::State`,
+/// **Extends [`Entity`]**, which is what makes `Self::State`,
 /// `Self::Event`, and [`EntityCtx<Self>`] below mean what they mean: a workflow
 /// entity is an ordinary entity that has additionally said what work its state
 /// calls for.

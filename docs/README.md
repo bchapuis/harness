@@ -1,18 +1,12 @@
 # Documentation
 
-Start at the root [README](../README.md) for what the system is and how to run
-it. This directory holds the specifications, the deployment guide, and the
-testing conventions.
+Start at the root [README](../README.md) for what the system is and how to run it. This directory holds the specifications, the deployment guide, and the testing conventions.
 
 ## Specifications
 
-Normative, RFC 2119, each carrying its own invariant catalogue, and all but one
-a drift test that keeps the catalogue mechanically true. The exception is
-compatibility, whose table names neither a defining section nor a verifying
-suite, so there is no Rust copy to hold it against: each format's own tests hold
-its stamp to V1 and V2 (compatibility §3).
+Normative (RFC 2119), each with its own invariant catalogue, and each but one held to it by a drift test. The exception is compatibility: its table names no defining section and no verifying suite, so there is no Rust copy to check it against; each format's own tests hold its stamp to V1 and V2 (compatibility §3).
 
-They layer bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`, `entity §N`, and so on), citations the build resolves rather than trusts (the `spec` crate, under Testing).
+The specs layer bottom-up: each cites the ones beneath it by a short prefix (`core §N`, `entity §N`, and so on), and the build resolves every citation (the `spec` crate, under Testing).
 
 | | Spec | Owns | Crates | Invariants |
 |---|---|---|---|---|
@@ -29,103 +23,39 @@ They layer bottom-up: every spec cites the ones beneath it by a short prefix (`c
 
 One layer has a design note rather than a spec:
 
-- [multi-tenant-edge](multi-tenant-edge.md), the gateway as a cluster client:
-  bearer-token identity, principal-scoped session keys, the tenancy directory,
-  and the trust boundary.
+- [multi-tenant-edge](multi-tenant-edge.md), the gateway as a cluster client: bearer-token identity, principal-scoped session keys, the tenancy directory, and the trust boundary.
 
 ## Assumptions
 
-- [hardware-envelope](hardware-envelope.md), the machine the specs are written
-  against: a rented dedicated server, local NVMe, 128–256 GB, and a **1 Gbps
-  uplink** that is the binding constraint on everything. Carries a 2026 latency
-  table (LLM rows included, since the session's clock is the model's), the four
-  inversions that follow from it, and the rules a review applies with them.
-  Cited as `hw §N` wherever a performance choice rests on it. Read it before
-  arguing that a technique from the slow-disk era belongs here, or that a
-  bound does not.
+- [hardware-envelope](hardware-envelope.md), the machine the specs are written against: a rented dedicated server, local NVMe, 128–256 GB, and a **1 Gbps uplink** that is the binding constraint on everything. It carries a 2026 latency table (with LLM rows, since the session's clock is the model's), the four inversions that follow from it, and the rules a review applies with them. Cited as `hw §N` wherever a performance choice rests on it; read it before importing a slow-disk-era technique or dropping a bound.
 
 ## Guides
 
-- [standalone-deployment](standalone-deployment.md): install
-  `agent-standalone`, run a three-node cluster with the gateway in front,
-  walk the failure drill, and read the full flag reference.
-- [k8s/README](../k8s/README.md): the same cluster as a Kubernetes
-  StatefulSet.
-- [deploy/systemd/README](../deploy/systemd/README.md), the same cluster on bare
-  metal: systemd units, the on-disk layout and which parts of it are rebuildable,
-  the rolling restart, and how to replace a node.
+- [standalone-deployment](standalone-deployment.md): install `agent-standalone`, run a three-node cluster behind the gateway, walk the failure drill, and read the flag reference.
+- [k8s/README](../k8s/README.md): the same cluster as a Kubernetes StatefulSet.
+- [deploy/systemd/README](../deploy/systemd/README.md): the same cluster on bare metal (systemd units, the on-disk layout and which parts are rebuildable, the rolling restart, node replacement).
 
 ## Testing
 
-The citations run downward, and the gate below holds them to it. A spec may
-still *name* a layer above it where that explains a choice: actor §9.4.3 cites
-entity's group-per-shard count to motivate heartbeat coalescing,
-cluster-utilities §4 and §7 cite entity to disclaim a sharding utility, and
-entity names the agent three times: entity §3 separates its durability tier
-from the agent's capability tiers (agent §5.6), entity §4.1 takes the agent's
-sandbox as its example of an activation-scoped resource (agent §5.3), and
-entity §7.17 names the agent runtime as the steps facet's reference consumer
-(agent §3). The workflow spec's *argument* runs upward: it cites the agent
-runtime as its motivation, its worked example, and its measure, because the
-agent is the layer it generalizes. The crate dependency runs the other way,
-`agent` on `workflow`, and the agent implements `Workflow` rather than
-re-deriving it, so those citations point at a worked consumer. Beside the
-cycle the agent keeps the environment reconciliation of agent §5.4, §5.5 and
-§5.6, activation state, and so not a function of any fold, run as a pre-pass
-ahead of every tick.
+Citations run downward, and the gate below enforces it. A spec may still *name* a higher layer to explain a choice (actor §9.4.3 cites entity's group-per-shard count to motivate heartbeat coalescing; entity §3, §4.1, and §7.17 use the agent as an example). The workflow spec's argument runs upward on purpose: it generalizes the agent, so it cites the agent as motivation, worked example, and measure, while the crate dependency runs `agent` on `workflow` and the agent implements `Workflow`.
 
-- [`../crates/spec/`](../crates/spec/), the drift gate for this directory, four
-  checks over every document in its `DOCUMENTS` table (a spec is registered there
-  as part of adding it; its `lib.rs` states each gate in full):
-  - **citations**: every `§N` reference, two thousand-odd of them, resolves to a section that exists;
-  - **catalogues**: each spec's invariant table is held equal to the Rust copy its crate's `conformance_catalogue.rs` compares it against, section numbers and "Verified by" included;
-  - **ranges**: a cited extent such as `E1–E21` reaches no further than the catalogue it names, and across the set some range reaches each catalogue's last invariant, so a catalogue that grows is caught;
-  - **identifiers**: every backticked name of a shape the tree would own, and every name a ```rust fence uses without declaring, exists somewhere under `crates/`, with the listed exemptions checked in the other direction too.
-- [simulation-testing](simulation-testing.md), the whole verification story:
-  why the simulator is owned rather than imported, the primitives, the
-  strategies, the four shapes a test can take, seed sizing, the regression
-  corpus, and the gaps the sweeps do not yet reach.
-- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh), the
-  wall-clock counterpart, where the simulator's virtual time cannot price
-  anything: it boots a real cluster and times two machine creates against it,
-  the first paying every cold-start cost and the second pricing the path. Its
-  header carries the figures it last produced, and several code comments cite it
-  as the source of an end-to-end number. Read cold and warm as two different
-  measurements, and per-block cost as the *slope* between two image sizes; a
-  total divided by its block count measures the intercept.
+- [`../crates/spec/`](../crates/spec/), the drift gate for this directory: four checks over every document in its `DOCUMENTS` table (register a spec there when adding it; its `lib.rs` states each gate in full):
+  - **citations**: every `§N` reference resolves to a section that exists;
+  - **catalogues**: each spec's invariant table equals the Rust copy in its crate's `conformance_catalogue.rs`, section numbers and "Verified by" included;
+  - **ranges**: a cited extent such as `E1–E21` reaches no further than the catalogue it names, and some range in the set reaches each catalogue's last invariant, so a growing catalogue is caught;
+  - **identifiers**: every backticked name shaped like one the tree would own, and every name a ```rust fence uses without declaring, exists under `crates/`; the exemptions are checked in the other direction too.
+- [simulation-testing](simulation-testing.md), the verification story: why the simulator is owned rather than imported, its primitives and strategies, the four shapes a test can take, seed sizing, the regression corpus, and the gaps the sweeps do not yet reach.
+- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh), the wall-clock counterpart for what virtual time cannot price: it boots a real cluster and times two machine creates, the first paying every cold-start cost, the second pricing the path. Its header holds the figures it last produced, which code comments cite. Cold and warm are separate measurements, and per-block cost is the *slope* between two image sizes (a total divided by its block count measures the intercept).
 
 ## Unfinished work
 
-The tree carries no TODO backlog: a sweep of `crates/` finds zero `todo!()` and
-zero `unimplemented!()`, and every hit for `#[ignore]` or `TODO`/`FIXME`/`HACK`
-is in the `spec` crate, where the word is the subject rather than the marker:
-two `#[ignore = "diagnostic"]` dumps that print what a parser saw when one is
-being changed, and the identifier gate's own list of words that look like names
-the tree would own and are not. That is deliberate. Unfinished work is
-**declared in the spec that owns it**, where a reader sees its cost and its
-blast radius, rather than dropped as a comment beside the code that would have
-to change. So "what is left here?" is answered by reading these sections rather
-than by grepping the code:
+Unfinished work is **declared in the spec that owns it**, where a reader sees its cost and blast radius, not left as a comment in the code. `crates/` has no `todo!()` or `unimplemented!()`, and every `#[ignore]` or `TODO`/`FIXME`/`HACK` hit is in the `spec` crate, where the word is the subject: two `#[ignore = "diagnostic"]` parser dumps and the identifier gate's exemption list. To see what is left, read:
 
-- Each layer's own deferrals, declined with their reasons: [entity
-  §16](entity-spec.md), [machine §8](machine-spec.md), [agent
-  §13](agent-spec.md), [sandbox §7](sandbox-spec.md),
-  [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
-- [simulation-testing](simulation-testing.md), *Where the sweeps do not yet
-  reach*: what the specs mandate that no sweep asserts.
+- Each layer's declined deferrals, with reasons: [entity §16](entity-spec.md), [machine §8](machine-spec.md), [agent §13](agent-spec.md), [sandbox §7](sandbox-spec.md), [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
+- [simulation-testing](simulation-testing.md), *Where the sweeps do not yet reach*: what the specs mandate that no sweep asserts.
 
 ## Elsewhere in the tree
 
-- **The clients**, the two front ends on the gateway's HTTP/SSE edge, neither
-  of them part of the cluster:
-  [`../crates/agent-tui/`](../crates/agent-tui/), a terminal chat UI, and
-  [`../clients/agent-vscode/`](../clients/agent-vscode/), a VS Code
-  extension that surfaces a session as an agent in the Agents window. Each
-  carries its own README. Neither has a spec: they hold no durable state and
-  define no invariant, so what binds them is the gateway's surface, described in
-  [multi-tenant-edge](multi-tenant-edge.md).
-- [../design-principles.md](../design-principles.md), the design rubric the
-  specs were written against; defaults for writing and reviewing code here.
-- [../research/](../research/), background notes the specs cite as `DO §N`:
-  [durable-objects](../research/durable-objects.md) and
-  [durable-sqlite-and-filesystem](../research/durable-sqlite-and-filesystem.md).
+- **The clients**, two front ends on the gateway's HTTP/SSE edge, outside the cluster: [`../crates/agent-tui/`](../crates/agent-tui/), a terminal chat UI, and [`../clients/agent-vscode/`](../clients/agent-vscode/), a VS Code extension that surfaces a session as an agent in the Agents window. Each has its own README. Neither has a spec: they hold no durable state and define no invariant; the gateway surface in [multi-tenant-edge](multi-tenant-edge.md) binds them.
+- [../design-principles.md](../design-principles.md), the design rubric the specs were written against; defaults for writing and reviewing code here.
+- [../research/](../research/), background notes the specs cite as `DO §N`: [durable-objects](../research/durable-objects.md) and [durable-sqlite-and-filesystem](../research/durable-sqlite-and-filesystem.md).

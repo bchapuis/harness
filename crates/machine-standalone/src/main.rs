@@ -248,7 +248,7 @@ async fn run_status(args: &[String]) -> Result<(), String> {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "-".to_string())
     );
-    // The capture cadence is the durability entity (machine §4, M3): the last
+    // The capture cadence is the durability grain (machine §4, M3): the last
     // capture is the point a crash rewinds to.
     println!("captures       {}", status.captures);
     println!(
