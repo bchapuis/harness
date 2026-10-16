@@ -25,7 +25,7 @@ A utility's behavior MUST be a deterministic function of the virtualized runtime
 
 ## 2. Placement (rendezvous hashing)
 
-Placement answers, identically on every node: *given a key, which member owns it?* The singleton (§4) anchors on `owner`, and a router's keyed selection ranks routees by the same weight (§3). Entity sharding uses a placement of its own (§7).
+Placement answers, identically on every node: *given a key, which member owns it?* The singleton (§4) anchors on `owner`, a router's keyed selection ranks routees by the same weight (§3), and entity ranks each shard's replicas by it over the cluster's voters (entity §7.6).
 
 ### 2.1 The serving set
 
@@ -110,6 +110,6 @@ The utilities are also held to the core testing contract (core §18.1, §18.3):
 
 ## 7. Future work
 
-- **Cluster sharding.** Not provided: this document defines no sharded entity actors (Akka's term) addressed by `(entity type, entity id)` and mapped onto nodes through §2's `owner`/`top`. The tree's sharding layer is the entity crate, which partitions each entity type's namespace into shards (entity §7.1), ranks a shard's replicas by a rendezvous order of its own (a different hash and sort from §2 rule 3), and agrees the allocation through a per-type Raft group whose committed log is the shard map (entity §7.6), not through a singleton. A sharding utility over §2 would be a second placement beside entity's.
+- **Cluster sharding.** Not provided: this document defines no sharded entity actors (Akka's term) addressed by `(entity type, entity id)` and mapped onto nodes through §2's `owner`/`top`. The tree's sharding layer is the entity crate, which partitions each entity type's namespace into shards (entity §7.1), ranks a shard's replicas by §2's `top` keyed on the shard's group, and agrees the allocation through a per-type Raft group whose committed log is the shard map (entity §7.6), not through a singleton. A sharding utility here would be a second sharding layer beside entity's.
 - **Distributed pub/sub.** Topic-based fan-out over per-node topic mediators discovered through the receptionist; at-most-once, matching core §7.2.
 - **Leader-anchored singleton.** A singleton whose activation is a committed log entry in the leader-based mode, trading the §4 convergence caveat for a quorum-gated activation.

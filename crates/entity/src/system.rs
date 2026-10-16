@@ -238,29 +238,13 @@ fn select_spread(
 }
 
 /// The members in rendezvous (HRW) order for `group`: the shared ranking both
-/// selection strategies choose from, and the one place the score is computed.
-///
-/// Every node must derive the same order for the allocation to converge (§7.6), so a
-/// second copy of this scoring is a convergence hazard.
-///
-/// The group id MUST be hashed, not XORed in raw: `group_id_for` derives a type's
-/// shard groups as `BASE ^ (index+1)`, so consecutive shards' ids differ only in the
-/// low ~4 bits. XORing that raw into a per-node constant leaves the high-order bits
-/// (which dominate the sort) fixed, so every shard would rank the nodes identically and
-/// pile onto the same R replicas with the same leader. Diffusing the id through `fnv1a`
-/// first spreads those low-bit differences across all 64 bits, so each shard ranks
-/// independently.
+/// selection strategies choose from. Every node must derive the same order for
+/// the allocation to converge (§7.6), so the score is the cluster's one
+/// rendezvous weight (utilities §2), keyed by the group id: consecutive shards'
+/// ids differ only in their low bits, and the weight's finalizer spreads that
+/// difference across all 64, so each shard ranks the nodes independently.
 fn rendezvous_order(members: &[NodeId], group: GroupId) -> Vec<NodeId> {
-    let mut scored: Vec<(u64, NodeId)> = members
-        .iter()
-        .map(|&node| {
-            let score = fnv1a(&node.uid().to_le_bytes()).wrapping_mul(0x0000_0100_0000_01b3)
-                ^ fnv1a(&group.0.to_le_bytes());
-            (score, node)
-        })
-        .collect();
-    scored.sort_unstable(); // by score, then node id (the deterministic tie-break)
-    scored.into_iter().map(|(_, n)| n).collect()
+    actor_cluster::placement::top(members, &group.0.to_le_bytes(), members.len())
 }
 
 /// Split `members` into a shard's voters and learners, optionally spreading the
