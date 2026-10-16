@@ -22,7 +22,7 @@ Install `agent-standalone`, the runnable agent runtime, and run a three-node clu
  └────────────────────┘
 ```
 
-Each `node` process is a full cluster member: a TCP transport on loopback, a static three-node roster with the SWIM failure detector running observe-only, and one node's agent runtime, its host actor, its session actors, the two seams (model, sandbox; agent §12.1), and the entity's journal:
+Each `node` process is a full cluster member: a TCP transport on loopback, a voter in the fixed three-node roster of the leader-based control plane (Raft, with SWIM as its failure sensor and conservative downing; actor spec §9.4.3), and one node's agent runtime, its host actor, its session actors, the two seams (model, sandbox; agent §12.1), and the entity's journal:
 
 - **Model**: the Anthropic Messages API (`agent-anthropic`) over a small tokio/rustls HTTP client.
 - **EntityJournal**: a file-backed store in the node's own `--data` directory. The journal is one logical store for the cluster (spec §6.1) but *replicated*, not shared: a session's record is appended to a quorum of the shard's replicas over the transport, fenced by the shard's term (entity §7.2, §8). A new owner recovers an entity's head from a quorum on activation (entity §9, E14).

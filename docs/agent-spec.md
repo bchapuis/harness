@@ -64,7 +64,7 @@ Each session concept is exactly one entity primitive:
 | Owner node / host / placement | the shard leader / gateway (entity §5) |
 | Activation, fold, resume | rehydration: snapshot + replay (entity §9, §10) |
 | Idle stop | hibernation (entity §10) |
-| Lossless failover | Raft leader completeness (entity §8.3, E14) |
+| Lossless failover | quorum read-repair of each entity's head under the new leader (entity §8, E14) |
 
 The loop reaches the world only through the **model** (§4), the **sandbox** (§5.3), and the **entity's journal** (entity §7); time, randomness, spawning, and transport come from the core seams (core §4.6, §7).
 
@@ -144,13 +144,13 @@ Three consequences, each inherited:
 
 ### 3.3 Supervision, restart, and migration
 
-Supervision (core §11) governs the activation's faults; recovery is the entity's rehydration (entity §9, §10) in three guises:
+Supervision (core §11) governs the activation's faults. The entity host keeps the default `Stop` directive (core §11.2), so a faulted activation stops and the gateway prunes it (entity §10); recovery is the entity's rehydration (entity §9, §10) in three guises:
 
-- a **local restart** replays the journal and continues (core §11, entity §1);
+- a **re-activation after a fault**, on the same leader, triggered by the next message (entity §10);
 - a **migration** follows shard leadership (entity §8.3): the activation rehydrates on the new leader, losing no acknowledged record (E14);
 - a **resume after node failure** is the same rehydration, triggered on a new leader by the next message (§7.5).
 
-All three are snapshot-plus-replay, so the activation behaves byte-identically to one that never stopped, given the same subsequent model and tool outcomes (A1, over E2/E3). The activation is supervised with `Restart` and backoff, as the entity host already does.
+All three are snapshot-plus-replay, so the activation behaves byte-identically to one that never stopped, given the same subsequent model and tool outcomes (A1, over E2/E3).
 
 ---
 
@@ -349,7 +349,7 @@ Registration is knowledge; a node's **directory**, the kinds it *hosts* (serves,
 
 Placement is the entity's: the name hashes to a shard, the shard map gives its leader, and the session activates there (entity §5.1, §5.2, §5.4). The runtime defines no host registry or placement function. The gateway (entity §5.3) gets-or-activates the session exactly once per node (E6) and routes commands to it.
 
-The leader activates a session lazily on the first message: rehydrate (entity §9) → fold → run. Activation takes no consensus and no network, since the leader holds the shard log locally (entity §5.2, §7.8).
+The leader activates a session lazily on the first message: rehydrate (entity §9) → fold → run. Activation takes no consensus; on the clustered tier it costs one quorum head-recovery round trip, then reads locally (entity §7.8, §9).
 
 **Hibernation (idle stop).** After a configurable idle interval the leader MAY hibernate a session (entity §10): mutate nothing, snapshot to bound the next replay, release the sandbox (A7), and drop the activation. It MUST NOT hibernate a session whose run is live or whose queue holds an accepted turn (§3.1). Hibernation needs no flush (everything worth keeping is a record); the environment's processes and containers go with the sandbox, and the workspace's durable subtree rematerializes on reactivation (entity §7.11, §5.5). `idle_after` SHOULD default to **minutes**, the entity default (entity §10), not the Durable Objects eviction window it is modelled on: reactivation costs a quorum head-recovery plus a snapshot-bounded replay, and memory is not the resource under pressure. The idle timeout trades sandbox cost, the expensive shared resource, against environment continuity (warm containers, build caches).
 
@@ -416,7 +416,7 @@ The **subscriber set** (reply-tos registered for a live run) is ephemeral activa
 
 ### 7.5 Resume after node failure
 
-When a shard leader fails or is partitioned away, the replicas elect a new leader (entity §8.3) that already holds every committed record (E14). The next message routed to the shard activates the session there: rehydrate (entity §9, rematerializing the workspace facet), fold (§6.2), resolve orphaned calls (§5.5), and continue any unfinished run. No coordinator hands the session over, and no acknowledged record is lost (E14, A1).
+When a shard leader fails or is partitioned away, the replicas elect a new leader (entity §8.3), which recovers each entity's committed records from a quorum on first access (entity §8, E14). The next message routed to the shard activates the session there: rehydrate (entity §9, rematerializing the workspace facet), fold (§6.2), resolve orphaned calls (§5.5), and continue any unfinished run. No coordinator hands the session over, and no acknowledged record is lost (E14, A1).
 
 Resumption is **caller-driven**: the entity has no cross-entity enumeration to scan for orphaned work, so an interrupted run resumes only when a message next reaches the session: a caller re-submitting its `TurnId`, a parent's re-executed delegation (§8.1), or a `Cancel` (idempotent on an ended run, and the explicit nudge for cancel propagation the journal still owes, §9.2). The same contact resumes the **queue** (§3.1): the first message drives the dispatcher, which starts a waiting acked turn once no run is live. A run nobody asks after stays interrupted, its cost bounded by its budget (§9.1). A2's liveness is conditional on this contact, and so is A4's for a session whose owed propagation a crash interrupted.
 
