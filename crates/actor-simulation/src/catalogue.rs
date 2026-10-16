@@ -29,8 +29,7 @@ pub enum Verify {
     /// owning crate.
     ///
     /// The alternative to [`SimTest`](Verify::SimTest) for a catalogue whose spec
-    /// names its verification the same way: blob §9, machine §7, and wal §7 all
-    /// do. A function name states the property; a file name says where to look.
+    /// names its verification the same way: machine §7 and wal §7 both do. A function name states the property; a file name says where to look.
     /// Where a suite is a whole file the file is the better pointer, and where it
     /// is one case among many in `src/lib.rs` only the function is worth anything.
     ///

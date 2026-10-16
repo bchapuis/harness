@@ -115,13 +115,6 @@ fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 enum MathError {
     DivByZero,
-    Transport,
-}
-
-impl From<CallError> for MathError {
-    fn from(_: CallError) -> Self {
-        MathError::Transport
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,36 +294,6 @@ fn a_remote_tell_into_a_full_mailbox_is_recorded_not_dropped() {
     );
 }
 
-// --- §14.3: ask_flat collapses the two-level result ---------------------------
-
-#[test]
-fn ask_flat_collapses_the_two_level_result() {
-    let (sim, system) = support::local(6);
-    let (ok, app_err, transport_err) = sim.block_on(async move {
-        let svc = system.spawn(Fallible::<SimSystem>::new());
-        let ok = svc.ask_flat(Divide { a: 6, b: 2 }).await;
-        let app_err = svc.ask_flat(Divide { a: 1, b: 0 }).await;
-        // A dead actor's outer CallError folds into the app error via From.
-        let ghost = ActorId::new(NodeId::new(0), Path::new("/user/404"), 0);
-        let transport_err = system
-            .resolve::<Fallible<SimSystem>>(ghost)
-            .ask_flat(Divide { a: 6, b: 2 })
-            .await;
-        (ok, app_err, transport_err)
-    });
-    assert_eq!(ok, Ok(3), "success collapses to the inner Ok");
-    assert_eq!(
-        app_err,
-        Err(MathError::DivByZero),
-        "an application error passes through unchanged",
-    );
-    assert_eq!(
-        transport_err,
-        Err(MathError::Transport),
-        "a transport CallError is folded in via From<CallError>",
-    );
-}
-
 // --- §4.4 / #10: an ActorRef in a message or reply rebinds on decode ----------
 
 // An actor that records the values it is told (lives on node A).
@@ -462,42 +425,6 @@ fn actorref_in_a_reply_rebinds_on_decode() {
         vec![99],
         "the ActorRef carried in the reply rebound on A and routed back to B",
     );
-}
-
-#[test]
-fn when_local_runs_on_the_actors_executor() {
-    // A local target: `when_local` reads, and mutates, the actor's state on its
-    // own serial executor (spec §3.5.1).
-    let (sim, system) = support::local(9);
-    let observed = sim.block_on(async move {
-        let counter = system.spawn(Counter::<SimSystem>::new());
-        counter.tell(Inc).await.unwrap();
-        counter.tell(Inc).await.unwrap();
-        let read = counter.when_local(|c| c.count).await;
-        let bumped = counter
-            .when_local(|c| {
-                c.count += 10;
-                c.count
-            })
-            .await;
-        (read, bumped)
-    });
-    assert_eq!(observed, (Some(2), Some(12)));
-}
-
-#[test]
-fn when_local_is_none_for_a_remote_actor() {
-    // A remote target: `when_local` must decline (spec §3.5.1) rather than reach
-    // across the network.
-    let (sim, node_a, node_b) = two_nodes(10);
-    let result = sim.block_on(async move {
-        let counter = node_a.spawn(Counter::<SimNode>::new());
-        node_b
-            .resolve::<Counter<SimNode>>(counter.id().clone())
-            .when_local(|c| c.count)
-            .await
-    });
-    assert_eq!(result, None);
 }
 
 // --- §4.3 #9: a local send performs no encode or decode -----------------------

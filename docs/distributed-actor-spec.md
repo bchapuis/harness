@@ -205,19 +205,6 @@ Ownership enforces actor isolation:
 2. All state access happens inside the actor's own handlers, run by its serial executor, so `&mut self` in `handle` needs no locking and admits no data races.
 3. An `ActorRef` is the only object held externally, and it is stateless, so sharing one across threads or nodes is safe.
 
-#### 3.5.1 Local-only access (`when_local`)
-
-For testing and local optimizations, a system MAY offer:
-
-```rust
-impl<A: Actor> ActorRef<A> {
-    pub async fn when_local<F, R>(&self, f: F) -> Option<R>   // runs on the actor's executor iff local
-    where F: FnOnce(&mut A) -> R + Send + 'static, R: Send + 'static;
-}
-```
-
-`when_local` MUST run `f` on the actor's serial executor, preserving isolation, and MUST return `None` if the actor is remote. It is the only exception to location transparency, and it SHOULD be limited to tests.
-
 ### 3.6 Identity (`ActorId`)
 
 An `ActorId` is a single cluster-wide identity type, shared by every system:
@@ -807,18 +794,6 @@ pub enum CallError {
 
 The **outer** `CallError` (did the call *complete*?) and the **inner** application `E` (what did the handler decide?) are distinct, and the type MUST NOT collapse them: a transport failure the caller may retry is not an application failure it must not.
 
-A system SHOULD offer one canonical way to consume the common case, where a caller treats any failure uniformly:
-
-```rust
-// Convenience over `ask`: one error channel, when `E` can absorb a `CallError`.
-impl<A: Actor> ActorRef<A> {
-    pub async fn ask_flat<M, T, E>(&self, msg: M) -> Result<T, E>
-    where A: Handler<M>, M: Message<Reply = Result<T, E>>, E: From<CallError>;
-}
-```
-
-`ask_flat` collapses `Result<Result<T, E>, CallError>` into `Result<T, E>` through `E: From<CallError>`. Callers that must tell "did not complete" from "handler failed" keep using `ask`.
-
 ---
 
 ## 15. Security (RECOMMENDED)
@@ -902,7 +877,7 @@ Each run SHOULD enable a random subset of faults at random intensities ("swarm" 
 
 ### 18.4 Workloads
 
-Tests are **workloads** over the cluster: a `setup` that builds actors and registrations, a `start` that drives traffic, and a `check` that asserts the invariants of §18.5. A workload MUST observe the cluster only through the public API and the §16 event stream, never through actor state (§3.5), except through `when_local` (§3.5.1) where explicitly intended.
+Tests are **workloads** over the cluster: a `setup` that builds actors and registrations, a `start` that drives traffic, and a `check` that asserts the invariants of §18.5. A workload MUST observe the cluster only through the public API and the §16 event stream, never through actor state (§3.5).
 
 ### 18.5 Invariant catalogue
 

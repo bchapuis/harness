@@ -6,9 +6,8 @@
 //!
 //! It exists because the spec's "Verified by" column is prose, and prose rots
 //! silently: a renamed or deleted suite leaves the column pointing at nothing, and
-//! nothing fails. That is how the blob-store spec came to cite seven test names
-//! that no longer existed. Recording the pointers here makes the column
-//! mechanically true: a rename that misses this table fails the build.
+//! nothing fails. Recording the pointers here makes the column mechanically true:
+//! a rename that misses this table fails the build.
 //!
 //! `SimTest` pointers name files under this crate's `tests/` directory;
 //! `CompileFail` names a path relative to `crates/`, as the core catalogue does.

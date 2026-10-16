@@ -7,7 +7,7 @@
 //! drive a `BlobEntity` through the public command API on both tiers:
 //!
 //! - the single-node `Local` tier covers the round-trip and verification (B1),
-//!   idempotent/dedup'd put (B2), survival across hibernation, the mark-from-roots
+//!   idempotent/dedup'd put (E18), survival across hibernation, the mark-from-roots
 //!   GC, and entity-scoped destroy;
 //! - the clustered `Quorum` tier covers the wire path: a W-of-R put and a verified
 //!   read fanned over the shard's replicas, callable from any node, surviving the
@@ -245,7 +245,7 @@ fn putting_the_same_bytes_twice_yields_one_id() {
     sim.block_on(async move {
         let id1 = g.ask(Put(b"dup".to_vec())).await.unwrap().unwrap();
         let id2 = g.ask(Put(b"dup".to_vec())).await.unwrap().unwrap();
-        assert_eq!(id1, id2, "equal content addresses one blob (B2)");
+        assert_eq!(id1, id2, "equal content addresses one blob (E18)");
     });
 }
 

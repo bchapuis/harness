@@ -18,8 +18,8 @@
 //! Nearly all of wal's verification is `#[test]` functions inside `src/lib.rs`, so
 //! a file-existence check would assert only that `lib.rs` still exists: true, and
 //! worth nothing. This scans for each named function instead, which is the check
-//! that actually catches the blob-store failure mode: a renamed test leaving the
-//! spec's "Verified by" column pointing at nothing.
+//! that catches the failure that matters: a renamed test leaving the spec's
+//! "Verified by" column pointing at nothing.
 
 use std::path::Path;
 

@@ -65,11 +65,6 @@ entity = { path = "crates/entity", version = "0.1.0" }
 # and keeps the agentic half.
 workflow = { path = "crates/workflow", version = "0.1.0" }
 
-# Blob store: a namespaced, content-addressed object store on the actor
-# framework, beside entity (blob-store spec). A standalone product with no
-# in-tree consumer yet: entity's colocated blobs (§7.10) serve the live path.
-blob-store = { path = "crates/blob-store", version = "0.1.0" }
-
 # Tenancy: an ownership-index entity layered on entity, so principals own and
 # enumerate their entities without entity itself becoming tenant-aware.
 tenancy = { path = "crates/tenancy", version = "0.1.0" }
@@ -115,7 +110,7 @@ postcard = { version = "1", features = ["use-std"] }
 erased-serde = "0.4"
 futures = "0.3"
 async-channel = "2"
-# Content-addressed blob ids (blob-store spec §2): BLAKE3 hashes faster than
+# Content-addressed blob ids (entity spec §7.10): BLAKE3 hashes faster than
 # SHA-256 (SIMD), which matters because every `get` re-hashes to verify, and is
 # internally a Merkle tree whose root is the id, the structure range-verified streaming will reuse.
 blake3 = "1"

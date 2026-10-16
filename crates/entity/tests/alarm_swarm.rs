@@ -31,10 +31,10 @@
 //! reaches ask-quiescence; the checker reports whatever is outstanding when the
 //! runner stops, which is one seed in ten. Those asks carry the 5 s
 //! `DEFAULT_ASK_TIMEOUT` and do resolve, so this is the check meeting a subsystem
-//! it was not written for, not a leak. `blob-store`'s swarm drops it for the same
-//! reason, with the same caveat: the move is honest only while the workload awaits
-//! every op it issues to an outcome, which is what leaves the data path's no-loss
-//! covered with the checker gone. Every ask below is an awaited `ask_timeout`.
+//! it was not written for, not a leak. Dropping it is honest only while the
+//! workload awaits every op it issues to an outcome, which is what leaves the
+//! data path's no-loss covered with the checker gone. Every ask below is an
+//! awaited `ask_timeout`.
 //!
 //! `serial-execution` needed the same treatment for the same reason but not the
 //! same remedy; see [`NotReentrant`]: it makes two claims at once, and only the

@@ -14,7 +14,6 @@ The specs layer bottom-up: each cites the ones beneath it by a short prefix (`co
 | | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | `actor-cluster` | U1–U2 |
 | storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | `wal` | L1–L4 |
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | `entity` | E1–E21, F1–F4 |
-| | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | `blob-store` | B1–B7 |
 | consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | `workflow` | W1–W7 |
 | | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | `agent`, with `agent-anthropic` and `agent-openai` (model adapters), `agent-http`, `agent-gateway`, `agent-standalone` (the `agent-tui` client has no spec: see "Elsewhere in the tree") | A1–A7 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | `agent-sandbox` | S1–S5 |

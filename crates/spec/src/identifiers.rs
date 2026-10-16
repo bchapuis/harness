@@ -75,7 +75,6 @@ pub const SCANNED: &[&str] = &[
     "utilities",
     "wal",
     "entity",
-    "blob",
     "workflow",
     "agent",
     "sandbox",
@@ -131,7 +130,6 @@ pub const EXEMPT: &[Exempt] = &[
     // and `Duration`'s constructors in the config examples.
     e("Sized", Why::Elsewhere, "std, a bound in the trait fences"),
     e("Ord", Why::Elsewhere, "std, a bound on a workflow key"),
-    e("From", Why::Elsewhere, "std, a bound on `ask_flat`'s error"),
     e("Fn", Why::Elsewhere, "std, a closure bound"),
     e("FnMut", Why::Elsewhere, "std, a closure bound"),
     e("FnOnce", Why::Elsewhere, "std, a closure bound"),
@@ -205,12 +203,6 @@ pub const EXEMPT: &[Exempt] = &[
         Why::DeclaredAbsent,
         "entity §7.4 names the two durability tiers Local and Quorum; the code \
          distinguishes them by which Replicator is installed, not by a named variant",
-    ),
-    e(
-        "Clustered",
-        Why::DeclaredAbsent,
-        "blob §2 names the replicate-by-hash mode; the crate expresses it as a store \
-         implementation rather than a type of that name",
     ),
     e(
         "MachineId",

@@ -39,11 +39,6 @@ use crate::runtime::Clock;
 type Runner<A> =
     Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>, Option<ReplyHandle>) -> BoxFuture<'a, ()> + Send>;
 
-/// Sentinel manifest for the `when_local` closure (spec §3.5.1). That closure
-/// carries no message type, yet the by-value envelope still needs a manifest for
-/// the `Enqueue`/`Dispatch` event stream.
-const WHEN_LOCAL_MANIFEST: Manifest = Manifest::new("core.when_local");
-
 /// The fire-and-forget runner shared by [`Mailbox::tell`] and
 /// [`Mailbox::try_tell`]: drives the handler to completion and discards the reply.
 fn tell_runner<A, M>(msg: M) -> Runner<A>
@@ -198,28 +193,9 @@ impl<A: Actor> Mailbox<A> {
         self.try_enqueue(Envelope::local(M::MANIFEST, tell_runner(msg)))
     }
 
-    /// Run `f` on the actor's serial executor with `&mut A` and return its
-    /// result (spec §3.5.1, `when_local`). The closure rides the mailbox like any
-    /// message, so it never aliases a concurrent handler (preserves isolation).
-    pub(crate) async fn run_local<F, R>(&self, f: F) -> Result<R, CallError>
-    where
-        F: FnOnce(&mut A) -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let (tx, rx) = oneshot::channel::<R>();
-        let run: Runner<A> = Box::new(move |actor, _ctx, _reply| {
-            Box::pin(async move {
-                let _ = tx.send(f(actor));
-            })
-        });
-        self.enqueue(Envelope::local(WHEN_LOCAL_MANIFEST, run))
-            .await?;
-        rx.await.map_err(|_| CallError::DeadLetter)
-    }
-
     /// Awaiting enqueue (spec §6 default backpressure): blocks until the mailbox
-    /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`,
-    /// `run_local`, and the death-watch signal.
+    /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`, and
+    /// the death-watch signal.
     async fn enqueue(&self, envelope: Envelope<A>) -> Result<(), CallError> {
         let manifest = envelope.manifest;
         self.sender

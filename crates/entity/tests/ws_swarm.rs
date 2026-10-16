@@ -95,8 +95,8 @@ impl<S: EntitySystem> Entity for Studio<S> {
         &mut self,
         ctx: &EntityCtx<Self>,
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
-        // Root-driven blob repair off the activation path (§7.10 B6), as the
-        // agent runtime does, so the swarm exercises repair under faults too.
+        // Root-driven blob repair off the activation path (§7.10 `repair_facets`),
+        // as the agent runtime does, so the swarm exercises repair under faults too.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {

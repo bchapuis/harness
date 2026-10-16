@@ -112,7 +112,7 @@ fn every_file_pointer_references_a_real_file() {
                 Verify::TestFn(_) => panic!(
                     "E{} points at a test function, and this catalogue points at \
                      files: nothing here scans for a function's definition. Give it a \
-                     name gate of its own first, as blob-store and machine-entity have.",
+                     name gate of its own first, as wal and machine-entity have.",
                     e.invariant
                 ),
                 Verify::Checker(_) | Verify::CompileTime(_) | Verify::Deferred(_) => {}

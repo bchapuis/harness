@@ -126,12 +126,6 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["entity"],
         unprefixed: Unprefixed::Own,
     },
-    DocSpec {
-        id: "blob",
-        path: "docs/blob-store-spec.md",
-        aliases: &["blob", "blob-store"],
-        unprefixed: Unprefixed::Own,
-    },
     // The autonomous entity (the `workflow` crate). Cites the agent runtime: the
     // layer it generalizes, and the one that now sits on it.
     DocSpec {

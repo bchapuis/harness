@@ -154,39 +154,6 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 
-    /// Request/response that collapses the two error levels into one (spec
-    /// §14.3): an outer transport or system [`CallError`] is folded into the
-    /// application error via `E: From<CallError>`. Use plain [`ask`](Self::ask)
-    /// when the two levels must stay distinct.
-    pub async fn ask_flat<M, T, E>(&self, msg: M) -> Result<T, E>
-    where
-        A: Handler<M>,
-        M: Message<Reply = Result<T, E>>,
-        E: From<CallError>,
-    {
-        match self.ask_timeout(msg, DEFAULT_ASK_TIMEOUT).await {
-            Ok(inner) => inner,
-            Err(call_err) => Err(E::from(call_err)),
-        }
-    }
-
-    /// Run `f` directly against the actor's state, **only if it is local** (spec
-    /// §3.5.1). Returns `Some(result)` when the target lives on this node and is
-    /// alive (`f` runs on its serial executor, so isolation is preserved), and
-    /// `None` when the target is remote or already gone. This is the one
-    /// sanctioned exception to location transparency; it SHOULD be used only in
-    /// tests and local optimizations.
-    pub async fn when_local<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut A) -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        match self.locate() {
-            Target::Local(mailbox) => mailbox.run_local(f).await.ok(),
-            Target::DeadLetter | Target::Remote => None,
-        }
-    }
-
     /// Fire-and-forget (spec §3.3). Errors only for enqueue/transport failure,
     /// never the handler outcome. Applies backpressure on a local target.
     pub async fn tell<M>(&self, msg: M) -> Result<(), CallError>

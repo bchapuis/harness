@@ -166,7 +166,7 @@ fn parent_dir(path: &Path) -> &Path {
 }
 
 /// A stamped **sidecar**: one `u64` written whole to a small file of its own (§5),
-/// the shape of a fence term, a seal bound, or a tombstone's deletion stamp.
+/// the shape of a fence term or a seal bound.
 ///
 /// The body behind the stamp is positional `postcard`: a [`checksum`] over the value,
 /// then the value, so a torn or bit-rotted value cannot pass unnoticed. The stamp's

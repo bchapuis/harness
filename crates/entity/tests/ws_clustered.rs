@@ -3,8 +3,9 @@
 //! Exercises the cluster-only behavior: a file captured on one node's entity
 //! handle is readable from any node (E13), the workspace survives losing a
 //! minority of replicas (delta records ride the record quorum, E14), and
-//! **root-driven blob repair** (§7.10 B6) re-replicates a checkpoint chunk to a
-//! replica that missed its write, restoring the durability margin.
+//! **root-driven blob repair** (§7.10 `repair_facets`) re-replicates a
+//! checkpoint chunk to a replica that missed its write, restoring the
+//! durability margin.
 
 use actor_serialization::JsonCodec;
 use std::marker::PhantomData;
@@ -77,7 +78,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Off the activation latency path: sweep chunks a prior activation
         // orphaned and re-fan the live checkpoint chunks to the current
-        // replicas (§7.10 B6), as the agent runtime does.
+        // replicas (§7.10 `repair_facets`), as the agent runtime does.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {
@@ -308,7 +309,7 @@ fn the_workspace_survives_losing_a_minority_replica() {
 fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     // A replica partitioned during a checkpoint misses the chunk blobs; after
     // the partition heals, the entity's re-activation runs root-driven repair
-    // (§7.10 B6), which re-fans the live checkpoint chunks to the current
+    // (§7.10 `repair_facets`), which re-fans the live checkpoint chunks to the current
     // replicas, restoring the copy on the node that missed them.
     let sim = Simulation::new(3);
     let dir = tempfile::tempdir().unwrap();
@@ -379,7 +380,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     );
 
     // Heal; the idle entity hibernates, and the next access re-activates it,
-    // whose on_activate repair re-fans the live chunk set (§7.10 B6).
+    // whose on_activate repair re-fans the live chunk set (§7.10 `repair_facets`).
     net.heal();
     sim.run_for(Duration::from_secs(5));
     let read = drive(&sim, Duration::from_secs(20), {
@@ -401,6 +402,6 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
 
     assert!(
         blob_on_node(dir.path(), victim, id),
-        "repair must re-replicate the live chunk to the healed replica (§7.10 B6)",
+        "repair must re-replicate the live chunk to the healed replica (§7.10 `repair_facets`)",
     );
 }

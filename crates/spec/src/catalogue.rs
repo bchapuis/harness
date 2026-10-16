@@ -1,7 +1,7 @@
 //! The invariant catalogues, read out of the specifications.
 //!
 //! Each spec carries an invariant catalogue, and each is *also* written down in
-//! Rust beside the suite that verifies it: `e_catalogue()`, `b_catalogue()`,
+//! Rust beside the suite that verifies it: `e_catalogue()`, `w_catalogue()`,
 //! `core_catalogue()`, and their siblings. The Rust table is what the per-crate
 //! `conformance_catalogue.rs` drift test already guards: it holds the numbering
 //! complete and every test file it points at real.
@@ -20,13 +20,13 @@
 //!
 //! # The two shapes, and three vocabularies
 //!
-//! Eight catalogues are markdown tables with a `Verified by` column. The core
-//! catalogue (actor §18.5) is a numbered list instead ([`Shape`]), for nine
+//! Seven catalogues are markdown tables with a `Verified by` column. The core
+//! catalogue (actor §18.5) is a numbered list instead ([`Shape`]), for eight
 //! sites in all.
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
 //! trusting one: entity, utilities, sandbox, workflow, and agent name test
-//! **files**, and wal, blob, and machine name test **functions**, each on both
+//! **files**, and wal and machine name test **functions**, each on both
 //! sides. Only matching vocabularies can be compared, and [`Pointers`] records
 //! which is which per site, so where the suite axis is skipped (core, whose list
 //! names no suites at all), it is skipped by a declaration naming the reason
@@ -138,14 +138,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         label: "E",
         shape: Shape::Table,
         pointers: Pointers::Files,
-    },
-    CatalogueSite {
-        id: "blob",
-        doc: "blob",
-        section: "9",
-        label: "B",
-        shape: Shape::Table,
-        pointers: Pointers::Functions,
     },
     CatalogueSite {
         id: "workflow",

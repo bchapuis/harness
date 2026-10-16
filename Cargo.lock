@@ -467,24 +467,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blob-store"
-version = "0.1.0"
-dependencies = [
- "actor-cluster",
- "actor-core",
- "actor-simulation",
- "blake3",
- "compat",
- "futures",
- "serde",
- "serde_bytes",
- "serde_json",
- "spec",
- "tempfile",
- "wal",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

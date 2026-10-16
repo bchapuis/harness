@@ -911,7 +911,7 @@ impl EntityStore for FileEntityStore {
         };
         let dir = self.blob_dir(seg_id);
         let name = id.to_string();
-        // Idempotent: equal content under the same id is already durable (B2).
+        // Idempotent: equal content under the same id is already durable (E18).
         if dir.join(&name).exists() {
             return BlobAck::Stored;
         }

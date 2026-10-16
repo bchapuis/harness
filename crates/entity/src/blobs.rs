@@ -134,9 +134,7 @@ impl EntityBlobs {
     }
 
     /// Re-replicate every facet-root blob to the entity's current shard replicas
-    /// (spec §7.10, the repair property the blob store numbers B6: the same
-    /// obligation over an entity's own replica set rather than the cluster's):
-    /// source a verifying copy of each (E17) and re-`put` it,
+    /// (spec §7.10): source a verifying copy of each (E17) and re-`put` it,
     /// re-fanning the bytes to the current replica set; holders dedup (a
     /// no-op), a replica that lacked it receives it. Root-driven, additive, and
     /// idempotent; best-effort (a blob no reachable replica holds is skipped:
@@ -246,7 +244,7 @@ mod tests {
 
     #[test]
     fn id_is_the_blake3_digest_and_dedups_equal_content() {
-        // Equal content addresses one blob; different content, different ids (B2).
+        // Equal content addresses one blob; different content, different ids (E18).
         assert_eq!(BlobId::of(b"abc"), BlobId::of(b"abc"));
         assert_ne!(BlobId::of(b"abc"), BlobId::of(b"abd"));
         assert_eq!(

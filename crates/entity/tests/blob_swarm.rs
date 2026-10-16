@@ -16,7 +16,7 @@
 //!   a shared flag: the blob path is off the event stream (no `Seq`/term, so no
 //!   `EntityEvent`), where an event-stream invariant cannot see it. Also covers
 //!   idempotent/duplicate-tolerant put: a duplication fault re-delivering a
-//!   `StoreBlob` must not change the id (B2).
+//!   `StoreBlob` must not change the id (E18).
 //! - **Safety core under faults (#4).** [`default_invariants`] (no-silent-loss,
 //!   serial execution, lifecycle exactly-once) hold on every run, so the new
 //!   blob RPCs integrate with §14 no-silent-loss: each fanned `StoreBlob`/
@@ -234,7 +234,7 @@ fn content(n: u64) -> Vec<u8> {
 /// `corrupt` and `wrong_id` are shared across every seeded run (the swarm holds
 /// `&self`): a client sets `corrupt` if a `get` ever returns bytes whose hash is
 /// not the requested id (an E17 violation), or `wrong_id` if a `put` ever mints an
-/// id that is not the pure content hash (a B2/E18 violation). Asserted false after
+/// id that is not the pure content hash (an E18 violation). Asserted false after
 /// the sweep.
 struct BlobSwarm {
     nodes: usize,
@@ -367,7 +367,7 @@ impl ClusterWorkload for BlobSwarm {
                                 .ask_timeout(Put(bytes.clone()), Duration::from_secs(2))
                                 .await
                             {
-                                // B2/E18: the id is the pure content hash, always.
+                                // E18: the id is the pure content hash, always.
                                 if id != want {
                                     wrong_id.store(true, Ordering::SeqCst);
                                 }
@@ -441,7 +441,7 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
     );
     assert!(
         !workload.wrong_id.load(Ordering::SeqCst),
-        "a put minted an id that was not the content hash (B2/E18)",
+        "a put minted an id that was not the content hash (E18)",
     );
     // The integrity assertions are vacuous unless gets actually returned bytes:
     // prove the sweep exercised the verified read path at least once.
@@ -457,7 +457,7 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
 // the activation that took the `put`. This one tears that down: the entity
 // deactivates, its blob area goes with it, and the next `get` must rebuild from a
 // composite snapshot and re-fan the root set from a write quorum, on a node that
-// may have been a different process entirely a moment ago. E17 and B2/E18 are the
+// may have been a different process entirely a moment ago. E17 and E18 are the
 // same claims, now against a rebuilt blob area.
 
 #[test]
@@ -472,7 +472,7 @@ fn blob_integrity_holds_across_hibernation_and_restarts() {
     );
     assert!(
         !workload.wrong_id.load(Ordering::SeqCst),
-        "a put minted an id that was not the content hash (B2/E18)",
+        "a put minted an id that was not the content hash (E18)",
     );
     assert!(
         workload.gets_verified.load(Ordering::SeqCst) > 0,

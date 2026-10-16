@@ -70,7 +70,6 @@ pub const LABELS: &[(&str, Owner)] = &[
     ("U", Owner::Catalogue("utilities")),
     ("L", Owner::Catalogue("wal")),
     ("E", Owner::Catalogue("entity")),
-    ("B", Owner::Catalogue("blob")),
     ("A", Owner::Catalogue("agent")),
     ("S", Owner::Catalogue("sandbox")),
     ("M", Owner::Catalogue("machine")),

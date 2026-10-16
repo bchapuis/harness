@@ -78,7 +78,7 @@ fn all_entities() -> Vec<EntityName> {
     (0..ENTITIES as u64).map(entity).collect()
 }
 
-/// A blob payload from a small pool, so ids repeat and the dedup path (**B2**) is
+/// A blob payload from a small pool, so ids repeat and the dedup path (**E18**) is
 /// exercised alongside distinct content.
 fn blob_bytes(i: u64) -> Vec<u8> {
     vec![b'a' + (i % 8) as u8; 1 + (i % 5) as usize * 7]

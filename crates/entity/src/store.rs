@@ -114,7 +114,7 @@ pub enum StoreAck {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlobAck {
     /// Durable in this store (or already present: a blob put is idempotent by
-    /// content, B2).
+    /// content, E18).
     Stored,
     /// Refused: this replica's storage is unusable, as [`StoreAck::Failed`].
     ///
@@ -1913,7 +1913,7 @@ mod tests {
         let id = BlobId::of(b"block");
         assert!(!store.has_blob(0, &n, id));
         let _ = store.put_blob(0, &n, id, b"block".to_vec());
-        // Idempotent: a second store of equal content keeps the one copy (B2).
+        // Idempotent: a second store of equal content keeps the one copy (E18).
         let _ = store.put_blob(0, &n, id, b"block".to_vec());
         assert!(store.has_blob(0, &n, id));
         assert_eq!(store.get_blob(0, &n, id), Some(b"block".to_vec()));
