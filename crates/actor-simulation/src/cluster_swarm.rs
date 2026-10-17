@@ -3,7 +3,7 @@
 //! Runs a [`ClusterWorkload`] over a multi-node [`SimNetwork`] while a seeded
 //! [`Nemesis`](nemesis) injects partitions (symmetric and one-way), crashes,
 //! process freezes, restarts, and heals, and a
-//! [`Checker`](crate::Checker) watches the event stream. Each run is bounded in
+//! [`Checker`] watches the event stream. Each run is bounded in
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
 //!

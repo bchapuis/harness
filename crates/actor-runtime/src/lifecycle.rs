@@ -1,4 +1,4 @@
-//! The production node's stop, the counterpart of [`join`](crate::join): the
+//! The production node's stop, the counterpart of [`join`](crate::join()): the
 //! signal that starts it and the departure that ends it. Held here once so the
 //! order `leave`/`shutdown` document, and the operator lines the systemd units
 //! are read against (`deploy/systemd`), are not restated per binary.

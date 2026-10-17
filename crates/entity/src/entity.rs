@@ -382,7 +382,7 @@ impl<G: Entity> EntityRegistry<G> {
         self.host_entries.push(register_run_typed::<G, M>);
     }
 
-    /// The host-registration thunks, replayed by [`Host::register`] to build the
+    /// The host-registration thunks, replayed by [`Host::register`](actor_core::Actor::register) to build the
     /// host's network dispatch table.
     pub(crate) fn host_entries(&self) -> &[fn(&mut HandlerRegistry<Host<G>>)] {
         &self.host_entries

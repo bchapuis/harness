@@ -863,8 +863,8 @@ pub trait EntityExt: EntitySystem {
     /// what the `Local` tier and the deterministic simulation want.
     ///
     /// Named for what it returns rather than `node`, which on an
-    /// [`ActorSystem`](actor_core::ActorSystem) is already this node's
-    /// [`NodeId`](actor_core::NodeId).
+    /// [`ActorSystem`] is already this node's
+    /// [`NodeId`].
     fn entity_node(&self) -> crate::node::EntityNode<Self> {
         crate::node::EntityNode::new(self.clone())
     }

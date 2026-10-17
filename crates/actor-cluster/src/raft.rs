@@ -691,7 +691,7 @@ impl RaftState {
 
     /// Every other group member the leader replicates to: voters and learners
     /// alike, excluding `self_node`. Learners receive the log but are absent from
-    /// the quorum count ([`quorum`](Self::quorum), [`advance_commit`]).
+    /// the quorum count ([`quorum`](Self::quorum), [`advance_commit`](RaftGroup::advance_commit)).
     fn replication_targets(&self, self_node: NodeId) -> Vec<NodeId> {
         self.voters
             .iter()
@@ -998,7 +998,7 @@ impl RaftGroup {
     }
 
     /// A voter this group's leader asked to stand for election immediately
-    /// (Raft §3.10, the recipient half of [`transfer_leadership`]).
+    /// (Raft §3.10, the recipient half of [`transfer_leadership`](Self::transfer_leadership)).
     ///
     /// Accepted only from the leader of our current term, so a stale or forged
     /// invitation cannot make us disrupt a healthy leader. Beyond that no new trust

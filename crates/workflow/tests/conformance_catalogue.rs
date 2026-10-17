@@ -1,7 +1,7 @@
 //! Catalogue drift test (workflow spec §9): the machine-readable W1–W7 catalogue,
 //! the live checker set, and the specification's own table must agree; a
-//! checker added in code but not recorded in the catalogue (or vice versa), a
-//! suite renamed under a pointer, or a row moved in one copy fails the build,
+//! checker added in code but not recorded in the catalogue (or vice versa), or a
+//! row moved in one copy fails the build,
 //! the same pattern guarding the core, entity, and agent catalogue.
 //!
 //! The checker agreement is checked **per (checker, invariant) pair**, as the
@@ -120,7 +120,8 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 }
 
 /// The table above and the workflow spec's §9 copy of it are the same table:
-/// numbering, defining sections, and the suites each row points at.
+/// numbering and defining sections. The suites each row points at are this
+/// copy's alone.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("workflow");
@@ -128,14 +129,7 @@ fn the_specification_and_this_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("workflow spec §9 parses");
     let implemented: Vec<catalogue::Row> = w_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

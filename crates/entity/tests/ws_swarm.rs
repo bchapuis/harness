@@ -220,7 +220,7 @@ impl PathState {
 }
 
 /// Write/read/overwrite traffic against a handful of workspace entities, driven
-/// through the public `EntityRef` API only (§18.4). Each client writes only paths
+/// through the public `EntityRef` API only (actor §18.4). Each client writes only paths
 /// in its own subtree (`c{client}/...`), so no cross-client race. A faulted call
 /// is recorded per [`PathState`] and the client moves on, so the drive future
 /// always completes.

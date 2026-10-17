@@ -76,7 +76,7 @@ pub struct ModelRequest {
     /// adapter sends.
     pub params: ModelParams,
     pub tools: Vec<ToolSpec>,
-    /// The folded conversation, `Arc`-shared with [`SessionState`] so building a
+    /// The folded conversation, `Arc`-shared with [`SessionState`](crate::session::SessionState) so building a
     /// request is a pointer clone, not a deep copy of the whole conversation
     /// (§4.1). Serialized as its inner slice (see [`arc_transcript`](crate::session)).
     #[serde(with = "crate::session::arc_transcript")]

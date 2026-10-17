@@ -4,8 +4,8 @@
 //! The spec↔code drift gate for entity, the same pattern that guards the core,
 //! utilities, agent, and sandbox catalogues. It fails the build if an E-number is
 //! missing or duplicated, if an entry claims no verification method, or if a
-//! `SimTest`/`CompileFail` pointer names a file that no longer exists, which is
-//! what makes §15's "Verified by" column mechanically true.
+//! `SimTest`/`CompileFail` pointer names a file that no longer exists. Which
+//! suites verify each invariant is this table's fact alone; the spec names none.
 
 mod support;
 
@@ -19,8 +19,8 @@ use support::catalogue::e_catalogue;
 /// The table above and the spec's §15 copy of it are the same table.
 ///
 /// The rest of this file holds the Rust copy internally consistent; this holds it
-/// equal to the prose one a reader trusts. An invariant added to one, a defining
-/// section moved in one, or a suite renamed in one is caught here.
+/// equal to the prose one a reader trusts. An invariant added to one, or a
+/// defining section moved in one, is caught here.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("entity");
@@ -28,14 +28,7 @@ fn the_specification_and_this_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("entity §15 parses");
     let implemented: Vec<catalogue::Row> = e_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

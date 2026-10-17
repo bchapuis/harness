@@ -429,7 +429,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
     /// The term this node leads the shard under right now, or `None` when it
     /// does not lead: the journal seam's leadership token
-    /// ([`EntityJournal::term`](crate::journal::EntityJournal::term)).
+    /// ([`EntityJournal::term`]).
     pub(crate) fn leadership_term(&self) -> Option<Term> {
         self.election.term().filter(|_| self.election.is_leader())
     }
@@ -1405,7 +1405,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
     /// Copy a moved entity's blob area to the reachable destination replicas'
     /// `dest`-keyed areas (§7.7, E17/E18): the shared copy behind
-    /// [`copy_blob_area`], best-effort per destination node; an unreachable
+    /// [`copy_blob_area`](Self::copy_blob_area), best-effort per destination node; an unreachable
     /// dest replica (a split's child inherits the parent's replicas, which may
     /// include a crashed one) is skipped rather than stalling the split; its
     /// copies heal via recovery-on-access when it returns. The committed
@@ -1434,7 +1434,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// replica's list under this shard's keys plus every reachable
     /// `source_peers` list) then, per destination node, list what it holds
     /// under `dest` and ship each missing blob through a verified
-    /// [`get_blob`] fetch (`None` means no replica holds it any more, an
+    /// [`get_blob`](Self::get_blob) fetch (`None` means no replica holds it any more, an
     /// orphan swept mid-copy, safely skipped). A destination that is this
     /// node writes through the local store's blocking pool. Idempotent
     /// (content-addressed). `on_unreachable` is the migration-vs-transfer

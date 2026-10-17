@@ -6,7 +6,7 @@
 //! - **`Workspace`** (default feature `workspace`): the session's filesystem
 //!   behind a cap-std [`Dir`](cap_std::fs::Dir) capability handle; a path
 //!   outside the workspace is *unrepresentable*, never merely rejected
-//!   (sandbox spec §3.1, S1). Declared by [`workspace_tools`].
+//!   (sandbox spec §3.1, S1). Declared by [`workspace_tools`](crate::workspace::workspace_tools).
 //! - **`Compute`** (feature `compute`): hermetic wasmtime guests over the
 //!   same workspace handle, no ambient clock, entropy, network, or OS
 //!   identity; every capability enters through a host function this crate
@@ -14,7 +14,7 @@
 //!   and the injected seed (sandbox spec §3.2, S2). A guest arrives as a
 //!   `.wasm` module (`run_module`), or, with the `quickjs` feature, as
 //!   JavaScript (`run_js`).
-//! - **JavaScript** (feature `quickjs`): [`run_js_tool`] plus
+//! - **JavaScript** (feature `quickjs`): [`run_js_tool`](crate::compute::run_js_tool) plus
 //!   [`TieredSandboxes::with_quickjs`] register the committed
 //!   `guest/qjs-runner` interpreter under the reserved module name. The JS
 //!   environment is deterministic: seeded `Math.random`, frozen `Date`,
@@ -53,6 +53,13 @@
 //! implemented: async fuel-yield and epoch interruption (sandbox spec §7),
 //! whose epoch ticking needs an ambient timer thread the determinism
 //! contract forbids under simulation (core spec §18.1).
+
+// The docs above link each feature's surface, which resolves only with that
+// feature on. CI checks them with every feature, so a narrower build warns.
+#![cfg_attr(
+    not(all(feature = "quickjs", feature = "firecracker")),
+    warn(rustdoc::broken_intra_doc_links)
+)]
 
 #[cfg(feature = "compute")]
 mod compute;

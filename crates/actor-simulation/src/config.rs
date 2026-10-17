@@ -28,7 +28,7 @@ use actor_core::NodeId;
 ///
 /// The suspect timeout is the one that shows up in test runtimes, because it is
 /// what a partition scenario waits out before the roster moves. It scales
-/// logarithmically with cluster size (utilities §10), so it is a base rather than
+/// logarithmically with cluster size (actor §10), so it is a base rather than
 /// a bound.
 pub fn swim_config() -> SwimConfig {
     SwimConfig {

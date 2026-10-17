@@ -1052,7 +1052,7 @@ impl Membership {
     }
 
     /// Merge one peer's gossiped entry into the roster: the per-entry body of
-    /// [`merge`] for a node other than ourselves. Returns the node if this merge
+    /// [`merge`](Self::merge) for a node other than ourselves. Returns the node if this merge
     /// newly declared it `down` (so the caller runs the cascade, spec §8.1).
     fn merge_peer(
         &self,

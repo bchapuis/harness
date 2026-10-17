@@ -533,7 +533,7 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 
     /// Read committed records (agent spec §10.2): at most `limit` records
-    /// after `from` (`limit` clamped to [`TAIL_PAGE`](crate::TAIL_PAGE)); an
+    /// after `from` (`limit` clamped to [`TAIL_PAGE`]); an
     /// idempotent, replication-free read of the leader's journal, riding
     /// entity's gateway-level event read (entity §7.5). It never
     /// get-or-activates the session, so **polling a hibernated session leaves

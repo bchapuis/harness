@@ -1,7 +1,7 @@
 //! The dispatch registry (spec §4.4).
 //!
 //! An actor lists the messages it accepts over the network in
-//! [`Actor::register`](crate::Actor::register). Each `r.accept::<M>()` captures
+//! [`Actor::register`]. Each `r.accept::<M>()` captures
 //! the monomorphized **dispatch entry** for `(Self, M)`: a plain `fn` pointer
 //! that, given the system codec and a payload, decodes `M` and enqueues
 //! `Handler::<M>::handle` on the resolved actor's mailbox, routing the reply
@@ -61,7 +61,7 @@ where
 }
 
 /// Maps a manifest to its dispatch entry for one actor type (spec §4.4). The
-/// typed builder behind [`Actor::register`](crate::Actor::register).
+/// typed builder behind [`Actor::register`].
 pub struct HandlerRegistry<A: Actor> {
     entries: BTreeMap<Manifest, DispatchFn<A>>,
 }

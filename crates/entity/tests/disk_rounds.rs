@@ -9,7 +9,7 @@
 //!
 //! Sequencing is measurable here, with no cluster and no hardware. The simulation's
 //! clock is virtual and its transport applies a fixed minimum delivery latency to
-//! every frame (§18.2), so **elapsed virtual time counts round trips**. On a
+//! every frame (actor §18.2), so **elapsed virtual time counts round trips**. On a
 //! loopback the rounds are nearly free, so wall-clock time cannot tell five hundred
 //! serialized quorum rounds from the same rounds issued sixteen at a time. Virtual
 //! time can, and the same seed gives the same count on any machine.
@@ -354,7 +354,7 @@ fn a_wave_of_blocks_costs_one_quorum_round_between_them() {
     );
 
     // A quorum put is a frame out and an acknowledgement back, and the simulated
-    // transport applies its base latency to each (§18.2). The facet issues
+    // transport applies its base latency to each (actor §18.2). The facet issues
     // `IN_FLIGHT` of them at once, so a wave costs one round trip: the slope is a
     // round trip *divided by* the width, not a round trip each.
     assert!(

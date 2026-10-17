@@ -214,3 +214,11 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Rustdoc is a checked artifact: CI builds it with private items and warnings
+# denied. A link that resolves to nothing is an error in every build. A link
+# from a public item to a private one is allowed, because the mechanism docs
+# live in private modules and the private-items build is the one CI checks.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "allow"

@@ -9,7 +9,7 @@
 //! shard lives regardless of join order.
 //!
 //! Reached through the object-safe [`ShardMapSource`] seam, the map analogue of
-//! [`DynEntityJournal`](crate::journal::DynEntityJournal), so the gateway and `Entities` stay
+//! [`DynEntityJournal`], so the gateway and `Entities` stay
 //! free of the consensus type. Two implementations: the single-node
 //! [`LocalShardMap`] (the `Local` tier) and the [`RaftShardMap`] over a clustered system
 //! (the `Quorum` tier). The map records each shard's key range and replica set;
@@ -329,7 +329,7 @@ impl ShardMapSource for LocalShardMap {
 /// The shard map of a routing-only **client** (an Orleans-style cluster client): it
 /// hosts nothing, so it knows no allocation and holds no journal. A client never
 /// reads `replicas`/`journal` on the data path (it routes through a host's gateway),
-/// so both answer `None`. The handle exists only to satisfy [`Entities`]'s field.
+/// so both answer `None`. The handle exists only to satisfy [`Entities`](crate::Entities)'s field.
 pub(crate) struct EmptyShardMap;
 
 impl ShardMapSource for EmptyShardMap {

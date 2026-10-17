@@ -506,7 +506,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
 
     /// The runtime hook for durable alarms (spec §7.16): the pending deadline this
     /// facet holds, in nanoseconds since the clock epoch, or `None`. Only the
-    /// [`Alarm`](crate::alarm::Alarm) facet returns a deadline; every other facet keeps
+    /// [`Alarm`] facet returns a deadline; every other facet keeps
     /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
     /// callerless timer without a compile-time [`HasFacet`] bound.
     ///
@@ -522,7 +522,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// Stage the consumption of a fired alarm (spec §7.16): before invoking
     /// `on_alarm`, the host stages a cancel so a fired alarm clears atomically
     /// unless the handler re-arms it (last write wins in the shared stage, the DO
-    /// consume-on-fire semantic). Only the [`Alarm`](crate::alarm::Alarm) facet acts;
+    /// consume-on-fire semantic). Only the [`Alarm`] facet acts;
     /// every other facet keeps the no-op default.
     fn stage_clear_alarm(_stage: &mut Self::Stage) {}
 }
@@ -589,12 +589,12 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
     fn roots(forms: &Self::Forms) -> BTreeSet<BlobId>;
 
     /// The pending alarm deadline of whichever facet holds one (spec §7.16), or
-    /// `None`. At most one facet in a set is the [`Alarm`](crate::alarm::Alarm) facet, so
+    /// `None`. At most one facet in a set is the [`Alarm`] facet, so
     /// the first non-`None` is the entity's single alarm.
     fn alarm_due(forms: &Self::Forms) -> Option<u64>;
 
     /// Stage the consumption of a fired alarm across the set (spec §7.16). Only the
-    /// [`Alarm`](crate::alarm::Alarm) facet's stage is touched.
+    /// [`Alarm`] facet's stage is touched.
     fn stage_clear_alarm(stages: &mut Self::Stages);
 }
 
@@ -770,7 +770,7 @@ pub struct There<I>(PhantomData<I>);
 /// A compile-time containment proof: the facet set holds `F` at position `I`
 /// (spec §7.12). The index parameter exists only so the per-position impls do
 /// not overlap; call sites leave it to inference: `ctx.kv()` compiles exactly
-/// when the entity's set contains [`Kv`](crate::kv::Kv) once (the E10 discipline).
+/// when the entity's set contains [`Kv`] once (the E10 discipline).
 pub trait HasFacet<F: Facet, I>: FacetSet {
     /// Project `F`'s committed form out of the composed forms.
     fn form(forms: &Self::Forms) -> &F::Form;
@@ -822,7 +822,7 @@ pub(crate) struct FacetCell<FS: FacetSet> {
     /// else would be swept by the entity's own sweep.
     state_roots: Mutex<RootSet>,
     /// The activation's blob puts its roots may not show yet (**F3**): shared with
-    /// every [`EntityBlobs`](crate::blobs::EntityBlobs) handle the activation builds,
+    /// every [`EntityBlobs`] handle the activation builds,
     /// and turned over as each command begins.
     pending_roots: Arc<PendingRoots>,
 }

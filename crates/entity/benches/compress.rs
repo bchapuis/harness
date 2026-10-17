@@ -2,7 +2,7 @@
 //!
 //! The case for compressing replication is arithmetic (`docs/hardware-envelope.md`
 //! §3.3): the uplink is ~125 MB/s and every byte of a blob crosses it `R−1` times
-//! (§3.9), while LZ4 compresses at hundreds of megabytes per second on one core. A
+//! (hw §3.9), while LZ4 compresses at hundreds of megabytes per second on one core. A
 //! ratio above roughly 1.2x already pays for its own CPU, so the question is whether
 //! *this deployment's payloads compress*, a property of the data rather than of the
 //! algorithm.

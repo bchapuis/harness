@@ -129,7 +129,7 @@ impl Default for ClusterConfig {
 }
 
 /// A subscriber to one Raft group's committed `(index, app-bytes)` stream
-/// (the [`RaftConsensus`](crate::RaftConsensus) seam).
+/// (the [`RaftConsensus`] seam).
 type CommitSink = Sender<Committed>;
 
 struct Inner<C, E, S, T> {
@@ -161,7 +161,7 @@ struct Inner<C, E, S, T> {
     pings: Correlator<u64, oneshot::Sender<u64>>,
     receptionist: Arc<ReceptionistState>,
     /// Per-group subscribers to committed application entries (the
-    /// [`RaftConsensus`](crate::RaftConsensus) seam). A non-`CONTROL` group's
+    /// [`RaftConsensus`] seam). A non-`CONTROL` group's
     /// committed entries are broadcast here in `apply_raft_output`; the control
     /// group's drive membership instead and are never published.
     commit_sinks: Mutex<BTreeMap<GroupId, Vec<CommitSink>>>,

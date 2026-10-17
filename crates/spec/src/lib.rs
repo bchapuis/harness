@@ -40,6 +40,7 @@ pub mod citations;
 pub mod identifiers;
 mod markdown;
 pub mod ranges;
+pub mod retarget;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -241,3 +242,118 @@ pub const DOCUMENTS: &[DocSpec] = &[
         scanned: false,
     },
 ];
+
+/// A crate whose sources the citation gate reads, and the specifications its bare
+/// `§N` citations name.
+#[derive(Debug, Clone, Copy)]
+pub struct CrateSpec {
+    /// The directory under `crates/`.
+    pub name: &'static str,
+    /// The [`DocSpec::id`]s a bare citation is tried against, in order.
+    pub cites: &'static [&'static str],
+}
+
+/// Every crate the code half of the citation gate reads.
+///
+/// `tests/code_citations.rs` holds this table equal to `crates/` less
+/// [`UNSCANNED_CRATES`], so a new crate is checked from its first comment.
+pub const CRATES: &[CrateSpec] = &[
+    CrateSpec {
+        name: "actor-core",
+        cites: &["actor"],
+    },
+    CrateSpec {
+        name: "actor-serialization",
+        cites: &["actor"],
+    },
+    CrateSpec {
+        name: "actor-cluster",
+        cites: &["actor"],
+    },
+    CrateSpec {
+        name: "actor-runtime",
+        cites: &["actor"],
+    },
+    CrateSpec {
+        name: "actor-simulation",
+        cites: &["actor"],
+    },
+    CrateSpec {
+        name: "wal",
+        cites: &["wal"],
+    },
+    CrateSpec {
+        name: "compat",
+        cites: &["compatibility"],
+    },
+    CrateSpec {
+        name: "entity",
+        cites: &["entity"],
+    },
+    CrateSpec {
+        name: "workflow",
+        cites: &["workflow"],
+    },
+    CrateSpec {
+        name: "tenancy",
+        cites: &["entity"],
+    },
+    CrateSpec {
+        name: "agent",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-anthropic",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-openai",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-http",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-gateway",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-standalone",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-tui",
+        cites: &["agent"],
+    },
+    CrateSpec {
+        name: "agent-sandbox",
+        cites: &["sandbox", "agent"],
+    },
+    CrateSpec {
+        name: "machine-entity",
+        cites: &["machine"],
+    },
+    CrateSpec {
+        name: "machine-host",
+        cites: &["machine"],
+    },
+    CrateSpec {
+        name: "machine-proto",
+        cites: &["machine"],
+    },
+    CrateSpec {
+        name: "machine-frontdoor",
+        cites: &["machine"],
+    },
+    CrateSpec {
+        name: "machine-standalone",
+        cites: &["machine"],
+    },
+];
+
+/// The crates the citation gate does not read, each with the reason.
+pub const UNSCANNED_CRATES: &[(&str, &str)] = &[(
+    "spec",
+    "its comments quote citations as examples of what the gates parse",
+)];

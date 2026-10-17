@@ -283,7 +283,7 @@ impl FileEntityStore {
     /// manifest, truncating any torn tail. Entity segments load lazily.
     ///
     /// `codec` is the name of the deployment's codec
-    /// ([`Codec::name`](actor_serialization::Codec::name)): the one that encoded
+    /// ([`Codec::name`]): the one that encoded
     /// every event payload in here (§4.1, §5). It is checked against the store's
     /// stamp (§7.4) *before* any record is read, so a codec change is one refusal
     /// at startup rather than a corrupt-entity abort per activation.
@@ -1965,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    // OS threads, not `Spawner::launch` (§18.1): this races the store's *synchronous*
+    // OS threads, not `Spawner::launch` (actor §18.1): this races the store's *synchronous*
     // lock discipline itself, which an async task cannot exercise; both calls must
     // genuinely contend on the segment and fence mutexes from separate threads.
     #[allow(clippy::disallowed_methods)]

@@ -1,4 +1,4 @@
-//! Shared simulation invariants over entity events (entity spec §7, spec §18.5).
+//! Shared simulation invariants over entity events (entity spec §7, actor §18.5).
 //!
 //! These are safety predicates every entity-backed swarm wants: commits advance,
 //! and an entity is live at most once per node. They are claims about the entity

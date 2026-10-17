@@ -129,12 +129,8 @@ fn the_catalogue_covers_the_live_a_invariants() {
 /// The rest of this file holds the Rust copy internally consistent. This holds it
 /// equal to the prose one, which is the copy a reader trusts: an invariant added
 /// to one, or a defining section moved in one, is caught here rather than left to
-/// be noticed.
-///
-/// The suite axis is not compared here: the spec's column describes the
-/// verification in prose, naming no suite a build could resolve. This gate
-/// covers the numbering and the defining sections; the "Verified by" column
-/// stays a human's to keep true.
+/// be noticed. The suites each row names are this copy's alone: the spec states
+/// the invariant and where it is defined, and names no tests.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("agent");
@@ -142,14 +138,7 @@ fn the_specification_and_this_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("agent spec §11 parses");
     let implemented: Vec<catalogue::Row> = a_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

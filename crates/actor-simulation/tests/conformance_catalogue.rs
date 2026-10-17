@@ -197,11 +197,8 @@ fn invariant_20_is_verified_by_a_compile_fail_test() {
 /// The rest of this file holds the Rust copy internally consistent. This holds it
 /// equal to the prose one, which is the copy a reader trusts: an invariant added
 /// to one, or a defining section moved in one, is caught here rather than left to
-/// be noticed.
-///
-/// The suite axis is not compared: §18.5 is a numbered list naming no suites, and
-/// §18.6 describes the layering instead. So this gate covers the numbering and the
-/// defining sections, and the "Verified by" column stays a human's to keep true.
+/// be noticed. The suites each row names are this copy's alone: the spec states
+/// the invariant and where it is defined, and names no tests.
 #[test]
 fn the_specification_and_the_core_catalogue_agree() {
     let site = catalogue::site("core");
@@ -209,14 +206,7 @@ fn the_specification_and_the_core_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("actor spec §18.5 parses");
     let implemented: Vec<catalogue::Row> = core_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);
@@ -241,14 +231,7 @@ fn the_specification_and_the_utilities_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("cluster-utilities spec §6 parses");
     let implemented: Vec<catalogue::Row> = utilities_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

@@ -147,7 +147,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// This node's identity.
     fn node(&self) -> NodeId;
 
-    /// A draw from the system's seeded [`Entropy`](crate::Entropy) (§4.6), the
+    /// A draw from the system's seeded [`Entropy`] (§4.6), the
     /// single source of randomness in the run: it never reaches for a host RNG, so
     /// a simulated run stays reproducible. Used for supervision backoff jitter
     /// (§11.2) and by actors needing deterministic randomness.
@@ -176,7 +176,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     }
 
     /// Launch a detached background task on the system's executor (§4.6): the
-    /// same [`Spawner`](crate::Spawner) that runs the mailboxes, so layered
+    /// same [`Spawner`] that runs the mailboxes, so layered
     /// runtimes' loops are scheduled (and, under simulation, interleaved
     /// deterministically) like everything else.
     fn launch(&self, task: BoxFuture<'static, ()>);

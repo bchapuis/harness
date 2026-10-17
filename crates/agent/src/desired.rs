@@ -8,7 +8,7 @@
 //! directory), because [`perform`](workflow::Workflow::perform) is handed no
 //! state and must not want any.
 //!
-//! A call the fold can already answer is an [`Effect::Fail`]: an unknown tool
+//! A call the fold can already answer is an [`Effect::Fail`](crate::desired::Effect::Fail): an unknown tool
 //! and a malformed input are decidable from the kind and the journal, so they
 //! are *work* whose performance is synthesizing an outcome (§5.4). A delegation
 //! whose `ChildRun` is not yet journaled, by contrast, is **omitted**:
@@ -47,7 +47,7 @@ use crate::tool::DelegateInput;
 use crate::tool::ToolError;
 
 /// One launched effect of a run (§3.1): the agent runtime's
-/// [`Workflow::Key`]. A model call is keyed by the step it answers (`own_steps`
+/// [`Workflow::Key`](workflow::Workflow::Key). A model call is keyed by the step it answers (`own_steps`
 /// at issue, §3.1 step 2); a tool call or delegation by its `CallId` (§3.1 step
 /// 4).
 ///

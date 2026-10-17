@@ -9,7 +9,7 @@
 //! (`NotLeader` arises on the clustered `Quorum` tier, `EntityJournal for
 //! Arc<QuorumReplicator>` in replicator.rs). `Unavailable` it answers only when the
 //! single store has failed (§11): a write it refused, or a read it can no longer
-//! vouch for. Every method here writes and reads the [`EntityStore`] seam this tier
+//! vouch for. Every method here writes and reads the [`EntityStore`](crate::store::EntityStore) seam this tier
 //! shares with the clustered one; there is no durability machinery under it.
 
 use crate::blobs::BlobId;

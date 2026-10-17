@@ -384,7 +384,7 @@ async fn serve_door(
 /// simulation's guest (machine §7) when no mechanism was named, else the real
 /// guest over whichever mechanism `--machine` selected (a Firecracker microVM or
 /// a container holding the same rootfs are one binding over
-/// `machine_host::MachineHost`; see [`machine_host`]), with this node's egress.
+/// `machine_host::MachineHost`; see [`machine_host()`]), with this node's egress.
 fn runtime_provider(
     host: &Option<Arc<dyn machine_host::MachineHost>>,
     node: NodeId,

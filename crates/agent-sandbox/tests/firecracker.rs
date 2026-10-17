@@ -380,7 +380,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
     shell(&sandbox, "true").await.expect("first");
     std::fs::remove_dir_all(&ws).expect("external loss");
 
-    // Only EnvironmentLost engages the agent runtime's reset protocol (§5.5).
+    // Only EnvironmentLost engages the agent runtime's reset protocol (agent §5.5).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::EnvironmentLost(_))),

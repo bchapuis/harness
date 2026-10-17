@@ -124,7 +124,7 @@ async fn readyz<S: HarnessSystem>(State(gw): State<Arc<Gateway<S>>>) -> Response
 /// health probes so k8s liveness/readiness polling stays quiet. The path never
 /// carries the bearer token (it rides the `Authorization` header), so this cannot
 /// leak a secret. Latency is omitted: timing must route through the `Clock` seam
-/// (§18.1), never the wall clock.
+/// (actor §18.1), never the wall clock.
 async fn log_request(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();

@@ -1,6 +1,6 @@
 //! Where a store's blocking file I/O runs (spec §7.4, §14).
 //!
-//! An [`EntityStore`](crate::store::EntityStore) call is synchronous by contract: when it
+//! An [`EntityStore`] call is synchronous by contract: when it
 //! returns, its outcome is settled, and for the file-backed store that means the
 //! bytes have been written and fsynced. Something has to block for that; this module
 //! decides which thread.

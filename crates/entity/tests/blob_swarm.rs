@@ -5,7 +5,7 @@
 //! one tampered copy). This file applies the V&V doctrine the other way round: a
 //! [`ClusterWorkload`] of blob put/get/has/gc traffic is swept across many seeds
 //! while a seeded nemesis injects partitions, crashes, heals, loss, duplication,
-//! and delay (spec §18.3) on the *unfenced* blob RPCs (`PutBlob`, `GetBlob`,
+//! and delay (actor §18.3) on the *unfenced* blob RPCs (`PutBlob`, `GetBlob`,
 //! `SweepBlobs`), and a [`Checker`] watches the §13 event stream live. Four
 //! properties are asserted, the way the record path asserts its own in
 //! `entity_swarm.rs`:
@@ -226,7 +226,7 @@ fn content(n: u64) -> Vec<u8> {
 }
 
 /// Put/get/has/gc traffic against a handful of blob entities, hosted on a
-/// leader-based cluster, driven through the public `EntityRef` API only (§18.4).
+/// leader-based cluster, driven through the public `EntityRef` API only (actor §18.4).
 /// Every call is faulted by the nemesis and the transport; a failed call is
 /// recorded as nothing and the client moves on, so the drive future always
 /// completes and the invariants are checked over whatever the run produced.

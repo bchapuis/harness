@@ -11,7 +11,7 @@
 //! staged into the command's atomic batch exactly like a [`Kv`](crate::kv::Kv) write.
 //!
 //! **Firing is the runtime half.** The host reads the folded due time
-//! ([`FacetSet::alarm_due`](crate::facet::FacetSet::alarm_due)) after each commit and on
+//! ([`FacetSet::alarm_due`]) after each commit and on
 //! activation, and arms an in-activation timer that delivers the callerless
 //! `AlarmDue` command when the deadline passes (host.rs). Firing that survives the
 //! entity's own hibernation and a node failover is layered above, through the

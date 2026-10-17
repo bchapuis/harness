@@ -7,7 +7,7 @@
 //! its `exec`/`shell`/`subsystem` request: the handler opens a
 //! [`ChannelBackend`] stream, spawns a guest→host reader and a host→guest
 //! writer, and thereafter forwards `data`/`eof`/`window-change`/`signal`
-//! callbacks as [`proto`] frames. The guest's exit status closes the channel.
+//! callbacks as [`proto`](machine_proto) frames. The guest's exit status closes the channel.
 
 use std::collections::HashMap;
 use std::sync::Arc;

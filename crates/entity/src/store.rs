@@ -102,7 +102,7 @@ pub enum StoreAck {
     /// it does not satisfy a quorum, it carries no term or head worth believing, and
     /// it must never be read as a commit. A store that answers `Failed` once answers
     /// it for everything afterwards
-    /// ([`FileEntityStore`](crate::file_store::FileEntityStore) poisons itself), so
+    /// ([`FileEntityStore`] poisons itself), so
     /// the node stops counting toward its shards' quorums.
     Failed,
 }
@@ -1191,7 +1191,7 @@ mod tests {
 
     /// The property the synchronous seam exists to enforce: the write happens at
     /// **call** time, under the entity's segment lock, not when the caller gets around
-    /// to reading the outcome (§8, §18.1).
+    /// to reading the outcome (§8, actor §18.1).
     #[test]
     fn the_write_happens_when_the_call_is_made_not_when_its_outcome_is_read() {
         let store = MemoryEntityStore::new();

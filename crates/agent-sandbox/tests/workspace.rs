@@ -188,7 +188,7 @@ fn tiers_not_offered_fail_as_outcomes() {
     let outcome = block_on(sandbox.call(Tier::Network, "anything", json!({})));
     assert!(
         matches!(outcome, Err(ToolError::Sandbox(_))),
-        "an unoffered tier is a per-call failure (§5.4), got {outcome:?}"
+        "an unoffered tier is a per-call failure (agent §5.4), got {outcome:?}"
     );
 }
 
@@ -252,7 +252,7 @@ fn a_vanished_workspace_surfaces_as_environment_loss() {
     std::fs::remove_dir_all(&workspace).expect("external loss");
 
     // Not an ordinary tool failure: only EnvironmentLost engages the
-    // harness's reset protocol (§5.5); a Sandbox error here would leave the
+    // harness's reset protocol (agent §5.5); a Sandbox error here would leave the
     // model retrying against state that no longer exists.
     let lost = call(&sandbox, "read_file", json!({"path": "f"}));
     assert!(

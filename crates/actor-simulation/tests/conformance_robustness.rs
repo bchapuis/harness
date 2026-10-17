@@ -1,4 +1,4 @@
-//! Conformance: robustness to hostile input (spec §5.4, §7.3). Decoding bad
+//! Conformance: robustness to hostile input (spec §5.4, and §7 on framing). Decoding bad
 //! bytes is reported as `Serialization`, never a panic; the receive loop
 //! survives hostile frames a well-behaved peer would never send and keeps
 //! serving legitimate traffic.

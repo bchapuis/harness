@@ -76,6 +76,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::CRATES;
+use crate::CrateSpec;
 use crate::DOCUMENTS;
 use crate::DocSpec;
 use crate::Unprefixed;
@@ -97,6 +99,11 @@ pub struct Citation {
     pub inherited: bool,
     /// The dotted section number, without the `§` and without a trailing period.
     pub number: String,
+    /// Byte offset of the `§` in the citing text.
+    pub offset: usize,
+    /// Byte range of the prefix word or link that named [`Citation::target`],
+    /// when one was written here rather than inherited.
+    pub prefix: Option<std::ops::Range<usize>>,
     /// Enough surrounding text to find the citation by eye.
     pub quote: String,
 }
@@ -104,8 +111,9 @@ pub struct Citation {
 /// A citation that resolves against none of the documents it could name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unresolved {
-    /// The [`DocSpec::id`] of the citing document.
-    pub from: &'static str,
+    /// The [`DocSpec::id`] of the citing document, or the path of the citing
+    /// source file relative to the repository root.
+    pub from: String,
     /// One-based line number in the citing document.
     pub line: usize,
     /// The section number as written, without the `§`.
@@ -198,7 +206,7 @@ impl Registry {
                 });
                 if !resolved {
                     out.push(Unresolved {
-                        from: doc.spec.id,
+                        from: doc.spec.id.to_string(),
                         line: cite.line,
                         number: cite.number.clone(),
                         tried,
@@ -230,6 +238,46 @@ impl Registry {
         };
         targets.dedup();
         targets
+    }
+
+    /// Every citation in the workspace's Rust sources that resolves against none
+    /// of the documents it could name.
+    ///
+    /// The code cites the specifications more often than they cite each other, and
+    /// a renumbered section breaks those citations just as silently. Each crate in
+    /// [`CRATES`] is read whole (`src/`, `tests/`, `benches/`, `examples/`): its
+    /// comments, and the lines whose string literals carry a `§` (a Rust catalogue's
+    /// `spec: "§7.4"`). A prefixed citation names its document as in the specs; a
+    /// bare one resolves against the crate's [`CrateSpec::cites`], in order.
+    pub fn unresolved_in_code(&self, root: &Path) -> io::Result<Vec<Unresolved>> {
+        let mut out = Vec::new();
+        for (krate, path, text) in rust_sources(root)? {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for cite in citations(&rust_comments(&text)) {
+                let tried: Vec<&'static str> = match cite.target {
+                    Some(id) => vec![id],
+                    None => krate.cites.to_vec(),
+                };
+                let resolved = tried.iter().any(|id| {
+                    self.anchors_of(id)
+                        .is_some_and(|a| a.contains(&cite.number))
+                });
+                if !resolved {
+                    out.push(Unresolved {
+                        from: relative.clone(),
+                        line: cite.line,
+                        number: cite.number,
+                        tried,
+                        quote: cite.quote,
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn anchors_of(&self, id: &str) -> Option<&BTreeSet<String>> {
@@ -319,7 +367,11 @@ pub fn citations(text: &str) -> Vec<Citation> {
         let inherited = written.is_none()
             && previous_target.is_some()
             && is_separator(&text[previous_end..pos]);
-        let target = if inherited { previous_target } else { written };
+        let target = if inherited {
+            previous_target
+        } else {
+            written.as_ref().map(|(id, _)| *id)
+        };
 
         previous_end = pos + '§'.len_utf8() + number_len;
         previous_target = target;
@@ -328,8 +380,78 @@ pub fn citations(text: &str) -> Vec<Citation> {
             target,
             inherited,
             number: number.to_string(),
+            offset: pos,
+            prefix: written.map(|(_, span)| span),
             quote: quote_around(text, pos),
         });
+    }
+    out
+}
+
+/// Every Rust source of every crate in [`CRATES`], with the crate it belongs to.
+pub fn rust_sources(root: &Path) -> io::Result<Vec<(&'static CrateSpec, PathBuf, String)>> {
+    let mut out = Vec::new();
+    for krate in CRATES {
+        for dir in ["src", "tests", "benches", "examples"] {
+            let mut files = Vec::new();
+            collect_rust_files(&root.join("crates").join(krate.name).join(dir), &mut files)?;
+            files.sort();
+            for path in files {
+                let text = std::fs::read_to_string(&path).map_err(|e| {
+                    io::Error::new(e.kind(), format!("reading {}: {e}", path.display()))
+                })?;
+                out.push((krate, path, text));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_files(&path, out)?;
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The prose of a Rust source file: its comments, and the lines whose string
+/// literals carry a `§`, with everything else blanked to spaces.
+///
+/// Blanking rather than extracting keeps every byte offset and line number equal
+/// to the source's, so a citation found here is found at the same place in the
+/// file. A code line becomes a blank line, which [`citations`] reads as a
+/// paragraph break: a prefix in one comment never reaches a citation in the next.
+pub fn rust_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for raw in source.split_inclusive('\n') {
+        let (body, terminator) = match raw.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (raw, ""),
+        };
+        if let Some(at) = body.find("//") {
+            let marker = at
+                + body[at..]
+                    .bytes()
+                    .take_while(|&b| b == b'/' || b == b'!')
+                    .count();
+            out.extend(std::iter::repeat_n(' ', marker));
+            out.push_str(&body[marker..]);
+        } else if body.contains('§') {
+            out.push_str(body);
+        } else {
+            out.extend(std::iter::repeat_n(' ', body.len()));
+        }
+        out.push_str(terminator);
     }
     out
 }
@@ -349,11 +471,26 @@ fn bold_label_number(line: &str) -> Option<String> {
     Some(number.to_string())
 }
 
-/// Whether the word before the `§` names a document outside this tree.
+/// Whether one of the two words before the `§` names a document outside this
+/// tree: `Raft §3.10`, and `Raft dissertation §4.2.2` with a noun between.
 fn names_external_document(before: &str) -> bool {
-    trim_gap(before)
-        .and_then(trailing_word)
-        .is_some_and(|w| EXTERNAL_PREFIXES.iter().any(|e| e.eq_ignore_ascii_case(w)))
+    let mut head = before;
+    for _ in 0..2 {
+        let Some(trimmed) = trim_gap(head) else {
+            return false;
+        };
+        let Some(word) = trailing_word(trimmed) else {
+            return false;
+        };
+        if EXTERNAL_PREFIXES
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(word))
+        {
+            return true;
+        }
+        head = &trimmed[..trimmed.len() - word.len()];
+    }
+    false
 }
 
 /// The document a citation names, by short prefix or by markdown link.
@@ -362,18 +499,22 @@ fn names_external_document(before: &str) -> bool {
 /// citation (`utilities spec §2.3`), and a bare `spec §6.1` names whatever the
 /// citing document is about, which is the unprefixed case. Only a registered alias
 /// counts, so the `in` of `the fold in §4.1` is prose.
-fn prefix_before(before: &str) -> Option<&'static str> {
+///
+/// Returns the document and the byte range, within `before`, of the word or link
+/// that named it.
+fn prefix_before(before: &str) -> Option<(&'static str, std::ops::Range<usize>)> {
     let mut head = before;
     for _ in 0..2 {
         head = trim_gap(head)?;
-        if let Some(id) = link_before(head) {
-            return Some(id);
+        if let Some((id, start)) = link_before(head) {
+            return Some((id, start..head.len()));
         }
         let word = trailing_word(head)?;
+        let start = head.len() - word.len();
         if let Some(id) = alias_id(word) {
-            return Some(id);
+            return Some((id, start..head.len()));
         }
-        head = &head[..head.len() - word.len()];
+        head = &head[..start];
     }
     None
 }
@@ -392,14 +533,27 @@ fn trim_gap(head: &str) -> Option<&str> {
 
 /// `…[entity](entity-spec.md)` → `entity`, matching the link target against
 /// [`DocSpec::path`]. The compatibility spec's tables address documents this way.
-fn link_before(head: &str) -> Option<&'static str> {
+///
+/// Also returns where the link's `[` starts, so the whole link is its span.
+///
+/// A backticked path names a document the same way, as code comments write it:
+/// `` `docs/hardware-envelope.md` §3.9 ``.
+fn link_before(head: &str) -> Option<(&'static str, usize)> {
+    let by_file = |target: &str| {
+        DOCUMENTS
+            .iter()
+            .find(|d| d.path.rsplit('/').next() == Some(target))
+            .map(|d| d.id)
+    };
+    if let Some(inner) = head.strip_suffix('`') {
+        let open = inner.rfind('`')?;
+        let id = by_file(inner[open + 1..].rsplit('/').next()?)?;
+        return Some((id, open));
+    }
     let inner = head.strip_suffix(')')?;
     let open = inner.rfind("](")?;
-    let target = inner[open + 2..].rsplit('/').next()?;
-    DOCUMENTS
-        .iter()
-        .find(|d| d.path.rsplit('/').next() == Some(target))
-        .map(|d| d.id)
+    let id = by_file(inner[open + 2..].rsplit('/').next()?)?;
+    Some((id, inner[..open].rfind('[')?))
 }
 
 /// The document a prefix word names, if any.

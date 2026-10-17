@@ -131,7 +131,7 @@ struct Acked {
 }
 
 /// Record-and-forget traffic against a handful of principals' directories,
-/// driven through the public `EntityRef` API only (spec §18.4).
+/// driven through the public `EntityRef` API only (actor §18.4).
 struct DirectorySwarm {
     nodes: usize,
     clients: usize,

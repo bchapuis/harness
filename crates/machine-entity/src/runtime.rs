@@ -74,9 +74,9 @@ pub struct BootSpec {
 /// killed with the activation (machine §1).
 pub trait MachineRuntime: Send + Sync + 'static {
     /// Pause the guest at a quiescent point (machine §4): once resolved, the
-    /// guest issues no further writes to the image until [`resume`]
-    /// (MachineRuntime::resume), so a capture's scan sees a stable image (entity
-    /// §7.15's capture seam).
+    /// guest issues no further writes to the image until
+    /// [`resume`](MachineRuntime::resume), so a capture's scan sees a stable
+    /// image (entity §7.15's capture seam).
     fn pause(&self) -> BoxFuture<'_, Result<(), RuntimeError>>;
 
     /// Resume a paused guest.

@@ -227,7 +227,7 @@ impl Message for RunCompleted {
 /// the same `Settled` carries, which is what makes a superseded response
 /// (an old activation's straggler racing the reissue after a same-node resume)
 /// a key that has left the desired set rather than a field to compare (workflow
-/// §4.5, §9.1 item 4).
+/// §4.5; §9.1 item 4).
 ///
 /// A tool failure is an ordinary value in the `Ok` arm, because a failing tool
 /// never fails the run (§5.4). The workflow's own [`EffectError`] reaches this

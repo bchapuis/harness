@@ -31,7 +31,7 @@
 //! captures, resumes (M3's window is the checkpoint interval). When the last
 //! attachment detaches the alarm re-arms to fire immediately: the final fire
 //! stops the guest, runs the last capture, and leaves the entity clean, so
-//! `can_hibernate` (which refuses while attached or dirty) lets the §10 idle
+//! `can_hibernate` (which refuses while attached or dirty) lets the entity §10 idle
 //! path hibernate a machine whose disk is fully durable (M2).
 
 use std::collections::BTreeMap;
@@ -336,7 +336,7 @@ impl<S: EntitySystem> Machine<S> {
     }
 
     /// Record a committed capture (advance the capture clock) and map its
-    /// stats to the journal event: `None` for a clean image (§7.5).
+    /// stats to the journal event: `None` for a clean image (entity §7.5).
     fn capture_event(
         &self,
         stats: entity::facet::DiskCaptureStats,

@@ -14,8 +14,8 @@ use super::MachineRuntimeProvider;
 use super::RuntimeError;
 
 /// Boots [`FakeRuntime`]s whose writer task ticks on the system's virtual clock:
-/// deterministic under simulation, quiescent under [`pause`]
-/// (MachineRuntime::pause), and dead the moment the guest is killed or dropped.
+/// deterministic under simulation, quiescent under [`pause`](MachineRuntime::pause),
+/// and dead the moment the guest is killed or dropped.
 pub struct FakeRuntimeProvider<S: EntitySystem> {
     system: S,
     /// Virtual time between guest writes.

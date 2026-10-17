@@ -534,7 +534,7 @@ fn capture_into(dir: &WsDir, stage: &mut WsStage) -> Result<WsCapture, WsError> 
         // Never interpret a vanished root as a mass deletion.
         return Err(WsError::RootLost);
     }
-    // Wall clock, not `Clock::now` (§18.1 exception): the prune compares
+    // Wall clock, not `Clock::now` (actor §18.1 exception): the prune compares
     // against file *mtimes*, which are real-filesystem wall-clock facts the
     // sim clock cannot be compared to. Local-only, never journaled.
     #[allow(clippy::disallowed_methods)]

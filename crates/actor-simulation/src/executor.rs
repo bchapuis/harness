@@ -1,8 +1,8 @@
 //! The deterministic single-thread executor (spec §18.1, §18.2).
 //!
 //! All three runtime capabilities share one [`Inner`] behind an `Arc<Mutex<_>>`:
-//! the [`SimSpawner`](crate::SimSpawner) enqueues tasks, the
-//! [`SimClock`](crate::SimClock) registers timers, and [`Simulation::run`]
+//! the [`SimSpawner`] enqueues tasks, the
+//! [`SimClock`] registers timers, and [`Simulation::run`]
 //! drives them. The run loop is **quiescence-driven**: it polls ready tasks
 //! until none remain, and only then advances virtual time to the next timer.
 //! Logical time therefore costs no wall-clock time.

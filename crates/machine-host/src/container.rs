@@ -1,4 +1,4 @@
-//! The container mechanism (sandbox spec §3.4's SHOULD grade, §3.5's
+//! The container mechanism (sandbox spec §3.4's SHOULD grade, sandbox §3.5's
 //! development fallback; machine spec §2.1): OCI containers driven through the
 //! `docker` CLI.
 //!

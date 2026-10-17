@@ -4,7 +4,7 @@
 //! `tests/disk_local.rs` proves the facet's contract on the `Local` tier; this
 //! file hosts a disk-only entity on the leader-based clustered system and sweeps
 //! it across seeds while the nemesis injects partitions, crashes, heals, loss,
-//! duplication, and delay (spec §18.3). What that uniquely exercises:
+//! duplication, and delay (actor §18.3). What that uniquely exercises:
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose image is rebuilt from the composite-snapshot manifest
@@ -167,7 +167,7 @@ impl EntityHandler<ReadStamp> for DiskBox {
 // --- The workload ---------------------------------------------------------------
 
 /// Stamp-and-read disk traffic against a handful of entities under the nemesis,
-/// driven through the public `EntityRef` API only (spec §18.4). A faulted call
+/// driven through the public `EntityRef` API only (actor §18.4). A faulted call
 /// is recorded as nothing and the client moves on.
 ///
 /// One scratch directory serves every run and every simulated node (the facet

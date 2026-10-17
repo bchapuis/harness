@@ -275,7 +275,7 @@ fn the_compute_engine_is_built_on_first_use_and_dropped_on_release() {
     assert_eq!(
         provider.stats().compute_built(),
         0,
-        "opening grants Workspace and nothing else (§5.6 item 1)"
+        "opening grants Workspace and nothing else (agent §5.6 item 1)"
     );
     run(&bench, json!({"module": "echo.wasm", "input": 1})).expect("run");
     run(&bench, json!({"module": "echo.wasm", "input": 2})).expect("run");

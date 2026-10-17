@@ -194,7 +194,7 @@ fn the_specification_and_this_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("wal spec §7 parses");
     let implemented: Vec<catalogue::Row> = L_CATALOGUE
         .iter()
-        .map(|e| catalogue::Row::new(e.invariant, e.spec, site.pointers, e.tests.iter().copied()))
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

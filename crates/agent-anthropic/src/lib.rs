@@ -1,4 +1,4 @@
-//! The production [`Model`] seam (agent spec §4, §12.1): the Anthropic
+//! The production [`Model`](agent::Model) seam (agent spec §4, §12.1): the Anthropic
 //! Messages API client.
 //!
 //! This crate is the single place the Messages API protocol exists: the
@@ -8,7 +8,7 @@
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
-//! The socket is a seam: [`HttpPost`] is the one operation the client needs
+//! The socket is a seam: [`HttpPost`](agent::http::HttpPost) is the one operation the client needs
 //! from its host, POST these bytes to this path with these headers (the same
 //! move the core makes with `Transport`, core spec §7), supplied once by the
 //! deployment over its HTTP stack of choice. The simulator's scripted model

@@ -18,7 +18,7 @@
 //! - [`MachineHost`]: the node's mechanism, one per node, chosen by an
 //!   operator's flag. Never probed: which mechanism a node runs is deployment
 //!   configuration, because the two [grades](MachineIsolation) of confinement
-//!   are not interchangeable (§3.4) and a host must not silently pick the
+//!   are not interchangeable (sandbox §3.4) and a host must not silently pick the
 //!   weaker one.
 //! - [`MachineGuest`], one live guest: a byte stream to an agent inside it, the
 //!   quiescent point a capture needs (machine §4), and a stop that cannot leak.
@@ -42,6 +42,10 @@
 //! host-side exec (it is reachable only through its agent), so
 //! [`container::ContainerGuest::exec`] lives on the mechanism that can honor
 //! it, and the one consumer that needs it holds that type directly.
+
+// The docs link the workspace codec, which resolves only with `ws` on. CI
+// checks them with every feature, so a narrower build warns.
+#![cfg_attr(not(feature = "ws"), warn(rustdoc::broken_intra_doc_links))]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,7 +72,7 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a
 pub enum MachineIsolation {
     /// Hardware virtualization: the guest speaks to a VMM, not the host kernel.
     MicroVm,
-    /// Shared kernel: the guest is a container. §3.4's SHOULD grade: a
+    /// Shared kernel: the guest is a container. Sandbox §3.4's SHOULD grade: a
     /// development mechanism, priced by kernel privilege-escalation bugs.
     Container,
 }
@@ -141,7 +145,7 @@ impl GuestKey {
     }
 }
 
-/// What a guest gets for a network. `None` is every sandbox guest (§1.1: no NIC
+/// What a guest gets for a network. `None` is every sandbox guest (sandbox §1.1: no NIC
 /// by construction) and every containerized guest; a tap is the machine's
 /// egress seam (machine §5.2), realized by the consumer's policy and honored
 /// only by [`MachineIsolation::MicroVm`].

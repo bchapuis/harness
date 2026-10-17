@@ -9,7 +9,7 @@
 //! time. The gap is every **deactivation**: a failover deactivates a shard's entities
 //! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
 //! entity resident forever, in either case an alarm with no caller would sleep
-//! until the entity is next touched. Each [`Host`](crate::Host) registers its
+//! until the entity is next touched. Each [`Host`](crate::host::Host) registers its
 //! entity's pending deadline here on every alarm change; the alarm **driver** reads
 //! the index for the shards its node leads and re-activates each pending entity,
 //! whose [`on_activate`](crate::Entity::on_activate) re-arms its own timer (**E3**).
@@ -22,7 +22,7 @@
 //! # Shape
 //!
 //! One index entity per **(target entity type, shard)**, keyed
-//! [`index_key`](index_key)-style, holding an `EntityName → due-nanos` map: a small
+//! [`index_key`]-style, holding an `EntityName → due-nanos` map: a small
 //! event-sourced map with a pure fold, mirroring
 //! [`tenancy::Directory`](../../tenancy/index.html). Reads
 //! (`due_before`) serve locally from the activation (§7.5); registration is

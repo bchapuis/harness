@@ -4,7 +4,7 @@
 //! `conformance_catalogue.rs`, because a Rust catalogue lives in a `tests/` module
 //! only its own crate can import. What runs here is the half that does not need
 //! it: every site in `CATALOGUES` still names a real section, that section still
-//! holds a catalogue, and its rows still parse into numbers, sections, and suites.
+//! holds a catalogue, and its rows still parse into numbers and sections.
 //! A spec reorganized out from under the table fails here rather than making
 //! seven crates' comparisons silently vacuous.
 
@@ -12,7 +12,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use spec::catalogue::CATALOGUES;
-use spec::catalogue::Pointers;
 use spec::catalogue::documented;
 
 fn root() -> PathBuf {
@@ -43,17 +42,6 @@ fn every_catalogue_parses_into_rows() {
                 row.number,
             );
         }
-        // A row may legitimately name no suite: sandbox S3's `Network` tier does
-        // not ship, so its cell says so. A whole catalogue naming none is instead
-        // a parser that has stopped recognizing the column.
-        if site.pointers != Pointers::Prose {
-            assert!(
-                rows.iter().any(|r| !r.pointers.is_empty()),
-                "{}: no row names a verifying suite; the {:?} column stopped parsing",
-                site.id,
-                site.pointers,
-            );
-        }
     }
 }
 
@@ -80,11 +68,10 @@ fn dump() {
         println!("\n=== {} ({} rows) ===", site.id, rows.len());
         for row in &rows {
             println!(
-                "  {}{:<3} §{:<16} {:?}",
+                "  {}{:<3} §{}",
                 site.label,
                 row.number,
                 row.sections.join(",§"),
-                row.pointers,
             );
         }
     }

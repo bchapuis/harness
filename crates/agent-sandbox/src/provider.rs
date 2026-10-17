@@ -614,7 +614,7 @@ impl Sandbox for TieredSandbox {
             other => {
                 // Not offered by this provider (crate docs): a per-call
                 // failure (agent spec §5.4), unreachable in a correctly
-                // capped deployment (§5.3 item 4).
+                // capped deployment (agent §5.3 item 4).
                 let message = format!("tier {other:?} is not offered by this provider");
                 Box::pin(async move { Err(ToolError::Sandbox(message)) })
             }

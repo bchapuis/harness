@@ -1,4 +1,4 @@
-//! The OpenAI-compatible [`Model`] seam (agent spec §4, §12.1): a Chat
+//! The OpenAI-compatible [`Model`](agent::Model) seam (agent spec §4, §12.1): a Chat
 //! Completions API client.
 //!
 //! This crate is the single place the Chat Completions protocol exists: the
@@ -32,11 +32,11 @@ use serde_json::Value;
 use serde_json::json;
 
 /// The API path every completion posts to. It carries the `/v1` prefix, so a
-/// host's [`HttpPost`] points at a base URL *without* one; see [`base_url`].
+/// host's [`HttpPost`](agent::http::HttpPost) points at a base URL *without* one; see [`base_url`].
 const COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Base URLs of well-known OpenAI-compatible endpoints, for a host to point its
-/// [`HttpPost`] at. Each is the origin (plus any provider-specific prefix) that
+/// [`HttpPost`](agent::http::HttpPost) at. Each is the origin (plus any provider-specific prefix) that
 /// the protocol's path (`/v1/chat/completions`) appends to; none ends in `/v1`,
 /// because the path already carries it. The base URL is the deployment's to choose (§12.1); these are
 /// convenience data, and self-hosted servers supply their own.

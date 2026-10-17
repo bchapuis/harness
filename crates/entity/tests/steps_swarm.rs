@@ -401,7 +401,7 @@ fn the_steps_swarm_observes_a_memo_something_tried_to_overwrite() {
          overwrite a memo and write-once was satisfied vacuously",
     );
     workload.exercised.assert_hibernated();
-    // And the transport faults the wire *can* count (§18.3), so a green run is not
+    // And the transport faults the wire *can* count (actor §18.3), so a green run is not
     // a silently happy-path one.
     assert!(
         stats.dropped > 0 && stats.duplicated > 0 && stats.delayed > 0 && stats.blocked > 0,

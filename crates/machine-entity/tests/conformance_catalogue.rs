@@ -4,8 +4,8 @@
 //! The machine's spec↔code drift gate, the same pattern guarding the core,
 //! utilities, agent, sandbox, and entity catalogues. It fails the build if an
 //! M-number is missing or duplicated, if an entry claims no verification method, or
-//! if a pointer names a file that no longer exists, which is what keeps §7's
-//! "Verified by" column mechanically true rather than merely written down.
+//! if a pointer names a file that no longer exists. Which tests verify each
+//! invariant is this table's fact alone; the spec names none.
 //!
 //! Entries name test *functions* rather than files, because the machine's
 //! verification spans three sites across two crates (this crate's suites, the
@@ -59,8 +59,7 @@ fn every_named_test_exists() {
             assert!(
                 defined_in(&name).is_some(),
                 "M{} names test {name:?}, which is defined in none of the machine \
-                 crates: a rename left the spec's \"Verified by\" column pointing \
-                 at nothing",
+                 crates: a rename left this catalogue pointing at nothing",
                 e.invariant,
             );
         }
@@ -146,11 +145,6 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
 /// The rest of this file holds the Rust copy internally consistent. This holds
 /// it equal to the prose one, which is the copy a reader trusts: an invariant
 /// added to one, or a defining section moved in one, is caught here.
-///
-/// The suite axis is not compared: the spec's column names test functions where
-/// this table names the files that hold them. So this gate covers the numbering
-/// and the defining sections, and the "Verified by" column stays a human's to
-/// keep true.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("machine");
@@ -158,14 +152,7 @@ fn the_specification_and_this_catalogue_agree() {
     let documented = catalogue::documented(&root, site).expect("machine spec §7 parses");
     let implemented: Vec<catalogue::Row> = m_catalogue()
         .iter()
-        .map(|e| {
-            catalogue::Row::new(
-                e.invariant,
-                e.spec,
-                site.pointers,
-                e.verify.iter().map(Verify::text),
-            )
-        })
+        .map(|e| catalogue::Row::new(e.invariant, e.spec))
         .collect();
 
     let found = catalogue::compare(site, &documented, &implemented);

@@ -13,7 +13,7 @@
 //!   no observer is ever told an effect happened that did not durably happen
 //!   (invariant **E5**).
 //!
-//! The host appends through the [`EntityJournal`] seam, so the same protocol runs over
+//! The host appends through the [`EntityJournal`](crate::journal::EntityJournal) seam, so the same protocol runs over
 //! the single-node `Local` journal and the clustered `Quorum` journal unchanged.
 
 use actor_core::Actor;
@@ -809,7 +809,7 @@ impl<G: Entity> Host<G> {
     }
 
     /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::alarm::Alarm)
-    /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
+    /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`](Self::alarm_epoch), so a
     /// still-sleeping earlier timer's [`AlarmDue`] is ignored, and it is the sole
     /// disarm when the form carries no deadline. Called after every commit and at the
     /// end of rehydration, so the timer always reflects the durable form (**E3**).

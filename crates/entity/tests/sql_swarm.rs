@@ -4,7 +4,7 @@
 //! `tests/sql.rs` proves the facet's contract on the `Local` tier. This file
 //! hosts a SQL-only entity on the leader-based clustered system and sweeps it
 //! across seeds while the nemesis injects partitions, crashes, heals, loss,
-//! duplication, and delay (spec §18.3). What that adds:
+//! duplication, and delay (actor §18.3). What that adds:
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose materialization is rebuilt from the composite-snapshot
@@ -162,7 +162,7 @@ impl EntityHandler<ReadTotal> for SqlAccount {
 // --- The workload ---------------------------------------------------------------
 
 /// Deposit-and-read SQL traffic against a handful of entities under the nemesis,
-/// driven through the public `EntityRef` API only (spec §18.4). A faulted call
+/// driven through the public `EntityRef` API only (actor §18.4). A faulted call
 /// records nothing and the client moves on, so the drive future always completes
 /// and the invariants run over whatever the run produced.
 ///
@@ -424,7 +424,7 @@ fn sql_cluster_swarm_is_reproducible() {
     }
 }
 
-/// SQL traffic under the seeded swarm (spec §18.4): randomized writes and reads
+/// SQL traffic under the seeded swarm (actor §18.4): randomized writes and reads
 /// across a small key space, with sleeps past `idle_after` so activations
 /// hibernate, checkpoint into blobs, and rematerialize mid-run. One scratch
 /// directory serves every run, so the facet's restore has to discard stale
@@ -432,7 +432,7 @@ fn sql_cluster_swarm_is_reproducible() {
 ///
 /// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
 /// It is off for reproducibility sweeps: physical replication makes the value
-/// safe for durability (asserted elsewhere), but the §18.1 repro contract stays
+/// safe for durability (asserted elsewhere), but the actor §18.1 repro contract stays
 /// strict, no unseeded randomness in a replayed run.
 struct SqlSwarm {
     clients: usize,

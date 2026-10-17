@@ -256,7 +256,7 @@ impl SimNetwork {
         // not run otherwise.)
         let copies = if faults.active() {
             // Seeded loss (also models corruption / association loss): the node
-            // never sees the frame, so it cannot be wedged by it (spec §7.3).
+            // never sees the frame, so it cannot be wedged by it (spec §7 on framing).
             if self.entropy.buggify(faults.drop_num, faults.drop_den) {
                 self.stats.record_dropped();
                 return Ok(());

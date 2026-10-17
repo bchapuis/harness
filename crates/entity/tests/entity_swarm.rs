@@ -4,7 +4,7 @@
 //! *scripted* faults. This file works the other way round: a
 //! [`ClusterWorkload`] is swept across many seeds while a seeded nemesis
 //! injects partitions, crashes, heals, loss, duplication, and delay (spec
-//! §18.3) and a [`Checker`] watches the §13 event stream live. Three
+//! actor §18.3) and a [`Checker`] watches the §13 event stream live. Three
 //! properties are asserted:
 //!
 //! - **Continuous invariants under faults (#4).** The safety core
@@ -182,7 +182,7 @@ const IDLE_AFTER: Duration = Duration::from_millis(200);
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 /// Deposit-and-read traffic against a handful of entities on a leader-based
-/// cluster, driven through the public `EntityRef` API only (spec §18.4). Every
+/// cluster, driven through the public `EntityRef` API only (actor §18.4). Every
 /// call is faulted by the nemesis and the transport; a failed call records
 /// nothing and the client moves on, so the drive future always completes and
 /// the invariants are checked over whatever the run produced.

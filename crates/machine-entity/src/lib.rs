@@ -25,6 +25,10 @@
 //! machine's journaled policy at boot as a per-machine tap and ruleset, on a
 //! node configured with an [`EgressConfig`].
 
+// The docs link the hosted binding, which resolves only with `host` on. CI
+// checks them with every feature, so a narrower build warns.
+#![cfg_attr(not(feature = "host"), warn(rustdoc::broken_intra_doc_links))]
+
 mod entity;
 // Only the hosted binding applies egress. Without it the module still builds,
 // so the M6 ruleset tests run in every configuration.

@@ -4,45 +4,33 @@
 //! Rust beside the suite that verifies it: `e_catalogue()`, `w_catalogue()`,
 //! `core_catalogue()`, and their siblings. The Rust table is what the per-crate
 //! `conformance_catalogue.rs` drift test already guards: it holds the numbering
-//! complete and every test file it points at real.
+//! complete and every test it points at real.
 //!
 //! What neither table guards on its own is that the *two agree*. They are two
-//! hand-maintained copies of one fact, and an invariant added to one, a section
-//! moved in one, or a suite renamed in one leaves the other quietly wrong: the
-//! failure the Rust table was introduced to prevent, reappearing one level up.
+//! hand-maintained copies of one fact, and an invariant added to one or a section
+//! moved in one leaves the other quietly wrong: the failure the Rust table was
+//! introduced to prevent, reappearing one level up.
 //!
 //! This module reads the specification's copy so a crate's drift test can compare
 //! the two. It reads rather than generates because the prose is not derivable: a
-//! spec row states the invariant in full, with its reasoning, where the Rust
-//! `property` field is a one-line summary. Only the load-bearing parts are
-//! compared, which invariants exist, which sections define them, and which
-//! suites verify them.
+//! spec row states the invariant in full, where the Rust `property` field is a
+//! one-line summary. Only the load-bearing parts are compared: which invariants
+//! exist, and which sections define them.
 //!
-//! # The two shapes, and three vocabularies
+//! # What each copy owns
 //!
-//! Seven catalogues are markdown tables with a `Verified by` column. The core
-//! catalogue (actor §18.5) is a numbered list instead ([`Shape`]), for eight
-//! sites in all.
+//! The specification owns the statement and the defining sections; the Rust copy
+//! owns what verifies each row. A spec names no suites, because which test file
+//! holds a property is a fact about the code: it moves with the code, and the
+//! Rust copy sits where a rename would break it. So the two share exactly the
+//! identity and sections axes, and [`compare`] checks those.
 //!
-//! The `Verified by` columns are not written alike, which is worth knowing before
-//! trusting one: entity, utilities, sandbox, workflow, and agent name test
-//! **files**, and wal and machine name test **functions**, each on both
-//! sides. Only matching vocabularies can be compared, and [`Pointers`] records
-//! which is which per site, so where the suite axis is skipped (core, whose list
-//! names no suites at all), it is skipped by a declaration naming the reason
-//! rather than by a comparison that finds nothing.
+//! # The two shapes
 //!
-//! # What is compared, and what is not
-//!
-//! [`compare`] reports three kinds of disagreement: an invariant in one table and
-//! not the other, a different set of defining sections, and a different set of
-//! verifying suites. It deliberately does not compare the prose, and it does not
-//! see a `Verify::Checker` or a `Verify::CompileTime`: those name a checker or a
-//! trait bound rather than a file, and a spec row mentions them in prose where it
-//! mentions them at all. Continuous checkers have their own cross-check in
-//! `actor_simulation::checker_coverage`.
+//! Seven catalogues are markdown tables with `Invariant` and `Defined in`
+//! columns. The core catalogue (actor §18.5) is a numbered list instead
+//! ([`Shape`]), for eight sites in all.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -53,34 +41,11 @@ use crate::markdown;
 /// How a specification writes its invariant catalogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
-    /// A markdown table with `Invariant`, `Defined in`, and `Verified by`
-    /// columns, the invariant's label in the first cell.
+    /// A markdown table with `Invariant` and `Defined in` columns, the
+    /// invariant's label in the first cell.
     Table,
-    /// A numbered list, each item opening `N. **Property (§a, §b).**`. Carries no
-    /// verifying suites, so [`Row::pointers`] is empty for every row.
+    /// A numbered list, each item opening `N. **Property (§a, §b).**`.
     NumberedList,
-}
-
-/// What the `Verified by` column names, and so what can be compared against the
-/// Rust catalogue's `verify` entries.
-///
-/// The columns are not written in one vocabulary. One of the nine cannot be
-/// compared at all, and [`Prose`](Pointers::Prose) says so at the site rather than
-/// leaving the comparison quietly empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pointers {
-    /// Test files, `` `entities.rs` `` or `` `agent-sandbox/tests/workspace.rs` ``.
-    /// Compared by stem, so the path a spec writes matches the bare file name a
-    /// catalogue writes, and the `compile_fail.rs` runner matches the
-    /// `compile_fail` case directory beside it.
-    Files,
-    /// Test functions, `` `a_torn_tail_is_discarded_and_appends_continue` ``:
-    /// what the wal catalogue points at, its suite living in `src/lib.rs`.
-    Functions,
-    /// The two copies do not name the same kind of thing, so there is nothing to
-    /// compare. Each site says why. Identity and defining sections are still
-    /// compared; only the suite axis is skipped.
-    Prose,
 }
 
 /// Where one invariant catalogue lives in the specifications.
@@ -96,8 +61,6 @@ pub struct CatalogueSite {
     pub label: &'static str,
     /// How the specification writes it.
     pub shape: Shape,
-    /// What its `Verified by` column names.
-    pub pointers: Pointers,
 }
 
 /// Every invariant catalogue in the tree, and where its specification copy lives.
@@ -106,15 +69,13 @@ pub struct CatalogueSite {
 /// own crate can import, which is why the comparison runs inside each crate's
 /// `conformance_catalogue.rs` rather than centrally.
 pub const CATALOGUES: &[CatalogueSite] = &[
-    // A numbered list rather than a table, and it names no suites at all: §18.6
-    // describes the layering instead. Identity and sections only.
+    // A numbered list rather than a table.
     CatalogueSite {
         id: "core",
         doc: "actor",
         section: "18.5",
         label: "",
         shape: Shape::NumberedList,
-        pointers: Pointers::Prose,
     },
     CatalogueSite {
         id: "utilities",
@@ -122,7 +83,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "6",
         label: "U",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "wal",
@@ -130,7 +90,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "7",
         label: "L",
         shape: Shape::Table,
-        pointers: Pointers::Functions,
     },
     CatalogueSite {
         id: "entity",
@@ -138,7 +97,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "15",
         label: "E",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "workflow",
@@ -146,7 +104,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "9",
         label: "W",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "agent",
@@ -154,7 +111,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "11",
         label: "A",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "sandbox",
@@ -162,7 +118,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "6",
         label: "S",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "machine",
@@ -170,7 +125,6 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         section: "7",
         label: "M",
         shape: Shape::Table,
-        pointers: Pointers::Functions,
     },
 ];
 
@@ -181,35 +135,17 @@ pub struct Row {
     pub number: u8,
     /// The sections that define it, as written: `["6", "8"]` for `§6, §8`.
     pub sections: Vec<String>,
-    /// The suites that verify it, by stem.
-    pub pointers: BTreeSet<String>,
 }
 
 impl Row {
     /// Build the implementation's side of a row from a Rust catalogue entry.
     ///
     /// `spec` is the entry's section list in any of the forms the tables use
-    /// (`§6, §8`, `entity §6, §8`, `wal §3.2-§3.4`), only the numbers are kept.
-    ///
-    /// `verify` is the text of the entry's `Verify` entries, passed whole. A
-    /// caller need not sort them: several are prose with the file names embedded
-    /// (`"agent-sandbox/tests/workspace.rs (adversarial traversal); tests/
-    /// native.rs (container confinement smoke)"`), and a `Verify::Checker` or
-    /// `Verify::CompileTime` names no suite at all. `kind` decides which tokens
-    /// are pointers and the rest are ignored, exactly as they are in the spec's
-    /// own cell.
-    pub fn new<I, S>(number: u8, spec: &str, kind: Pointers, verify: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
+    /// (`§6, §8`, `entity §6, §8`, `§3.2-§3.4`), only the numbers are kept.
+    pub fn new(number: u8, spec: &str) -> Self {
         Self {
             number,
             sections: section_numbers(spec),
-            pointers: verify
-                .into_iter()
-                .flat_map(|text| pointer_tokens(text.as_ref(), kind))
-                .collect(),
         }
     }
 }
@@ -235,15 +171,6 @@ pub enum Mismatch {
         documented: Vec<String>,
         /// What the Rust entry's `spec` field says.
         implemented: Vec<String>,
-    },
-    /// The two copies name different verifying suites.
-    Suites {
-        /// The invariant's label, e.g. `E7`.
-        label: String,
-        /// Named by the specification and not by the Rust catalogue.
-        only_documented: Vec<String>,
-        /// Named by the Rust catalogue and not by the specification.
-        only_implemented: Vec<String>,
     },
 }
 
@@ -272,20 +199,6 @@ impl fmt::Display for Mismatch {
                 documented.join(", §"),
                 implemented.join(", §"),
             ),
-            Self::Suites {
-                label,
-                only_documented,
-                only_implemented,
-            } => {
-                write!(f, "{label}: verified-by disagrees")?;
-                if !only_documented.is_empty() {
-                    write!(f, "; spec-only {only_documented:?}")?;
-                }
-                if !only_implemented.is_empty() {
-                    write!(f, "; catalogue-only {only_implemented:?}")?;
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -326,8 +239,7 @@ pub fn documented(root: &Path, site: &CatalogueSite) -> io::Result<Vec<Row>> {
 
 /// Compare a specification's catalogue against its Rust copy.
 ///
-/// Both sides are keyed by [`Row::number`]. Suites are compared only when the
-/// specification names them ([`Pointers::Prose`] skips that axis).
+/// Both sides are keyed by [`Row::number`].
 pub fn compare(site: &CatalogueSite, documented: &[Row], implemented: &[Row]) -> Vec<Mismatch> {
     let label = |n: u8| format!("{}{n}", site.label);
     let mut out = Vec::new();
@@ -351,26 +263,6 @@ pub fn compare(site: &CatalogueSite, documented: &[Row], implemented: &[Row]) ->
                 label: label(doc_row.number),
                 documented: doc_row.sections.clone(),
                 implemented: impl_row.sections.clone(),
-            });
-        }
-        if site.pointers == Pointers::Prose {
-            continue;
-        }
-        let only_documented: Vec<String> = doc_row
-            .pointers
-            .difference(&impl_row.pointers)
-            .cloned()
-            .collect();
-        let only_implemented: Vec<String> = impl_row
-            .pointers
-            .difference(&doc_row.pointers)
-            .cloned()
-            .collect();
-        if !only_documented.is_empty() || !only_implemented.is_empty() {
-            out.push(Mismatch::Suites {
-                label: label(doc_row.number),
-                only_documented,
-                only_implemented,
             });
         }
     }
@@ -402,19 +294,18 @@ fn section_body<'a>(text: &'a str, number: &str) -> Option<&'a str> {
     start.map(|begin| &text[begin..])
 }
 
-/// Rows of the first table in `body` that has `Invariant` and `Verified by`
-/// columns. Columns are found by header name: the agent runtime table carries a fifth
-/// `Entity basis` column the others do not.
+/// Rows of the first table in `body` that has `Invariant` and `Defined in`
+/// columns. Columns are found by header name, so a table may carry others.
 fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
     let mut lines = body.lines().skip_while(|l| {
-        !(l.starts_with('|') && l.contains("Invariant") && l.contains("Verified by"))
+        !(l.starts_with('|') && l.contains("Invariant") && l.contains("Defined in"))
     });
     let Some(header) = lines.next() else {
         return Vec::new();
     };
     let columns: Vec<String> = cells(header).into_iter().map(|c| c.to_string()).collect();
     let column = |name: &str| columns.iter().position(|c| c == name);
-    let (Some(defined), Some(verified)) = (column("Defined in"), column("Verified by")) else {
+    let Some(defined) = column("Defined in") else {
         return Vec::new();
     };
 
@@ -427,7 +318,6 @@ fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
             Some(Row {
                 number,
                 sections: section_numbers(cells.get(defined)?),
-                pointers: suite_pointers(cells.get(verified)?, site.pointers),
             })
         })
         .collect()
@@ -445,7 +335,6 @@ fn list_rows(body: &str) -> Vec<Row> {
             Some(Row {
                 number,
                 sections: section_numbers(lead),
-                pointers: BTreeSet::new(),
             })
         })
         .collect()
@@ -477,62 +366,6 @@ fn section_numbers(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The suite names a `Verified by` cell points at.
-///
-/// A cell also carries prose: a checker's name, a `(trybuild)` aside, the
-/// specific test function inside a file. [`Pointers`] says which of its backticked
-/// tokens are the pointers, and the rest are left alone.
-fn suite_pointers(cell: &str, kind: Pointers) -> BTreeSet<String> {
-    markdown::backticked(cell)
-        .flat_map(|token| pointer_tokens(token, kind))
-        .collect()
-}
-
-/// The suite pointers inside a run of text, under one vocabulary.
-///
-/// Used for both sides: a spec's backticked cell contents and a Rust entry's
-/// `Verify` text go through the same filter, so `agent-sandbox/tests/workspace.rs`
-/// and `workspace.rs` reduce alike and the prose around them is ignored.
-fn pointer_tokens(text: &str, kind: Pointers) -> BTreeSet<String> {
-    if kind == Pointers::Prose {
-        return BTreeSet::new();
-    }
-    text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '`'))
-        .map(|token| token.trim_matches(|c: char| c == '.' || c == ':' || c == '*'))
-        .filter(|token| match kind {
-            // A `.rs` file, or a path under a `tests/` directory:
-            // `entity/tests/compile_fail` is a trybuild case directory and
-            // counts. A slash alone is not enough: the prose around these names
-            // says things like "open/release accounting".
-            Pointers::Files => token.ends_with(".rs") || token.contains("tests/"),
-            Pointers::Functions => {
-                token.len() > 3
-                    && token.contains('_')
-                    && token
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            }
-            Pointers::Prose => false,
-        })
-        .map(stem)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// `entity/tests/compile_fail` and `compile_fail.rs` both reduce to
-/// `compile_fail`, so a spec naming the trybuild runner matches a catalogue
-/// naming its case directory.
-fn stem(pointer: &str) -> String {
-    pointer
-        .trim()
-        .trim_matches('`')
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches(".rs")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,7 +376,6 @@ mod tests {
         section: "15",
         label: "E",
         shape: Shape::Table,
-        pointers: Pointers::Files,
     };
 
     #[test]
@@ -567,53 +399,20 @@ mod tests {
     }
 
     #[test]
-    fn a_table_row_yields_its_number_sections_and_files() {
-        let body = "\n| | Invariant | Defined in | Verified by |\n|---|---|---|---|\n\
-                    | **E1** | **Single writer.** Only the leader appends. | §6, §8 | \
-                    `clustered_entities.rs`, `entities.rs` |\n";
+    fn a_table_row_yields_its_number_and_sections() {
+        let body = "\n| | Invariant | Defined in |\n|---|---|---|\n\
+                    | **E1** | **Single writer.** Only the leader appends. | §6, §8 |\n";
         let rows = table_rows(body, &ENTITY);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].number, 1);
         assert_eq!(rows[0].sections, ["6", "8"]);
-        assert_eq!(
-            rows[0].pointers,
-            ["clustered_entities".to_string(), "entities".to_string()].into(),
-        );
-    }
-
-    #[test]
-    fn a_verified_by_cell_keeps_files_and_drops_prose() {
-        let cell = "`entities.rs`, `entity_swarm.rs` (the `ActivationSingletonPerNode` checker)";
-        assert_eq!(
-            suite_pointers(cell, Pointers::Files),
-            ["entities".to_string(), "entity_swarm".to_string()].into(),
-            "a checker's name is prose, not a file",
-        );
-    }
-
-    #[test]
-    fn a_trybuild_runner_and_its_case_directory_are_one_pointer() {
-        assert_eq!(stem("compile_fail.rs"), stem("entity/tests/compile_fail"));
-    }
-
-    #[test]
-    fn a_function_cell_keeps_snake_case_names() {
-        let cell = "`a_torn_tail_is_discarded`, `a_record_cut_mid_payload`";
-        assert_eq!(
-            suite_pointers(cell, Pointers::Functions),
-            [
-                "a_torn_tail_is_discarded".to_string(),
-                "a_record_cut_mid_payload".to_string(),
-            ]
-            .into(),
-        );
     }
 
     #[test]
     fn columns_are_found_by_name_not_position() {
-        let body = "\n| # | Invariant | Defined in | Verified by | Entity basis |\n\
-                    |---|---|---|---|---|\n\
-                    | A1 | **Fold.** | §6.2 | `sessions.rs` | E2 |\n";
+        let body = "\n| # | Invariant | Entity basis | Defined in |\n\
+                    |---|---|---|---|\n\
+                    | A1 | **Fold.** | E2 | §6.2 |\n";
         let site = CatalogueSite {
             label: "A",
             ..ENTITY
@@ -621,7 +420,6 @@ mod tests {
         let rows = table_rows(body, &site);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sections, ["6.2"]);
-        assert_eq!(rows[0].pointers, ["sessions".to_string()].into());
     }
 
     #[test]
@@ -638,18 +436,8 @@ mod tests {
     }
 
     #[test]
-    fn a_row_built_from_a_rust_entry_splits_comma_separated_files() {
-        let row = Row::new(
-            3,
-            "entity §1, §9",
-            Pointers::Files,
-            ["entities.rs, entity_swarm.rs"],
-        );
-        assert_eq!(row.sections, ["1", "9"]);
-        assert_eq!(
-            row.pointers,
-            ["entities".to_string(), "entity_swarm".to_string()].into(),
-        );
+    fn a_row_built_from_a_rust_entry_keeps_only_section_numbers() {
+        assert_eq!(Row::new(3, "entity §1, §9").sections, ["1", "9"]);
     }
 
     #[test]
@@ -662,16 +450,8 @@ mod tests {
 
     #[test]
     fn compare_reports_each_kind_of_disagreement() {
-        let documented = vec![
-            Row::new(1, "§6", Pointers::Files, ["a.rs"]),
-            Row::new(2, "§7", Pointers::Files, ["b.rs"]),
-            Row::new(3, "§8", Pointers::Files, ["c.rs"]),
-        ];
-        let implemented = vec![
-            Row::new(1, "§6", Pointers::Files, ["a.rs"]),
-            Row::new(2, "§9", Pointers::Files, ["b.rs"]),
-            Row::new(4, "§9", Pointers::Files, ["d.rs"]),
-        ];
+        let documented = vec![Row::new(1, "§6"), Row::new(2, "§7"), Row::new(3, "§8")];
+        let implemented = vec![Row::new(1, "§6"), Row::new(2, "§9"), Row::new(4, "§9")];
         let found = compare(&ENTITY, &documented, &implemented);
         assert!(found.contains(&Mismatch::Undocumented { label: "E3".into() }));
         assert!(found.contains(&Mismatch::Unimplemented { label: "E4".into() }));
@@ -681,17 +461,5 @@ mod tests {
                 .any(|m| matches!(m, Mismatch::Sections { label, .. } if label == "E2"))
         );
         assert_eq!(found.len(), 3, "E1 agrees: {found:?}");
-    }
-
-    #[test]
-    fn compare_skips_suites_when_the_spec_names_none() {
-        let site = CatalogueSite {
-            shape: Shape::NumberedList,
-            pointers: Pointers::Prose,
-            ..ENTITY
-        };
-        let documented = vec![Row::new(1, "§6", Pointers::Prose, Vec::<String>::new())];
-        let implemented = vec![Row::new(1, "§6", Pointers::Files, ["conformance_swarm.rs"])];
-        assert!(compare(&site, &documented, &implemented).is_empty());
     }
 }

@@ -1,7 +1,7 @@
 //! The gateway's client-facing error model.
 //!
 //! The failure layers stay distinct on the wire, exactly as the agent runtime keeps
-//! them apart (spec §12/§14): a *transport or durability* failure of reaching or
+//! them apart (entity §12, actor §14): a *transport or durability* failure of reaching or
 //! committing a command (an [`EntityError`]) becomes a retryable or upstream HTTP
 //! status here; a turn the session *rejected* ([`SubmitReject`], a reused turn id
 //! with different content) is the client's own permanent mistake, a `409`; an
@@ -81,7 +81,7 @@ impl GatewayError {
 }
 
 impl From<EntityError> for GatewayError {
-    /// Map a transport/durability failure to an HTTP status (spec §12/§14):
+    /// Map a transport/durability failure to an HTTP status (entity §12, actor §14):
     ///
     /// - `Call(Timeout)` → `504`: the deadline lapsed reaching/committing.
     /// - `Call(Unreachable | MailboxFull)`, `Unavailable`, `NotLeader` → `503`,

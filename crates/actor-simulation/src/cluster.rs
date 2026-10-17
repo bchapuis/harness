@@ -1,6 +1,6 @@
 //! Cluster lifecycle and the nemesis vocabulary (spec §9.3, §18.3).
 //!
-//! The wire half of [`SimNetwork`](crate::SimNetwork) (routing, seeded
+//! The wire half of [`SimNetwork`] (routing, seeded
 //! loss/duplication/latency) lives in [`transport`](crate::transport). This is
 //! the other half: bringing nodes up and down, and the vocabulary a nemesis or a
 //! scenario uses to break them.
@@ -199,7 +199,7 @@ impl SimNetwork {
 
     /// Inject a raw frame directly into a node's inbound queue, bypassing
     /// routing, for negative tests that feed hostile or corrupt frames a
-    /// well-behaved peer would never send (spec §5.4, §7.3). A no-op if the
+    /// well-behaved peer would never send (spec §5.4, and §7 on framing). A no-op if the
     /// target node is unknown.
     pub fn inject(&self, from: NodeId, to: NodeId, frame: Frame) {
         let sender = {

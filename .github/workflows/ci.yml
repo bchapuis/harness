@@ -69,6 +69,13 @@ jobs:
       - name: Doc-tests
         run: cargo test --locked --workspace --doc
 
+      # Rustdoc is a checked artifact: every intra-doc link resolves, with every
+      # feature on and private items included, because the mechanism docs live
+      # in private modules. Cargo.toml's `[workspace.lints.rustdoc]` holds the
+      # lint levels; this step turns the remaining warnings into errors.
+      - name: Rustdoc (warnings are errors)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps --document-private-items
+
   # The guest-backed suites (sandbox spec §3.5, machine spec §2.1): boot real
   # guests. The microVM mechanism needs /dev/kvm: available on GitHub's
   # x86_64 Linux runners once the udev rule below widens the device's

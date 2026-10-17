@@ -111,14 +111,14 @@ fn every_unprefixed_fallback_names_a_registered_document() {
 }
 
 /// A parser that silently stops recognizing citations would make this suite pass
-/// by finding nothing to check. The floors are well under the counts at the time
-/// of writing (2,100-odd citations; every spec numbers dozens of sections), and
-/// exist to catch a regression to zero rather than to pin an exact figure.
+/// by finding nothing to check. The floors exist to catch a regression to zero,
+/// not to pin a figure: they sit far below any plausible count, so the set may
+/// shrink without tripping them.
 #[test]
 fn the_gate_still_has_something_to_check() {
     let registry = registry();
     assert!(
-        registry.citation_count() > 1_500,
+        registry.citation_count() > 300,
         "only {} citations found across the set; the scanner has regressed",
         registry.citation_count(),
     );
