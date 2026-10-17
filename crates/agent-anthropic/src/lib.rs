@@ -245,9 +245,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use actor_core::BoxFuture;
     use actor_simulation::SimEntropy;
     use actor_simulation::Simulation;
+    use agent::BoxFuture;
     use agent::CallId;
     use agent::HttpPost;
     use agent::Model;

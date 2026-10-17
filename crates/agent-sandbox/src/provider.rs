@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-use actor_core::BoxFuture;
 use cap_std::fs::Dir;
+use agent::BoxFuture;
 use agent::ComputeLimits;
 use agent::Sandbox;
 use agent::SandboxError;

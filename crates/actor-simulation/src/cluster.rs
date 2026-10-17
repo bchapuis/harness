@@ -13,9 +13,9 @@ use std::sync::Arc;
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
 use actor_cluster::Frame;
+use actor_core::Codec;
+use actor_core::JsonCodec;
 use actor_core::NodeId;
-use actor_serialization::Codec;
-use actor_serialization::JsonCodec;
 
 use crate::SimNetwork;
 use crate::transport::Process;

@@ -154,7 +154,6 @@ dependencies = [
 name = "agent-anthropic"
 version = "0.1.0"
 dependencies = [
- "actor-core",
  "actor-simulation",
  "agent",
  "serde",
@@ -193,7 +192,6 @@ dependencies = [
 name = "agent-openai"
 version = "0.1.0"
 dependencies = [
- "actor-core",
  "actor-simulation",
  "agent",
  "serde",
@@ -204,7 +202,6 @@ dependencies = [
 name = "agent-sandbox"
 version = "0.1.0"
 dependencies = [
- "actor-core",
  "actor-simulation",
  "agent",
  "cap-std",

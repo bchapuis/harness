@@ -91,6 +91,11 @@ pub use tool::ToolDecl;
 pub use tool::ToolError;
 pub use tool::ToolRegistry;
 
+// The future every seam method returns (`Model`, `HttpPost`, `Sandbox`,
+// `SandboxProvider`), so an adapter implementing a seam needs no direct
+// actor-core dependency.
+pub use actor_core::BoxFuture;
+
 // Re-exported entity types that appear in the agent runtime's public surface, so a
 // consumer needs no direct entity dependency for ordinary use.
 pub use entity::EntityConfig;

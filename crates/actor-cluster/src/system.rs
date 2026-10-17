@@ -27,6 +27,7 @@ use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::CallError;
 use actor_core::Clock;
+use actor_core::Codec;
 use actor_core::Entropy;
 use actor_core::Event;
 use actor_core::EventSink;
@@ -42,7 +43,6 @@ use actor_core::host::ActorFactory;
 use actor_core::host::LocalHost;
 use actor_core::host::WatchDelivery;
 use actor_core::receptionist::ReceptionistState;
-use actor_serialization::Codec;
 use async_channel::Receiver;
 use async_channel::Sender;
 use futures::channel::oneshot;
@@ -117,7 +117,7 @@ pub struct ClusterConfig {
 impl Default for ClusterConfig {
     fn default() -> Self {
         ClusterConfig {
-            codec: Arc::new(actor_serialization::JsonCodec),
+            codec: Arc::new(actor_core::JsonCodec),
             mailbox_capacity: 64,
             events: Arc::new(()),
             membership: MembershipMode::Static { detector: None },

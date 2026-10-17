@@ -14,12 +14,12 @@ workspace = true
 [dependencies]
 actor-core.workspace = true
 actor-cluster.workspace = true
-actor-serialization.workspace = true
 async-channel.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 
 [dev-dependencies]
+actor-serialization.workspace = true
 spec.workspace = true
 erased-serde.workspace = true
 futures.workspace = true
