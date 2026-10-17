@@ -152,14 +152,9 @@ impl SimNetwork {
         self.spawner.retire_domain(domain);
         self.events
             .emit(actor_core::Event::app(NodeRestarted { node }));
-        let system = self.bring_up(node, false);
-        let inner = self.inner.lock().expect("network mutex poisoned");
-        for peer in inner.processes.iter().filter(|p| p.node != node) {
-            // `add_member` is idempotent and never resurrects a terminal member.
-            peer.system.add_member(node);
-            system.add_member(peer.node);
-        }
-        system
+        // Peers already list the node: `add_member` is idempotent and never
+        // resurrects a terminal member, so the successor rejoins as a founder.
+        self.join(node)
     }
 
     /// Sever communication between two groups of nodes (spec §18.3): frames on
@@ -190,17 +185,16 @@ impl SimNetwork {
     /// Isolate a node from every peer (spec §18.3), a crash, as seen by the
     /// rest of the cluster: its frames are dropped in both directions.
     pub fn crash(&self, node: NodeId) {
-        let mut inner = self.inner.lock().expect("network mutex poisoned");
-        let others: Vec<NodeId> = inner
+        let others: Vec<NodeId> = self
+            .inner
+            .lock()
+            .expect("network mutex poisoned")
             .processes
             .iter()
             .map(|p| p.node)
             .filter(|&n| n != node)
             .collect();
-        for other in others {
-            inner.blocked.insert((node, other));
-            inner.blocked.insert((other, node));
-        }
+        self.partition(&[node], &others);
     }
 
     /// Inject a raw frame directly into a node's inbound queue, bypassing

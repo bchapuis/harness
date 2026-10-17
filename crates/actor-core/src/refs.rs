@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::actor::Actor;
 use crate::actor::Handler;
 use crate::error::CallError;
+use crate::event::Event;
 use crate::id::ActorId;
 use crate::mailbox::Mailbox;
 use crate::message::Message;
@@ -128,6 +129,33 @@ impl<A: Actor> ActorRef<A> {
     /// Request/response with an explicit deadline overriding the default (spec
     /// §3.3).
     pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, CallError>
+    where
+        A: Handler<M>,
+        M: Message,
+    {
+        // Every ask, local, remote, or dead-lettered, passes here, so this is the
+        // one place that brackets it: `AskIssued` before routing and exactly one
+        // `AskOutcome` once it resolves, which is what lets a checker prove no
+        // ask is silently lost or left pending at quiescence (invariant #1).
+        let caller = self.system.node();
+        self.system.emit(Event::AskIssued {
+            actor: self.id.clone(),
+            caller,
+            manifest: M::MANIFEST,
+        });
+        let result = self.route_ask(msg, within).await;
+        self.system.emit(Event::AskOutcome {
+            actor: self.id.clone(),
+            caller,
+            manifest: M::MANIFEST,
+            failed: result.is_err(),
+        });
+        result
+    }
+
+    /// Route one ask to its target and await the typed reply, inside the
+    /// bracket [`ask_timeout`](Self::ask_timeout) emits.
+    async fn route_ask<M>(&self, msg: M, within: Duration) -> Result<M::Reply, CallError>
     where
         A: Handler<M>,
         M: Message,

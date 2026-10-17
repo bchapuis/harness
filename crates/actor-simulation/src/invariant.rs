@@ -102,6 +102,14 @@ pub struct NoSilentLoss {
     outstanding: BTreeMap<NodeId, i64>,
 }
 
+impl NoSilentLoss {
+    /// How many issued asks have not yet reached an outcome, over the callers
+    /// whose process is still running: zero once every ask has resolved.
+    pub fn pending(&self) -> i64 {
+        self.outstanding.values().sum()
+    }
+}
+
 impl Invariant for NoSilentLoss {
     fn name(&self) -> &'static str {
         "no-silent-loss"
@@ -131,7 +139,7 @@ impl Invariant for NoSilentLoss {
     }
 
     fn at_quiescence(&mut self) -> Result<(), String> {
-        let pending: i64 = self.outstanding.values().sum();
+        let pending = self.pending();
         if pending != 0 {
             return Err(format!("{pending} ask(s) still pending at quiescence"));
         }

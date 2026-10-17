@@ -1176,7 +1176,8 @@ impl Membership {
 
     /// The placement serving set (utilities spec §2.1): every member (including
     /// this node) that is `Up` and not confirmed `Unreachable`, in `NodeId`
-    /// order. Stricter than the receptionist's listing filter (spec §13 req 4):
+    /// order. Stricter than the receptionist's listing filter
+    /// ([`in_rotation`](Self::in_rotation), spec §13 req 4):
     /// placement assigns ownership, so it also routes around
     /// confirmed-unreachable members rather than handing them keys. A merely
     /// *suspected* member stays in the set: suspicion is refutable noise
@@ -1223,7 +1224,7 @@ impl Membership {
     /// not handed out to new callers. This node never sits in its own roster, so
     /// its own status is read from `self_status`: a drained node omits its own
     /// actors from its own listings like every other node does.
-    pub fn is_serving(&self, node: NodeId) -> bool {
+    pub fn in_rotation(&self, node: NodeId) -> bool {
         let status = if node == self.node {
             Some(self.self_status())
         } else {

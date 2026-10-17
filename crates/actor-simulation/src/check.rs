@@ -85,16 +85,8 @@ impl EventSink for Checker {
             invariants,
             violations,
         } = &mut *inner;
-        // A process ended. Every invariant drops what it knew about that node
-        // before the successor's events arrive reusing its identities (see
-        // `Invariant::forget_node`).
-        if let Some(crate::NodeRestarted { node }) = event.as_app() {
-            for inv in invariants.iter_mut() {
-                inv.forget_node(*node);
-            }
-        }
         for inv in invariants.iter_mut() {
-            if let Err(detail) = inv.observe(&event) {
+            if let Err(detail) = feed(inv.as_mut(), &event) {
                 violations.push(Violation {
                     invariant: inv.name(),
                     detail,
@@ -102,4 +94,18 @@ impl EventSink for Checker {
             }
         }
     }
+}
+
+/// Feed one event to `invariant` the way the [`Checker`] does. On a
+/// [`NodeRestarted`](crate::NodeRestarted) a process ended, so the invariant
+/// first drops what it knew about that node, before the successor's events
+/// arrive reusing its identities (see [`Invariant::forget_node`]); then it
+/// observes the event. Any other reader of the stream through an invariant
+/// goes through here too, so it cannot disagree with the checker about what a
+/// restart resets.
+pub(crate) fn feed(invariant: &mut dyn Invariant, event: &Event) -> Result<(), String> {
+    if let Some(crate::NodeRestarted { node }) = event.as_app() {
+        invariant.forget_node(*node);
+    }
+    invariant.observe(event)
 }

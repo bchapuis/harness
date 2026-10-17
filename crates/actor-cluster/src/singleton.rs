@@ -38,7 +38,6 @@ use actor_core::Key;
 use actor_core::Message;
 use actor_core::Spawner;
 
-use crate::placement;
 use crate::system::ClusterSystem;
 use crate::transport::Transport;
 
@@ -122,8 +121,7 @@ async fn manager<C, E, S, T, A, M, F>(
         if system.is_shutting_down() {
             return;
         }
-        let anchor = placement::owner(&system.membership().serving_members(), name.as_bytes());
-        let is_anchor = anchor == Some(system.node());
+        let is_anchor = system.place(name.as_bytes()) == Some(system.node());
         state = match state {
             State::Idle if is_anchor => {
                 let shared = Arc::clone(&factory);
@@ -180,7 +178,7 @@ impl<A: Actor> Clone for SingletonProxy<A> {
 
 impl<A: Actor> SingletonProxy<A> {
     /// The current instance as this node sees it: the first entry of the
-    /// serving listing (deterministic order, so converged nodes resolve the
+    /// in-rotation listing (deterministic order, so converged nodes resolve the
     /// same instance even while a superseded registration lingers).
     pub fn resolve(&self) -> Option<ActorRef<A>> {
         self.system.receptionist().lookup(self.key).first().cloned()

@@ -17,6 +17,7 @@ use std::time::Duration;
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
 use actor_cluster::MembershipMode;
+use actor_core::ActorSystem;
 use actor_core::EventSink;
 use actor_core::NodeId;
 use actor_serialization::Codec;
@@ -194,13 +195,13 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 ///
 /// `expected` is the cluster size; `members()` reports peers only (never this
 /// node) plus any admitted client, so the bar is the peer quorum
-/// `expected - 1` (a client joining only raises the count). Counted polls
-/// rather than a wall-clock deadline: reading the host clock directly is what
-/// the `Clock` seam exists to prevent (spec §4.6), and the elapsed figure is
-/// derived from the count. Size `budget` to cover peer discovery plus the
-/// first election; exhausting it then means a peer never appeared or a group
-/// cannot elect, which is reported with the member and leader state, and the
-/// node serves anyway.
+/// `expected - 1` (a client joining only raises the count). Counted polls,
+/// each slept on the system's clock, rather than a wall-clock deadline:
+/// reading the host clock directly is what the `Clock` seam exists to prevent
+/// (spec §4.6), and the elapsed figure is derived from the count. Size
+/// `budget` to cover peer discovery plus the first election; exhausting it
+/// then means a peer never appeared or a group cannot elect, which is reported
+/// with the member and leader state, and the node serves anyway.
 pub async fn wait_for_cluster(system: &TcpCluster, expected: usize, budget: Duration) {
     const POLL: Duration = Duration::from_millis(100);
     let peers = expected.saturating_sub(1);
@@ -214,7 +215,7 @@ pub async fn wait_for_cluster(system: &TcpCluster, expected: usize, budget: Dura
             );
             return;
         }
-        tokio::time::sleep(POLL).await;
+        system.sleep(POLL).await;
     }
     eprintln!(
         "[{}] warning: cluster not ready after {:.0}s; serving anyway. \

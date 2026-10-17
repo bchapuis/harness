@@ -41,8 +41,8 @@ use actor_core::Terminated;
 use actor_core::TerminationReason;
 use actor_core::host::ActorFactory;
 use actor_core::host::LocalHost;
+use actor_core::host::ReceptionistState;
 use actor_core::host::WatchDelivery;
-use actor_core::receptionist::ReceptionistState;
 use async_channel::Receiver;
 use async_channel::Sender;
 use futures::channel::oneshot;
@@ -109,7 +109,7 @@ pub struct ClusterConfig {
     /// (spec §3.6). It must differ from the value any predecessor process used
     /// under this `NodeId`, or a peer's ref from before a restart resolves against
     /// whatever actor now holds that path; see
-    /// [`LocalHost::with_incarnation`](actor_core::LocalHost::with_incarnation).
+    /// [`LocalHost::with_incarnation`](actor_core::host::LocalHost::with_incarnation).
     /// A deployment that never restarts a node in place can leave it `0`.
     pub incarnation: u64,
 }
@@ -282,34 +282,33 @@ where
         system
             .inner
             .spawner
-            .launch(Box::pin(receive_loop(system.clone(), inbound)));
+            .launch(Box::pin(system.clone().receive_loop(inbound)));
         if mode.detector().is_some() {
             system
                 .inner
                 .spawner
-                .launch(Box::pin(detector(system.clone())));
+                .launch(Box::pin(system.clone().detector()));
             // Anti-entropy rides alongside the detector on the same cadence: it
             // only makes sense for a live cluster, and gating it on SWIM keeps
             // SWIM-off systems quiescent (spec §13, §18.1).
-            system.inner.spawner.launch(Box::pin(receptionist_gossip(
-                system.clone(),
-                swim.probe_interval,
-            )));
+            system.inner.spawner.launch(Box::pin(
+                system.clone().receptionist_gossip(swim.probe_interval),
+            ));
         }
         // Registry-based mode (spec §9.4.2).
         if let MembershipMode::Registry(registry) = &mode {
-            system.inner.spawner.launch(Box::pin(registry_sync(
-                system.clone(),
-                Arc::clone(&registry.client),
-                registry.sync_interval,
-            )));
+            system.inner.spawner.launch(Box::pin(
+                system
+                    .clone()
+                    .registry_sync(Arc::clone(&registry.client), registry.sync_interval),
+            ));
         }
         // Leader-based mode (spec §9.4.3).
         if let MembershipMode::Leader(leader) = &mode {
             system
                 .inner
                 .spawner
-                .launch(Box::pin(raft_driver(system.clone(), leader.clone())));
+                .launch(Box::pin(system.clone().raft_driver(leader.clone())));
         }
         system
     }
@@ -509,9 +508,9 @@ where
     /// append locally when leading; otherwise forward one `RaftPropose` to the
     /// known leader; otherwise (no leader known yet) fan the proposal out to
     /// `voters`, which forward it to theirs. The inbound counterpart is
-    /// [`handle_raft_propose`], which never fans out. `voters` is the caller's
-    /// choice of quorum: the configured founding set for the control group, or a
-    /// group's live voter set.
+    /// [`handle_raft_propose`](Self::handle_raft_propose), which never fans out.
+    /// `voters` is the caller's choice of quorum: the configured founding set for
+    /// the control group, or a group's live voter set.
     async fn propose_or_forward(&self, group: GroupId, command: Vec<u8>, voters: &[NodeId]) {
         let Some(raft) = self.group(group) else {
             return;
@@ -589,9 +588,8 @@ where
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The resolved SWIM probe interval: the cadence background utility loops
-    /// reuse so they add no second tunable (utilities spec §4).
-    pub(crate) fn probe_interval(&self) -> Duration {
+    /// The resolved SWIM probe interval (spec §10), the cadence layered loops reuse.
+    pub fn probe_interval(&self) -> Duration {
         self.inner.swim.probe_interval
     }
 
@@ -720,8 +718,40 @@ where
             }
         }
     }
+}
 
-    async fn remote_ask_inner(
+impl<C, E, S, T> ActorSystem for ClusterSystem<C, E, S, T>
+where
+    C: Clock,
+    E: Entropy,
+    S: Spawner,
+    T: Transport,
+{
+    fn spawn_factory<A: Actor<System = Self>>(
+        &self,
+        factory: ActorFactory<A>,
+        parent: Option<ActorId>,
+    ) -> ActorRef<A> {
+        self.inner.host.spawn_actor(self.clone(), factory, parent)
+    }
+
+    fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {
+        self.inner.host.resolve_local(id)
+    }
+
+    fn is_local(&self, id: &ActorId) -> bool {
+        self.inner.host.is_local(id)
+    }
+
+    fn in_rotation(&self, node: NodeId) -> bool {
+        self.inner.membership.in_rotation(node)
+    }
+
+    fn codec(&self) -> Arc<dyn Codec> {
+        Arc::clone(&self.inner.codec)
+    }
+
+    async fn remote_ask(
         &self,
         recipient: &ActorId,
         manifest: Manifest,
@@ -767,70 +797,6 @@ where
                 Err(CallError::Timeout)
             }
         }
-    }
-}
-
-impl<C, E, S, T> ActorSystem for ClusterSystem<C, E, S, T>
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    fn spawn_factory<A: Actor<System = Self>>(
-        &self,
-        factory: ActorFactory<A>,
-        parent: Option<ActorId>,
-    ) -> ActorRef<A> {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            factory,
-            parent,
-        )
-    }
-
-    fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {
-        self.inner.host.resolve_local(id)
-    }
-
-    fn is_local(&self, id: &ActorId) -> bool {
-        self.inner.host.is_local(id)
-    }
-
-    fn is_serving(&self, node: NodeId) -> bool {
-        self.inner.membership.is_serving(node)
-    }
-
-    fn codec(&self) -> Arc<dyn Codec> {
-        Arc::clone(&self.inner.codec)
-    }
-
-    async fn remote_ask(
-        &self,
-        recipient: &ActorId,
-        manifest: Manifest,
-        payload: Vec<u8>,
-        within: Duration,
-    ) -> Result<Vec<u8>, CallError> {
-        // Bracket the remote call with events so the no-silent-loss invariant
-        // (#1) covers remote asks, not just local ones.
-        self.inner.events.emit(Event::AskIssued {
-            actor: recipient.clone(),
-            caller: self.node(),
-            manifest,
-        });
-        let result = self
-            .remote_ask_inner(recipient, manifest, payload, within)
-            .await;
-        self.inner.events.emit(Event::AskOutcome {
-            actor: recipient.clone(),
-            caller: self.node(),
-            manifest,
-            failed: result.is_err(),
-        });
-        result
     }
 
     async fn remote_tell(
@@ -953,508 +919,6 @@ where
     }
 }
 
-/// The inbound receive loop (spec §4.4): dispatch envelopes to local actors,
-/// resolve pending `ask`s on replies, and answer SWIM probes.
-async fn receive_loop<C, E, S, T>(
-    system: ClusterSystem<C, E, S, T>,
-    inbound: Receiver<(NodeId, Frame)>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    while let Ok((from, frame)) = inbound.recv().await {
-        // A stopped node processes nothing further (spec §9.3): frames already
-        // queued when `shutdown` was called are dropped, not handled. This is
-        // what lets a restart hand the node's durable state to a successor:
-        // the old incarnation can no longer write to it.
-        if system.is_shutting_down() {
-            return;
-        }
-        dispatch_frame(&system, from, frame).await;
-    }
-}
-
-/// Route one inbound frame to its handler (spec §4.4).
-async fn dispatch_frame<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, from: NodeId, frame: Frame)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    match frame {
-        Frame::Envelope {
-            recipient,
-            manifest,
-            correlation,
-            payload,
-        } => handle_envelope(system, from, recipient, manifest, correlation, payload).await,
-        Frame::Reply {
-            correlation,
-            outcome,
-        } => handle_reply(system, correlation, outcome),
-        Frame::Ping {
-            seq,
-            incarnation,
-            digest,
-        } => handle_ping(system, from, seq, incarnation, digest).await,
-        Frame::Ack {
-            seq,
-            incarnation,
-            digest,
-        } => handle_ack(system, from, seq, incarnation, digest).await,
-        Frame::PingReq {
-            seq,
-            target,
-            incarnation,
-            digest,
-        } => handle_ping_req(system, from, seq, target, incarnation, digest).await,
-        Frame::IndirectAck {
-            seq,
-            target,
-            incarnation,
-            digest,
-        } => handle_indirect_ack(system, seq, target, incarnation, digest).await,
-        Frame::Watch { target, watcher } => handle_watch(system, target, watcher).await,
-        Frame::Unwatch { target, watcher } => handle_unwatch(system, target, watcher),
-        Frame::Terminated {
-            target,
-            watcher,
-            reason,
-        } => handle_terminated(system, target, watcher, reason).await,
-        Frame::Receptionist { key, origin, actor } => {
-            handle_receptionist(system, key, origin, actor)
-        }
-        Frame::ReceptionistSync { entries } => handle_receptionist_sync(system, entries),
-        // Raft consensus traffic (leader-based mode, spec §9.4.3) rides the ordinary
-        // transport as system messages; a node not in leader mode ignores it. The
-        // frame carries the engine's own message, so there is nothing to open.
-        Frame::Raft { group, message } => {
-            drive_group(system, group, |raft, now, entropy| {
-                raft.handle(from, message, now, entropy)
-            })
-            .await
-        }
-        // Each beat is dispatched to its own group exactly as a lone `RaftAppend`
-        // would be, so no group's state machine can tell the difference; only the
-        // replies are gathered, so one batch in yields one batch out.
-        Frame::RaftHeartbeats { beats } => {
-            let mut replies = Vec::with_capacity(beats.len());
-            for beat in beats {
-                let group = beat.group;
-                if let Some(raft) = system.group(group) {
-                    let mut out = raft.handle(
-                        from,
-                        beat.into_append(),
-                        system.inner.clock.now(),
-                        &system.inner.entropy,
-                    );
-                    // Lift this group's reply out of the output and into the batch;
-                    // anything else it produced still goes out on its own.
-                    out.messages
-                        .retain(|(_, message)| match RaftBeatReply::from_reply(group, message) {
-                            Some(reply) => {
-                                replies.push(reply);
-                                false
-                            }
-                            None => true,
-                        });
-                    apply_raft_output(system, group, out).await;
-                }
-            }
-            if !replies.is_empty() {
-                let _ = system
-                    .inner
-                    .transport
-                    .send(from, Frame::RaftHeartbeatReplies { replies })
-                    .await;
-            }
-        }
-        Frame::RaftHeartbeatReplies { replies } => {
-            for reply in replies {
-                drive_group(system, reply.group, |raft, now, entropy| {
-                    raft.handle(from, reply.into_reply(), now, entropy)
-                })
-                .await;
-            }
-        }
-        Frame::RaftPropose {
-            group,
-            command,
-            forwarded,
-        } => handle_raft_propose(system, group, command, forwarded).await,
-    }
-}
-
-/// Run one group's Raft handler and apply its output (spec §9.4.3): resolve the
-/// group, draw `clock.now()` + `entropy` once, invoke the handler, apply the
-/// output. Drawing `now` inside keeps the entropy/clock ordering identical across
-/// every receive-side Raft arm (the determinism seam, spec §18).
-async fn drive_group<C, E, S, T, F>(system: &ClusterSystem<C, E, S, T>, group: GroupId, handle: F)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-    F: FnOnce(&RaftGroup, actor_core::Instant, &E) -> RaftOutput,
-{
-    if let Some(raft) = system.group(group) {
-        let out = handle(&raft, system.inner.clock.now(), &system.inner.entropy);
-        apply_raft_output(system, group, out).await;
-    }
-}
-
-/// Absorb a peer's SWIM gossip (spec §10): hearing from `alive` is direct liveness
-/// evidence, so mark it alive and merge its digest under one `clock.now()`. The
-/// preamble every probe/ack frame shares; the caller then does its distinct tail
-/// (answer, complete a wait, or relay).
-async fn absorb_gossip<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    alive: NodeId,
-    incarnation: u64,
-    digest: Vec<crate::membership::MemberDigest>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let now = system.inner.clock.now();
-    system
-        .inner
-        .membership
-        .mark_alive_direct(alive, incarnation, now);
-    gossip_merge(system, digest, now).await;
-}
-
-/// Deliver an envelope to a local actor (spec §4.4), gating on authorization and
-/// spawning the reply relay for an `ask`.
-async fn handle_envelope<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    from: NodeId,
-    recipient: ActorId,
-    manifest: String,
-    correlation: Option<CallId>,
-    payload: Vec<u8>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    // Authorization gate (spec §15). An `ask` gets the rejection as its reply; a
-    // one-way `tell` has no reply, so the refusal is recorded on the event stream,
-    // its only trace (spec §6 rule 4, §16), exactly as the host records the
-    // refusals it decides itself (`LocalHost::deliver`).
-    if let Some(authorizer) = &system.inner.authorizer
-        && !authorizer.authorize(from, &recipient, &manifest)
-    {
-        let refusal = CallError::System("unauthorized".into());
-        system.inner.events.emit(actor_core::Event::Undelivered {
-            actor: recipient.clone(),
-            manifest: manifest.clone(),
-            error: refusal.clone(),
-        });
-        if let Some(call) = correlation {
-            let _ = system
-                .inner
-                .transport
-                .send(
-                    from,
-                    Frame::Reply {
-                        correlation: call,
-                        outcome: Err(refusal),
-                    },
-                )
-                .await;
-        }
-        return;
-    }
-    let codec = system.codec();
-    let (reply, reply_rx) = ReplyHandle::channel(Arc::clone(&codec));
-    // Decode under this node's system so any `ActorRef` embedded in the message
-    // rebinds to a usable handle here (spec §4.4).
-    actor_core::with_decoding_system(system, || {
-        system
-            .inner
-            .host
-            .deliver(&*codec, &recipient, &manifest, &payload, reply);
-    });
-
-    match correlation {
-        Some(call) => {
-            let transport = system.inner.transport.clone();
-            system.inner.spawner.launch(Box::pin(async move {
-                let outcome = reply_rx.await.unwrap_or(Err(CallError::DeadLetter));
-                let _ = transport
-                    .send(
-                        from,
-                        Frame::Reply {
-                            correlation: call,
-                            outcome,
-                        },
-                    )
-                    .await;
-            }));
-        }
-        None => drop(reply_rx),
-    }
-}
-
-/// Resolve a pending `ask` on its reply frame.
-fn handle_reply<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    correlation: CallId,
-    outcome: ReplyResult,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    if let Some((_, tx)) = system.inner.calls.take(correlation) {
-        let _ = tx.send(outcome);
-    }
-}
-
-/// SWIM probe (spec §10): merge the prober's gossip, then answer with our own
-/// incarnation + digest.
-async fn handle_ping<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    from: NodeId,
-    seq: u64,
-    incarnation: u64,
-    digest: Vec<crate::membership::MemberDigest>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    absorb_gossip(system, from, incarnation, digest).await;
-    let ack = Frame::Ack {
-        seq,
-        incarnation: system.inner.membership.self_incarnation(),
-        digest: system.inner.membership.digest(),
-    };
-    let _ = system.inner.transport.send(from, ack).await;
-}
-
-/// A direct `Ack` to our probe (spec §10): merge gossip and complete the wait,
-/// handing the prober the target's incarnation.
-async fn handle_ack<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    from: NodeId,
-    seq: u64,
-    incarnation: u64,
-    digest: Vec<crate::membership::MemberDigest>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    absorb_gossip(system, from, incarnation, digest).await;
-    if let Some(tx) = system.inner.pings.take(seq) {
-        // Hand the prober the target's incarnation, so a relayed probe can
-        // report it in its `IndirectAck` (spec §10).
-        let _ = tx.send(incarnation);
-    }
-}
-
-/// A peer asks us to probe `target` on its behalf (spec §10 #2): merge its
-/// gossip, then relay a probe and forward the result.
-async fn handle_ping_req<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    from: NodeId,
-    seq: u64,
-    target: NodeId,
-    incarnation: u64,
-    digest: Vec<crate::membership::MemberDigest>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    absorb_gossip(system, from, incarnation, digest).await;
-    system
-        .inner
-        .spawner
-        .launch(Box::pin(relay_probe(system.clone(), from, seq, target)));
-}
-
-/// A helper relayed that `target` answered (spec §10 #2): clear our suspicion of
-/// `target` and complete the indirect wait.
-async fn handle_indirect_ack<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    seq: u64,
-    target: NodeId,
-    incarnation: u64,
-    digest: Vec<crate::membership::MemberDigest>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    absorb_gossip(system, target, incarnation, digest).await;
-    if let Some(tx) = system.inner.pings.take(seq) {
-        let _ = tx.send(incarnation);
-    }
-}
-
-/// Cross-node death watch (spec §12): a remote `watcher` registers interest in our
-/// local `target`, or is answered immediately when the target is already gone.
-async fn handle_watch<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    target: ActorId,
-    watcher: ActorId,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    // Deliver a `Terminated` frame back to the watcher's node when the target
-    // stops. A `Weak` handle avoids a reference cycle
-    // (system → host → watch closure → system).
-    let weak: Weak<Inner<C, E, S, T>> = Arc::downgrade(&system.inner);
-    let watcher_node = watcher.node();
-    let watcher_id = watcher.clone();
-    let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
-        if let Some(inner) = weak.upgrade() {
-            let frame = Frame::Terminated {
-                target: signal.id,
-                watcher: watcher_id.clone(),
-                reason: signal.reason,
-            };
-            let transport = inner.transport.clone();
-            inner.spawner.launch(Box::pin(async move {
-                let _ = transport.send(watcher_node, frame).await;
-            }));
-        }
-        // Forwarding the signal over the transport is fire-and-forget
-        // (the launched task carries it), so this resolves immediately.
-        Box::pin(async {}) as BoxFuture<'static, ()>
-    });
-    // The host judges the already-gone case (invariant #12) and hands back the
-    // immediate delivery, carrying the true recorded reason; awaiting it here
-    // sends the `Terminated` frame through the same closure the live path uses.
-    if let Some(immediate) = system.inner.host.watch(target, watcher, deliver) {
-        immediate.await;
-    }
-}
-
-/// Drop a remote watcher's registration (spec §12).
-fn handle_unwatch<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, target: ActorId, watcher: ActorId)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    system.inner.host.remove_watch(&target, &watcher);
-}
-
-/// The target's node tells us a watched actor terminated. The frame is addressed
-/// to one specific `watcher` (the target's node sends one per remote watcher), so
-/// deliver it only there, fanning to every local watcher of `target` would hand
-/// the others a spurious extra signal when one of them re-watches the dead actor
-/// (invariant #11).
-async fn handle_terminated<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    target: ActorId,
-    watcher: ActorId,
-    reason: TerminationReason,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    system
-        .inner
-        .host
-        .deliver_terminated_to(&target, &watcher, reason)
-        .await;
-}
-
-/// Apply a single remote receptionist registration, unless the actor is hosted
-/// on a node this node already considers `down`: pruning follows the actor's
-/// host, not the node whose `register` call recorded it (spec §13 requirement
-/// 3), so a broadcast that races the down decision never resurrects a pruned
-/// registration (spec §8.1 step 5).
-fn handle_receptionist<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    key: String,
-    origin: NodeId,
-    actor: ActorId,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    if !system.inner.membership.is_down(actor.node()) {
-        system
-            .receptionist()
-            .apply_remote_registration(&key, origin, actor);
-    }
-}
-
-/// Merge a peer's full receptionist registry, skipping entries whose actor is
-/// hosted on a node we already consider `down` so anti-entropy never resurrects a
-/// pruned registration (spec §8.1 step 5, §13 requirement 3).
-fn handle_receptionist_sync<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    entries: Vec<ReceptionistEntry>,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let receptionist = system.receptionist();
-    for entry in entries {
-        if !system.inner.membership.is_down(entry.actor.node()) {
-            receptionist.apply_remote_registration(&entry.key, entry.origin, entry.actor);
-        }
-    }
-}
-
-/// An application command offered to a group's leader (spec §9.4.3 item 1): append
-/// it when leading, forward it once when not. This is the deliberately partial
-/// form of [`ClusterSystem::propose_or_forward`]: an already-inbound proposal is
-/// never fanned out to voters, and a `forwarded` one landing on a non-leader is
-/// dropped (the proposer's bounded re-submission handles the stale-leader case).
-async fn handle_raft_propose<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    group: GroupId,
-    command: Vec<u8>,
-    forwarded: bool,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    if let Some(raft) = system.group(group) {
-        if raft.is_leader() {
-            raft.propose(EntryPayload::App(command));
-        } else if !forwarded && let Some(target) = raft.leader_hint() {
-            let frame = Frame::RaftPropose {
-                group,
-                command,
-                forwarded: true,
-            };
-            let _ = system.inner.transport.send(target, frame).await;
-        }
-    }
-}
-
 impl<C, E, S, T> RaftConsensus for ClusterSystem<C, E, S, T>
 where
     C: Clock,
@@ -1543,7 +1007,7 @@ where
             return false;
         };
         let (started, out) = raft.transfer_leadership(target);
-        apply_raft_output(self, group, out).await;
+        self.apply_raft_output(group, out).await;
         started
     }
 
@@ -1569,295 +1033,626 @@ where
     }
 }
 
-/// Act on one group's Raft step (spec §9.4.3): emit the election event (tagged
-/// with `group`), apply the group's newly committed application commands, and
-/// send the produced consensus frames.
-async fn apply_raft_output<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    group: GroupId,
-    out: RaftOutput,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    if let Some(term) = out.elected {
-        system.inner.events.emit(Event::LeaderElected {
-            node: system.node(),
-            term,
-            group: group.value(),
+impl<C: Clock, E: Entropy, S: Spawner, T: Transport> ClusterSystem<C, E, S, T> {
+    /// The inbound receive loop (spec §4.4): dispatch envelopes to local actors,
+    /// resolve pending `ask`s on replies, and answer SWIM probes.
+    async fn receive_loop(self, inbound: Receiver<(NodeId, Frame)>) {
+        while let Ok((from, frame)) = inbound.recv().await {
+            // A stopped node processes nothing further (spec §9.3): frames already
+            // queued when `shutdown` was called are dropped, not handled. This is
+            // what lets a restart hand the node's durable state to a successor:
+            // the old incarnation can no longer write to it.
+            if self.is_shutting_down() {
+                return;
+            }
+            self.dispatch_frame(from, frame).await;
+        }
+    }
+
+    /// Route one inbound frame to its handler (spec §4.4).
+    async fn dispatch_frame(&self, from: NodeId, frame: Frame) {
+        match frame {
+            Frame::Envelope {
+                recipient,
+                manifest,
+                correlation,
+                payload,
+            } => {
+                self.handle_envelope(from, recipient, manifest, correlation, payload)
+                    .await
+            }
+            Frame::Reply {
+                correlation,
+                outcome,
+            } => self.handle_reply(correlation, outcome),
+            Frame::Ping {
+                seq,
+                incarnation,
+                digest,
+            } => self.handle_ping(from, seq, incarnation, digest).await,
+            // An `Ack` answers for its sender; an `IndirectAck` for the target a
+            // helper reached on our behalf (spec §10 #2).
+            Frame::Ack {
+                seq,
+                incarnation,
+                digest,
+            } => self.complete_probe(from, seq, incarnation, digest).await,
+            Frame::PingReq {
+                seq,
+                target,
+                incarnation,
+                digest,
+            } => {
+                self.handle_ping_req(from, seq, target, incarnation, digest)
+                    .await
+            }
+            Frame::IndirectAck {
+                seq,
+                target,
+                incarnation,
+                digest,
+            } => self.complete_probe(target, seq, incarnation, digest).await,
+            Frame::Watch { target, watcher } => self.handle_watch(target, watcher).await,
+            Frame::Unwatch { target, watcher } => self.handle_unwatch(target, watcher),
+            Frame::Terminated {
+                target,
+                watcher,
+                reason,
+            } => self.handle_terminated(target, watcher, reason).await,
+            Frame::Receptionist { key, origin, actor } => {
+                self.handle_receptionist(key, origin, actor)
+            }
+            Frame::ReceptionistSync { entries } => self.handle_receptionist_sync(entries),
+            // Raft consensus traffic (leader-based mode, spec §9.4.3) rides the ordinary
+            // transport as system messages; a node not in leader mode ignores it. The
+            // frame carries the engine's own message, so there is nothing to open.
+            Frame::Raft { group, message } => {
+                self.drive_group(group, |raft, now, entropy| {
+                    raft.handle(from, message, now, entropy)
+                })
+                .await
+            }
+            // Each beat is dispatched to its own group exactly as a lone `RaftAppend`
+            // would be, so no group's state machine can tell the difference; only the
+            // replies are gathered, so one batch in yields one batch out.
+            Frame::RaftHeartbeats { beats } => {
+                let mut replies = Vec::with_capacity(beats.len());
+                for beat in beats {
+                    let group = beat.group;
+                    if let Some(raft) = self.group(group) {
+                        let mut out = raft.handle(
+                            from,
+                            beat.into_append(),
+                            self.inner.clock.now(),
+                            &self.inner.entropy,
+                        );
+                        // Lift this group's reply out of the output and into the batch;
+                        // anything else it produced still goes out on its own.
+                        out.messages.retain(|(_, message)| {
+                            match RaftBeatReply::from_reply(group, message) {
+                                Some(reply) => {
+                                    replies.push(reply);
+                                    false
+                                }
+                                None => true,
+                            }
+                        });
+                        self.apply_raft_output(group, out).await;
+                    }
+                }
+                if !replies.is_empty() {
+                    let _ = self
+                        .inner
+                        .transport
+                        .send(from, Frame::RaftHeartbeatReplies { replies })
+                        .await;
+                }
+            }
+            Frame::RaftHeartbeatReplies { replies } => {
+                for reply in replies {
+                    self.drive_group(reply.group, |raft, now, entropy| {
+                        raft.handle(from, reply.into_reply(), now, entropy)
+                    })
+                    .await;
+                }
+            }
+            Frame::RaftPropose {
+                group,
+                command,
+                forwarded,
+            } => self.handle_raft_propose(group, command, forwarded).await,
+        }
+    }
+
+    /// Run one group's Raft handler and apply its output (spec §9.4.3): resolve the
+    /// group, draw `clock.now()` + `entropy` once, invoke the handler, apply the
+    /// output. Drawing `now` inside keeps the entropy/clock ordering identical across
+    /// every receive-side Raft arm (the determinism seam, spec §18).
+    async fn drive_group<F>(&self, group: GroupId, handle: F)
+    where
+        F: FnOnce(&RaftGroup, actor_core::Instant, &E) -> RaftOutput,
+    {
+        if let Some(raft) = self.group(group) {
+            let out = handle(&raft, self.inner.clock.now(), &self.inner.entropy);
+            self.apply_raft_output(group, out).await;
+        }
+    }
+
+    /// Absorb a peer's SWIM gossip (spec §10): hearing from `alive` is direct liveness
+    /// evidence, so mark it alive and merge its digest under one `clock.now()`. The
+    /// preamble every probe/ack frame shares; the caller then does its distinct tail
+    /// (answer, complete a wait, or relay).
+    async fn absorb_gossip(
+        &self,
+        alive: NodeId,
+        incarnation: u64,
+        digest: Vec<crate::membership::MemberDigest>,
+    ) {
+        let now = self.inner.clock.now();
+        self.inner
+            .membership
+            .mark_alive_direct(alive, incarnation, now);
+        self.gossip_merge(digest, now).await;
+    }
+
+    /// Deliver an envelope to a local actor (spec §4.4), gating on authorization and
+    /// spawning the reply relay for an `ask`.
+    async fn handle_envelope(
+        &self,
+        from: NodeId,
+        recipient: ActorId,
+        manifest: String,
+        correlation: Option<CallId>,
+        payload: Vec<u8>,
+    ) {
+        // Authorization gate (spec §15). An `ask` gets the rejection as its reply; a
+        // one-way `tell` has no reply, so the refusal is recorded on the event stream,
+        // its only trace (spec §6 rule 4, §16), exactly as the host records the
+        // refusals it decides itself (`LocalHost::deliver`).
+        if let Some(authorizer) = &self.inner.authorizer
+            && !authorizer.authorize(from, &recipient, &manifest)
+        {
+            let refusal = CallError::System("unauthorized".into());
+            self.inner.events.emit(actor_core::Event::Undelivered {
+                actor: recipient.clone(),
+                manifest: manifest.clone(),
+                error: refusal.clone(),
+            });
+            if let Some(call) = correlation {
+                let _ = self
+                    .inner
+                    .transport
+                    .send(
+                        from,
+                        Frame::Reply {
+                            correlation: call,
+                            outcome: Err(refusal),
+                        },
+                    )
+                    .await;
+            }
+            return;
+        }
+        let (reply, reply_rx) = ReplyHandle::channel(self.codec());
+        self.inner
+            .host
+            .deliver(self, &recipient, &manifest, &payload, reply);
+
+        match correlation {
+            Some(call) => {
+                let transport = self.inner.transport.clone();
+                self.inner.spawner.launch(Box::pin(async move {
+                    let outcome = reply_rx.await.unwrap_or(Err(CallError::DeadLetter));
+                    let _ = transport
+                        .send(
+                            from,
+                            Frame::Reply {
+                                correlation: call,
+                                outcome,
+                            },
+                        )
+                        .await;
+                }));
+            }
+            None => drop(reply_rx),
+        }
+    }
+
+    /// Resolve a pending `ask` on its reply frame.
+    fn handle_reply(&self, correlation: CallId, outcome: ReplyResult) {
+        if let Some((_, tx)) = self.inner.calls.take(correlation) {
+            let _ = tx.send(outcome);
+        }
+    }
+
+    /// SWIM probe (spec §10): merge the prober's gossip, then answer with our own
+    /// incarnation + digest.
+    async fn handle_ping(
+        &self,
+        from: NodeId,
+        seq: u64,
+        incarnation: u64,
+        digest: Vec<crate::membership::MemberDigest>,
+    ) {
+        self.absorb_gossip(from, incarnation, digest).await;
+        let ack = Frame::Ack {
+            seq,
+            incarnation: self.inner.membership.self_incarnation(),
+            digest: self.inner.membership.digest(),
+        };
+        let _ = self.inner.transport.send(from, ack).await;
+    }
+
+    /// `alive` answered our probe `seq` (spec §10), directly or through a helper
+    /// (§10 #2): absorb its gossip, which also clears our suspicion of it, and
+    /// complete the wait, handing the prober `alive`'s incarnation so a relayed
+    /// probe can report it in its `IndirectAck`.
+    async fn complete_probe(
+        &self,
+        alive: NodeId,
+        seq: u64,
+        incarnation: u64,
+        digest: Vec<crate::membership::MemberDigest>,
+    ) {
+        self.absorb_gossip(alive, incarnation, digest).await;
+        if let Some(tx) = self.inner.pings.take(seq) {
+            let _ = tx.send(incarnation);
+        }
+    }
+
+    /// A peer asks us to probe `target` on its behalf (spec §10 #2): merge its
+    /// gossip, then relay a probe and forward the result.
+    async fn handle_ping_req(
+        &self,
+        from: NodeId,
+        seq: u64,
+        target: NodeId,
+        incarnation: u64,
+        digest: Vec<crate::membership::MemberDigest>,
+    ) {
+        self.absorb_gossip(from, incarnation, digest).await;
+        self.inner
+            .spawner
+            .launch(Box::pin(self.clone().relay_probe(from, seq, target)));
+    }
+
+    /// Cross-node death watch (spec §12): a remote `watcher` registers interest in our
+    /// local `target`, or is answered immediately when the target is already gone.
+    async fn handle_watch(&self, target: ActorId, watcher: ActorId) {
+        // Deliver a `Terminated` frame back to the watcher's node when the target
+        // stops. A `Weak` handle avoids a reference cycle
+        // (system → host → watch closure → system).
+        let weak: Weak<Inner<C, E, S, T>> = Arc::downgrade(&self.inner);
+        let watcher_node = watcher.node();
+        let watcher_id = watcher.clone();
+        let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
+            if let Some(inner) = weak.upgrade() {
+                let frame = Frame::Terminated {
+                    target: signal.id,
+                    watcher: watcher_id.clone(),
+                    reason: signal.reason,
+                };
+                let transport = inner.transport.clone();
+                inner.spawner.launch(Box::pin(async move {
+                    let _ = transport.send(watcher_node, frame).await;
+                }));
+            }
+            // Forwarding the signal over the transport is fire-and-forget
+            // (the launched task carries it), so this resolves immediately.
+            Box::pin(async {}) as BoxFuture<'static, ()>
         });
+        // The host judges the already-gone case (invariant #12) and hands back the
+        // immediate delivery, carrying the true recorded reason; awaiting it here
+        // sends the `Terminated` frame through the same closure the live path uses.
+        if let Some(immediate) = self.inner.host.watch(target, watcher, deliver) {
+            immediate.await;
+        }
     }
-    // Route the group's committed entries to whoever owns them. The control
-    // group's are membership transitions the cluster layer applies in-process;
-    // every other group's belong to its subscribers.
-    //
-    // Membership is applied synchronously in the tick rather than through a
-    // `subscribe_commits` subscription: it runs `node_down_cascade` inline and
-    // must observe each commit in the same tick it lands, and the async
-    // `commit_sinks` channel would shift that interleaving.
-    if group == GroupId::CONTROL {
-        system.apply_membership_commits(out.committed).await;
-    } else {
-        publish_commits(system, group, &out.committed);
+
+    /// Drop a remote watcher's registration (spec §12).
+    fn handle_unwatch(&self, target: ActorId, watcher: ActorId) {
+        self.inner.host.remove_watch(&target, &watcher);
     }
-    for (to, message) in out.messages {
-        let _ = system
-            .inner
-            .transport
-            .send(to, Frame::Raft { group, message })
+
+    /// The target's node tells us a watched actor terminated. The frame is addressed
+    /// to one specific `watcher` (the target's node sends one per remote watcher), so
+    /// deliver it only there, fanning to every local watcher of `target` would hand
+    /// the others a spurious extra signal when one of them re-watches the dead actor
+    /// (invariant #11).
+    async fn handle_terminated(
+        &self,
+        target: ActorId,
+        watcher: ActorId,
+        reason: TerminationReason,
+    ) {
+        self.inner
+            .host
+            .deliver_terminated_to(&target, &watcher, reason)
             .await;
     }
-}
 
-/// Publish an application group's committed entries (entity's sharded journal) to
-/// its subscribers, in commit order. The send is a synchronous `try_send` on an
-/// unbounded channel, no `.await` between draining `committed` and delivering, so
-/// commit order is preserved and a slow consumer cannot interleave another group's
-/// batch.
-fn publish_commits<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    group: GroupId,
-    committed: &[Committed],
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    if committed.is_empty() {
-        return;
+    /// Apply a single remote receptionist registration, unless the actor is hosted
+    /// on a node this node already considers `down`: pruning follows the actor's
+    /// host, not the node whose `register` call recorded it (spec §13 requirement
+    /// 3), so a broadcast that races the down decision never resurrects a pruned
+    /// registration (spec §8.1 step 5).
+    fn handle_receptionist(&self, key: String, origin: NodeId, actor: ActorId) {
+        if !self.inner.membership.is_down(actor.node()) {
+            self.receptionist()
+                .apply_remote_registration(&key, origin, actor);
+        }
     }
-    let mut sinks = system
-        .inner
-        .commit_sinks
-        .lock()
-        .expect("commit sinks mutex poisoned");
-    if let Some(senders) = sinks.get_mut(&group) {
-        senders.retain(|sender| !sender.is_closed());
-        for observation in committed {
-            for sender in senders.iter() {
-                let _ = sender.try_send(observation.clone());
+
+    /// Merge a peer's full receptionist registry, skipping entries whose actor is
+    /// hosted on a node we already consider `down` so anti-entropy never resurrects a
+    /// pruned registration (spec §8.1 step 5, §13 requirement 3).
+    fn handle_receptionist_sync(&self, entries: Vec<ReceptionistEntry>) {
+        let receptionist = self.receptionist();
+        for entry in entries {
+            if !self.inner.membership.is_down(entry.actor.node()) {
+                receptionist.apply_remote_registration(&entry.key, entry.origin, entry.actor);
             }
         }
     }
-}
 
-/// The Raft driver (leader-based mode, spec §9.4.3): each heartbeat interval,
-/// tick the consensus state machine (elections on a follower/candidate whose
-/// timer fired, replication and quorum commit on the leader), and, when this
-/// node leads, perform the leader's control-plane duties: propose `Admit` for
-/// reachable joiners, `Leave` for members announcing departure (committed at
-/// the departing node's request, spec §9.3), and `Down` for members the
-/// configured downing policy condemns (spec §9.4.3 item 4); each a log entry,
-/// so every transition stays quorum-gated (invariant #22).
-async fn raft_driver<C, E, S, T>(system: ClusterSystem<C, E, S, T>, mode: LeaderMode)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let raft = Arc::clone(system.inner.raft.as_ref().expect("leader mode has raft"));
-    loop {
-        system.inner.clock.sleep(mode.raft.heartbeat_interval).await;
-        if system.is_shutting_down() {
-            return;
+    /// An application command offered to a group's leader (spec §9.4.3 item 1): append
+    /// it when leading, forward it once when not. This is the deliberately partial
+    /// form of [`ClusterSystem::propose_or_forward`]: an already-inbound proposal is
+    /// never fanned out to voters, and a `forwarded` one landing on a non-leader is
+    /// dropped (the proposer's bounded re-submission handles the stale-leader case).
+    async fn handle_raft_propose(&self, group: GroupId, command: Vec<u8>, forwarded: bool) {
+        if let Some(raft) = self.group(group) {
+            if raft.is_leader() {
+                raft.propose(EntryPayload::App(command));
+            } else if !forwarded && let Some(target) = raft.leader_hint() {
+                let frame = Frame::RaftPropose {
+                    group,
+                    command,
+                    forwarded: true,
+                };
+                let _ = self.inner.transport.send(target, frame).await;
+            }
         }
-        let now = system.inner.clock.now();
-        // Tick every group, then send. The two are separated so the tick's *pure
-        // heartbeats* (empty appends, which is what almost every group emits on
-        // almost every tick) can be batched per destination into one frame instead
-        // of one frame per group (spec §9.4.3; see `Frame::RaftHeartbeats`).
-        let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
-        let mut outputs = raft.tick_all(now, &system.inner.entropy);
-        for (group, out) in &mut outputs {
-            out.messages
-                .retain(|(to, message)| match RaftBeat::from_empty_append(*group, message) {
-                    Some(beat) => {
-                        beats.entry(*to).or_default().push(beat);
-                        false // carried in the batch below
-                    }
-                    // An append with entries is real replication and goes as itself:
-                    // batching it would bound one group's throughput by another's.
-                    None => true,
-                });
+    }
+
+    /// Act on one group's Raft step (spec §9.4.3): emit the election event (tagged
+    /// with `group`), apply the group's newly committed application commands, and
+    /// send the produced consensus frames.
+    async fn apply_raft_output(&self, group: GroupId, out: RaftOutput) {
+        if let Some(term) = out.elected {
+            self.inner.events.emit(Event::LeaderElected {
+                node: self.node(),
+                term,
+                group: group.value(),
+            });
         }
-        // Heartbeats go out BEFORE the outputs are applied. Applying is a per-group
-        // await, so with many groups it is the slowest part of the tick, and a
-        // heartbeat that waited behind all of it would arrive later the more groups
-        // this node hosts: precisely the direction that must not scale with `G`,
-        // since a late heartbeat is what starts a spurious election.
-        for (to, beats) in beats {
-            let _ = system
+        // Route the group's committed entries to whoever owns them. The control
+        // group's are membership transitions the cluster layer applies in-process;
+        // every other group's belong to its subscribers.
+        //
+        // Membership is applied synchronously in the tick rather than through a
+        // `subscribe_commits` subscription: it runs `node_down_cascade` inline and
+        // must observe each commit in the same tick it lands, and the async
+        // `commit_sinks` channel would shift that interleaving.
+        if group == GroupId::CONTROL {
+            self.apply_membership_commits(out.committed).await;
+        } else {
+            self.publish_commits(group, &out.committed);
+        }
+        for (to, message) in out.messages {
+            let _ = self
                 .inner
                 .transport
-                .send(to, Frame::RaftHeartbeats { beats })
+                .send(to, Frame::Raft { group, message })
                 .await;
         }
-        for (group, out) in outputs {
-            apply_raft_output(&system, group, out).await;
+    }
+
+    /// Publish an application group's committed entries (entity's sharded journal) to
+    /// its subscribers, in commit order. The send is a synchronous `try_send` on an
+    /// unbounded channel, no `.await` between draining `committed` and delivering, so
+    /// commit order is preserved and a slow consumer cannot interleave another group's
+    /// batch.
+    fn publish_commits(&self, group: GroupId, committed: &[Committed]) {
+        if committed.is_empty() {
+            return;
         }
-        // The control group's leader performs the membership control-plane
-        // duties, encoding each transition as the group's opaque app payload.
-        if let Some(control) = raft.group(GroupId::CONTROL)
-            && control.is_leader()
-        {
-            if system.inner.membership.stopped_applying() {
-                // A leader that cannot apply the log it commits to is the one node
-                // that must not hold this job: it would propose a `Down`, commit
-                // it, never observe it, and propose it again on the next tick,
-                // forever. So it invites a peer to take over instead. Best-effort
-                // and retried each tick: a target that has not replicated this
-                // leader's last entry refuses, and replication fixes that within a
-                // heartbeat or two.
-                hand_off_control(&system, &mode).await;
-            } else {
-                let propose = |command: MembershipCommand| {
-                    control.propose(EntryPayload::App(command.encode()));
-                };
-                for node in system.inner.membership.admission_candidates() {
-                    propose(MembershipCommand::Admit(node));
-                }
-                for node in system.inner.membership.leaving_members() {
-                    propose(MembershipCommand::Leave(node));
-                }
-                for node in system
-                    .inner
-                    .membership
-                    .downing_candidates(mode.downing, now)
-                {
-                    propose(MembershipCommand::Down(node));
+        let mut sinks = self
+            .inner
+            .commit_sinks
+            .lock()
+            .expect("commit sinks mutex poisoned");
+        if let Some(senders) = sinks.get_mut(&group) {
+            senders.retain(|sender| !sender.is_closed());
+            for observation in committed {
+                for sender in senders.iter() {
+                    let _ = sender.try_send(observation.clone());
                 }
             }
         }
     }
-}
 
-/// Hand the control group's leadership to any other configured voter, for a node
-/// that has stopped applying membership transitions (spec §9.4.3 item 1).
-///
-/// The configured voters, not the live ones: the live set is read out of the
-/// member view this node has stopped advancing, which is the state being escaped.
-/// The founding set is a constant every node agrees on, and a target that is no
-/// longer a voter simply refuses, which costs one call and is retried next tick.
-async fn hand_off_control<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, mode: &LeaderMode)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let self_node = system.node();
-    for target in mode.raft.voters.iter().copied().filter(|&n| n != self_node) {
-        if system
-            .transfer_group_leadership(GroupId::CONTROL, target)
-            .await
-        {
-            return;
+    /// The Raft driver (leader-based mode, spec §9.4.3): each heartbeat interval,
+    /// tick the consensus state machine (elections on a follower/candidate whose
+    /// timer fired, replication and quorum commit on the leader), and, when this
+    /// node leads, perform the leader's control-plane duties: propose `Admit` for
+    /// reachable joiners, `Leave` for members announcing departure (committed at
+    /// the departing node's request, spec §9.3), and `Down` for members the
+    /// configured downing policy condemns (spec §9.4.3 item 4); each a log entry,
+    /// so every transition stays quorum-gated (invariant #22).
+    async fn raft_driver(self, mode: LeaderMode) {
+        let raft = Arc::clone(self.inner.raft.as_ref().expect("leader mode has raft"));
+        loop {
+            self.inner.clock.sleep(mode.raft.heartbeat_interval).await;
+            if self.is_shutting_down() {
+                return;
+            }
+            let now = self.inner.clock.now();
+            // Tick every group, then send. The two are separated so the tick's *pure
+            // heartbeats* (empty appends, which is what almost every group emits on
+            // almost every tick) can be batched per destination into one frame instead
+            // of one frame per group (spec §9.4.3; see `Frame::RaftHeartbeats`).
+            let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
+            let mut outputs = raft.tick_all(now, &self.inner.entropy);
+            for (group, out) in &mut outputs {
+                out.messages.retain(|(to, message)| {
+                    match RaftBeat::from_empty_append(*group, message) {
+                        Some(beat) => {
+                            beats.entry(*to).or_default().push(beat);
+                            false // carried in the batch below
+                        }
+                        // An append with entries is real replication and goes as itself:
+                        // batching it would bound one group's throughput by another's.
+                        None => true,
+                    }
+                });
+            }
+            // Heartbeats go out BEFORE the outputs are applied. Applying is a per-group
+            // await, so with many groups it is the slowest part of the tick, and a
+            // heartbeat that waited behind all of it would arrive later the more groups
+            // this node hosts: precisely the direction that must not scale with `G`,
+            // since a late heartbeat is what starts a spurious election.
+            for (to, beats) in beats {
+                let _ = self
+                    .inner
+                    .transport
+                    .send(to, Frame::RaftHeartbeats { beats })
+                    .await;
+            }
+            for (group, out) in outputs {
+                self.apply_raft_output(group, out).await;
+            }
+            // The control group's leader performs the membership control-plane
+            // duties, encoding each transition as the group's opaque app payload.
+            if let Some(control) = raft.group(GroupId::CONTROL)
+                && control.is_leader()
+            {
+                if self.inner.membership.stopped_applying() {
+                    // A leader that cannot apply the log it commits to is the one node
+                    // that must not hold this job: it would propose a `Down`, commit
+                    // it, never observe it, and propose it again on the next tick,
+                    // forever. So it invites a peer to take over instead. Best-effort
+                    // and retried each tick: a target that has not replicated this
+                    // leader's last entry refuses, and replication fixes that within a
+                    // heartbeat or two.
+                    self.hand_off_control(&mode).await;
+                } else {
+                    let propose = |command: MembershipCommand| {
+                        control.propose(EntryPayload::App(command.encode()));
+                    };
+                    for node in self.inner.membership.admission_candidates() {
+                        propose(MembershipCommand::Admit(node));
+                    }
+                    for node in self.inner.membership.leaving_members() {
+                        propose(MembershipCommand::Leave(node));
+                    }
+                    for node in self.inner.membership.downing_candidates(mode.downing, now) {
+                        propose(MembershipCommand::Down(node));
+                    }
+                }
+            }
         }
     }
-}
 
-/// Merge a gossiped digest into membership and run the node-down cascade for any
-/// node the merge newly declares `down` (spec §8.1, §9.2).
-async fn gossip_merge<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    digest: Vec<crate::membership::MemberDigest>,
-    now: actor_core::Instant,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    for node in system.inner.membership.merge(digest, now) {
-        system.node_down_cascade(node).await;
-    }
-}
-
-/// The SWIM failure detector (spec §10): probe a random member each interval,
-/// suspect it on a missed `Ack`, and apply suspicion/downing timeouts,
-/// completing the in-flight calls of any node it downs (spec §8.1).
-async fn detector<C, E, S, T>(system: ClusterSystem<C, E, S, T>)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    loop {
-        system.inner.clock.sleep(system.inner.swim.probe_interval).await;
-        if system.is_shutting_down() {
-            return;
-        }
-        let now = system.inner.clock.now();
-
-        // Apply suspicion/downing timeouts and run the cascade for newly-downed:
-        // complete their in-flight callers (step 3) and notify watchers (step 4).
-        for node in system.inner.membership.tick(now) {
-            system.node_down_cascade(node).await;
-        }
-
-        let Some(target) = system
-            .inner
-            .membership
-            .pick_probe_target(&system.inner.entropy)
-        else {
-            continue;
-        };
-
-        // A received `Ack` is handled by the receive loop (mark alive + merge).
-        let direct_ok = system
-            .probe(|seq| {
-                vec![(
-                    target,
-                    Frame::Ping {
-                        seq,
-                        incarnation: system.inner.membership.self_incarnation(),
-                        digest: system.inner.membership.digest(),
-                    },
-                )]
-            })
-            .await
-            .is_some();
-
-        // On a missed direct probe, enlist `k` helpers to probe indirectly before
-        // suspecting: a single bad link should not cause a false suspicion
-        // (spec §10 #2). Suspect only if both the direct and indirect probes fail.
-        if !direct_ok && !indirect_probe(&system, target).await {
-            system
-                .inner
-                .membership
-                .mark_suspect(target, system.inner.clock.now());
+    /// Hand the control group's leadership to any other configured voter, for a node
+    /// that has stopped applying membership transitions (spec §9.4.3 item 1).
+    ///
+    /// The configured voters, not the live ones: the live set is read out of the
+    /// member view this node has stopped advancing, which is the state being escaped.
+    /// The founding set is a constant every node agrees on, and a target that is no
+    /// longer a voter simply refuses, which costs one call and is retried next tick.
+    async fn hand_off_control(&self, mode: &LeaderMode) {
+        let self_node = self.node();
+        for target in mode.raft.voters.iter().copied().filter(|&n| n != self_node) {
+            if self
+                .transfer_group_leadership(GroupId::CONTROL, target)
+                .await
+            {
+                return;
+            }
         }
     }
-}
 
-/// Indirect probing (spec §10 #2): ask up to `k` random helpers to probe
-/// `target`, returning `true` if any relays back an `IndirectAck`. The relayed
-/// ack also clears our suspicion via the receive loop. `false` if there are no
-/// helpers or none answer within `rtt`.
-async fn indirect_probe<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, target: NodeId) -> bool
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let helpers = system.inner.membership.pick_helpers(
-        system.inner.swim.indirect_count,
-        target,
-        &system.inner.entropy,
-    );
-    if helpers.is_empty() {
-        return false;
+    /// Merge a gossiped digest into membership and run the node-down cascade for any
+    /// node the merge newly declares `down` (spec §8.1, §9.2).
+    async fn gossip_merge(
+        &self,
+        digest: Vec<crate::membership::MemberDigest>,
+        now: actor_core::Instant,
+    ) {
+        for node in self.inner.membership.merge(digest, now) {
+            self.node_down_cascade(node).await;
+        }
     }
-    let incarnation = system.inner.membership.self_incarnation();
-    let digest = system.inner.membership.digest();
-    system
-        .probe(|seq| {
+
+    /// The SWIM failure detector (spec §10): probe a random member each interval,
+    /// suspect it on a missed `Ack`, and apply suspicion/downing timeouts,
+    /// completing the in-flight calls of any node it downs (spec §8.1).
+    async fn detector(self) {
+        loop {
+            self.inner.clock.sleep(self.inner.swim.probe_interval).await;
+            if self.is_shutting_down() {
+                return;
+            }
+            let now = self.inner.clock.now();
+
+            // Apply suspicion/downing timeouts and run the cascade for newly-downed:
+            // complete their in-flight callers (step 3) and notify watchers (step 4).
+            for node in self.inner.membership.tick(now) {
+                self.node_down_cascade(node).await;
+            }
+
+            let Some(target) = self.inner.membership.pick_probe_target(&self.inner.entropy) else {
+                continue;
+            };
+
+            // A received `Ack` is handled by the receive loop (mark alive + merge).
+            let direct_ok = self.direct_probe(target).await.is_some();
+
+            // On a missed direct probe, enlist `k` helpers to probe indirectly before
+            // suspecting: a single bad link should not cause a false suspicion
+            // (spec §10 #2). Suspect only if both the direct and indirect probes fail.
+            if !direct_ok && !self.indirect_probe(target).await {
+                self.inner
+                    .membership
+                    .mark_suspect(target, self.inner.clock.now());
+            }
+        }
+    }
+
+    /// Probe `target` with one `Ping` carrying this node's incarnation and digest
+    /// (spec §10): the detector's own probe and a helper's relayed one alike.
+    /// Returns the incarnation `target` acked with, or `None` past `rtt`.
+    async fn direct_probe(&self, target: NodeId) -> Option<u64> {
+        self.probe(|seq| {
+            vec![(
+                target,
+                Frame::Ping {
+                    seq,
+                    incarnation: self.inner.membership.self_incarnation(),
+                    digest: self.inner.membership.digest(),
+                },
+            )]
+        })
+        .await
+    }
+
+    /// Indirect probing (spec §10 #2): ask up to `k` random helpers to probe
+    /// `target`, returning `true` if any relays back an `IndirectAck`. The relayed
+    /// ack also clears our suspicion via the receive loop. `false` if there are no
+    /// helpers or none answer within `rtt`.
+    async fn indirect_probe(&self, target: NodeId) -> bool {
+        let helpers = self.inner.membership.pick_helpers(
+            self.inner.swim.indirect_count,
+            target,
+            &self.inner.entropy,
+        );
+        if helpers.is_empty() {
+            return false;
+        }
+        let incarnation = self.inner.membership.self_incarnation();
+        let digest = self.inner.membership.digest();
+        self.probe(|seq| {
             helpers
                 .into_iter()
                 .map(|helper| {
@@ -1875,168 +1670,128 @@ where
         })
         .await
         .is_some()
-}
-
-/// Helper side of indirect probing (spec §10 #2): probe `target` ourselves and,
-/// if it answers within `rtt`, relay an `IndirectAck` (carrying the target's
-/// incarnation) back to `requester`.
-async fn relay_probe<C, E, S, T>(
-    system: ClusterSystem<C, E, S, T>,
-    requester: NodeId,
-    requester_seq: u64,
-    target: NodeId,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let probed = system
-        .probe(|seq| {
-            vec![(
-                target,
-                Frame::Ping {
-                    seq,
-                    incarnation: system.inner.membership.self_incarnation(),
-                    digest: system.inner.membership.digest(),
-                },
-            )]
-        })
-        .await;
-    if let Some(target_incarnation) = probed {
-        let ack = Frame::IndirectAck {
-            seq: requester_seq,
-            target,
-            incarnation: target_incarnation,
-            digest: system.inner.membership.digest(),
-        };
-        let _ = system.inner.transport.send(requester, ack).await;
     }
-}
 
-/// The registry sync loop (spec §9.4.2): every `interval`, fetch the external
-/// registry's state and apply it to the local membership view, each entry
-/// stamped with its revision so the merge converges on the registry's latest
-/// state regardless of sync order (spec §9.2).
-///
-/// - A snapshot whose global revision is **lower** than the last applied one is
-///   a stale read and is skipped: application is monotonic, so a laggy or
-///   replayed read can never revert a drain or resurrect a pruned tombstone.
-/// - A member **absent** from the snapshot that a previous sync knew is
-///   deregistered: it moves `down` at the snapshot's revision and the node-down
-///   cascade runs (spec §8.1, §9.4.2 items 3–4).
-/// - Registry **unavailability pauses membership changes only** (spec §9.4.2
-///   item 6): a failed fetch changes nothing, and the data plane keeps running
-///   on the last-synced view.
-async fn registry_sync<C, E, S, T>(
-    system: ClusterSystem<C, E, S, T>,
-    client: Arc<dyn RegistryClient>,
-    interval: Duration,
-) where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    let mut last_revision: Option<u64> = None;
-    // The members the registry was last seen to contain, so a later absence is
-    // recognized as a deregistration.
-    let mut registered: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
-    loop {
-        if let Ok(snapshot) = client.fetch().await {
-            // Skip stale reads (spec §9.4.2 item 1).
-            if last_revision.is_none_or(|last| snapshot.revision >= last) {
-                let advanced = last_revision != Some(snapshot.revision);
-                last_revision = Some(snapshot.revision);
-                let now = system.inner.clock.now();
-                let mut downed = Vec::new();
-                let mut present = std::collections::BTreeSet::new();
-                for entry in &snapshot.entries {
-                    present.insert(entry.node);
-                    let status = match entry.state {
-                        RegistryState::Up => MemberStatus::Up,
-                        RegistryState::Draining => MemberStatus::Draining,
-                    };
-                    if system.inner.membership.apply_stamped(
-                        entry.node,
-                        status,
-                        entry.revision,
-                        now,
-                    ) {
-                        downed.push(entry.node);
-                    }
-                }
-                for &node in registered.iter() {
-                    if !present.contains(&node)
-                        && system.inner.membership.apply_stamped(
-                            node,
-                            MemberStatus::Down,
-                            snapshot.revision,
+    /// Helper side of indirect probing (spec §10 #2): probe `target` ourselves and,
+    /// if it answers within `rtt`, relay an `IndirectAck` (carrying the target's
+    /// incarnation) back to `requester`.
+    async fn relay_probe(self, requester: NodeId, requester_seq: u64, target: NodeId) {
+        if let Some(target_incarnation) = self.direct_probe(target).await {
+            let ack = Frame::IndirectAck {
+                seq: requester_seq,
+                target,
+                incarnation: target_incarnation,
+                digest: self.inner.membership.digest(),
+            };
+            let _ = self.inner.transport.send(requester, ack).await;
+        }
+    }
+
+    /// The registry sync loop (spec §9.4.2): every `interval`, fetch the external
+    /// registry's state and apply it to the local membership view, each entry
+    /// stamped with its revision so the merge converges on the registry's latest
+    /// state regardless of sync order (spec §9.2).
+    ///
+    /// - A snapshot whose global revision is **lower** than the last applied one is
+    ///   a stale read and is skipped: application is monotonic, so a laggy or
+    ///   replayed read can never revert a drain or resurrect a pruned tombstone.
+    /// - A member **absent** from the snapshot that a previous sync knew is
+    ///   deregistered: it moves `down` at the snapshot's revision and the node-down
+    ///   cascade runs (spec §8.1, §9.4.2 items 3–4).
+    /// - Registry **unavailability pauses membership changes only** (spec §9.4.2
+    ///   item 6): a failed fetch changes nothing, and the data plane keeps running
+    ///   on the last-synced view.
+    async fn registry_sync(self, client: Arc<dyn RegistryClient>, interval: Duration) {
+        let mut last_revision: Option<u64> = None;
+        // The members the registry was last seen to contain, so a later absence is
+        // recognized as a deregistration.
+        let mut registered: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
+        loop {
+            if let Ok(snapshot) = client.fetch().await {
+                // Skip stale reads (spec §9.4.2 item 1).
+                if last_revision.is_none_or(|last| snapshot.revision >= last) {
+                    let advanced = last_revision != Some(snapshot.revision);
+                    last_revision = Some(snapshot.revision);
+                    let now = self.inner.clock.now();
+                    let mut downed = Vec::new();
+                    let mut present = std::collections::BTreeSet::new();
+                    for entry in &snapshot.entries {
+                        present.insert(entry.node);
+                        let status = match entry.state {
+                            RegistryState::Up => MemberStatus::Up,
+                            RegistryState::Draining => MemberStatus::Draining,
+                        };
+                        if self.inner.membership.apply_stamped(
+                            entry.node,
+                            status,
+                            entry.revision,
                             now,
-                        )
-                    {
-                        downed.push(node);
+                        ) {
+                            downed.push(entry.node);
+                        }
                     }
-                }
-                registered = present;
-                for node in downed {
-                    system.node_down_cascade(node).await;
-                }
-                if advanced {
-                    system.inner.events.emit(Event::RegistrySynced {
-                        observer: system.node(),
-                        revision: snapshot.revision,
-                    });
+                    for &node in registered.iter() {
+                        if !present.contains(&node)
+                            && self.inner.membership.apply_stamped(
+                                node,
+                                MemberStatus::Down,
+                                snapshot.revision,
+                                now,
+                            )
+                        {
+                            downed.push(node);
+                        }
+                    }
+                    registered = present;
+                    for node in downed {
+                        self.node_down_cascade(node).await;
+                    }
+                    if advanced {
+                        self.inner.events.emit(Event::RegistrySynced {
+                            observer: self.node(),
+                            revision: snapshot.revision,
+                        });
+                    }
                 }
             }
-        }
-        system.inner.clock.sleep(interval).await;
-        if system.is_shutting_down() {
-            return;
+            self.inner.clock.sleep(interval).await;
+            if self.is_shutting_down() {
+                return;
+            }
         }
     }
-}
 
-/// Receptionist anti-entropy (spec §13): every `interval`, push this node's full
-/// registry to a random member, converging nodes that joined late or missed a
-/// broadcast. Actors hosted on a down node are skipped so a pruned registration
-/// is never resurrected (spec §8.1 step 5, §13 requirement 3).
-async fn receptionist_gossip<C, E, S, T>(system: ClusterSystem<C, E, S, T>, interval: Duration)
-where
-    C: Clock,
-    E: Entropy,
-    S: Spawner,
-    T: Transport,
-{
-    loop {
-        system.inner.clock.sleep(interval).await;
-        if system.is_shutting_down() {
-            return;
+    /// Receptionist anti-entropy (spec §13): every `interval`, push this node's full
+    /// registry to a random member, converging nodes that joined late or missed a
+    /// broadcast. Actors hosted on a down node are skipped so a pruned registration
+    /// is never resurrected (spec §8.1 step 5, §13 requirement 3).
+    async fn receptionist_gossip(self, interval: Duration) {
+        loop {
+            self.inner.clock.sleep(interval).await;
+            if self.is_shutting_down() {
+                return;
+            }
+
+            let entries: Vec<ReceptionistEntry> = self
+                .inner
+                .receptionist
+                .digest()
+                .into_iter()
+                .filter(|(_, _, actor)| !self.inner.membership.is_down(actor.node()))
+                .map(|(key, origin, actor)| ReceptionistEntry { key, origin, actor })
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+
+            let Some(target) = self.inner.membership.pick_probe_target(&self.inner.entropy) else {
+                continue;
+            };
+            let _ = self
+                .inner
+                .transport
+                .send(target, Frame::ReceptionistSync { entries })
+                .await;
         }
-
-        let entries: Vec<ReceptionistEntry> = system
-            .inner
-            .receptionist
-            .digest()
-            .into_iter()
-            .filter(|(_, _, actor)| !system.inner.membership.is_down(actor.node()))
-            .map(|(key, origin, actor)| ReceptionistEntry { key, origin, actor })
-            .collect();
-        if entries.is_empty() {
-            continue;
-        }
-
-        let Some(target) = system
-            .inner
-            .membership
-            .pick_probe_target(&system.inner.entropy)
-        else {
-            continue;
-        };
-        let _ = system
-            .inner
-            .transport
-            .send(target, Frame::ReceptionistSync { entries })
-            .await;
     }
 }

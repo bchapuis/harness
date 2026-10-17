@@ -54,7 +54,6 @@ pub use transport::Encryption;
 pub use transport::TcpConfig;
 pub use transport::TcpTransport;
 pub use transport::TlsConfig;
-pub use transport::WIRE;
 pub use transport::node_addr;
 
 /// A cluster node wired to the production runtime: tokio time and scheduling,

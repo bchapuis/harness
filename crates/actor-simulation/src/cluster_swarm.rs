@@ -11,7 +11,6 @@
 //! replacement) need the workload's [`Consent`], so a run only does to a
 //! workload what that workload said it could survive.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -43,6 +42,7 @@ use crate::Simulation;
 use crate::Violation;
 use crate::faults::RegistryFaultPolicy;
 use crate::invariant::Invariant;
+use crate::invariant::NoSilentLoss;
 use crate::invariant::default_invariants;
 use crate::registry::SimRegistry;
 use crate::workload::SweepFailure;
@@ -590,25 +590,18 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
 }
 
 /// How many `ask`s the run has issued but not yet resolved, read by
-/// [`drive_cluster`] to decide when the run has gone quiet. It counts the same
-/// bracket as the no-silent-loss invariant (spec §18.5 #1), per calling node
-/// and forgetting a node when it restarts, so the driver and the invariant
+/// [`drive_cluster`] to decide when the run has gone quiet. It is the
+/// no-silent-loss invariant itself (spec §18.5 #1), fed through the
+/// [`Checker`]'s own forget-then-observe step, so the driver and the invariant
 /// cannot disagree about what pending means: an ask issued by a process that
 /// has since died never reaches an outcome, and waiting for it would spend the
 /// whole settle cap on every restart.
 #[derive(Default)]
-struct AskTally {
-    outstanding: Mutex<BTreeMap<NodeId, i64>>,
-}
+struct AskTally(Mutex<NoSilentLoss>);
 
 impl AskTally {
     fn in_flight(&self) -> bool {
-        self.outstanding
-            .lock()
-            .expect("ask tally mutex poisoned")
-            .values()
-            .sum::<i64>()
-            > 0
+        self.0.lock().expect("ask tally mutex poisoned").pending() > 0
     }
 }
 
@@ -621,25 +614,11 @@ struct TallyingSink {
 
 impl actor_core::EventSink for TallyingSink {
     fn emit(&self, event: actor_core::Event) {
-        let mut outstanding = self
-            .tally
-            .outstanding
-            .lock()
-            .expect("ask tally mutex poisoned");
-        match &event {
-            actor_core::Event::AskIssued { caller, .. } => {
-                *outstanding.entry(*caller).or_default() += 1;
-            }
-            actor_core::Event::AskOutcome { caller, .. } => {
-                *outstanding.entry(*caller).or_default() -= 1;
-            }
-            _ => {
-                if let Some(crate::NodeRestarted { node }) = event.as_app() {
-                    outstanding.remove(node);
-                }
-            }
+        {
+            let mut tally = self.tally.0.lock().expect("ask tally mutex poisoned");
+            // A violation is the checker's to report; the tally only counts.
+            let _ = crate::check::feed(&mut *tally, &event);
         }
-        drop(outstanding);
         self.inner.emit(event);
     }
 }

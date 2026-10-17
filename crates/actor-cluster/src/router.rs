@@ -1,8 +1,8 @@
 //! Group routers over receptionist listings (utilities spec §3).
 //!
 //! A [`Router`] is a node-local, typed view over a receptionist [`Key`]: every
-//! routing decision draws from the **current serving listing** (core spec §13
-//! req 4) and picks one routee by strategy. It replicates nothing, introduces
+//! routing decision draws from the **current in-rotation listing** (core spec
+//! §13 req 4) and picks one routee by strategy. It replicates nothing, introduces
 //! no frames, and adds no delivery guarantee beyond the underlying `ask`/`tell`
 //! (core spec §7.2).
 //!
@@ -82,13 +82,13 @@ impl<A: Actor> Router<A> {
         }
     }
 
-    /// The current serving listing (a snapshot; core spec §13 req 4 filter
+    /// The current in-rotation listing (a snapshot; core spec §13 req 4 filter
     /// applies, so drained and down nodes' routees are omitted).
     pub fn routees(&self) -> Listing<A> {
         self.system.receptionist().lookup(self.key)
     }
 
-    /// Whether the group currently has no serving routee. A route now would
+    /// Whether the group currently has no routee in rotation. A route now would
     /// fail with [`CallError::DeadLetter`].
     pub fn is_empty(&self) -> bool {
         self.routees().is_empty()

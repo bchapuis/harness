@@ -1,11 +1,11 @@
 //! Reply handling (spec §4.5).
 //!
 //! A [`ReplyHandle`] carries the correlation and return channel for one inbound
-//! `ask`. `deliver` MUST resolve exactly one of [`send`](ReplyHandle::send),
-//! [`fail`](ReplyHandle::fail), or [`none`](ReplyHandle::none). Because
-//! application errors live inside `M::Reply` (spec §3.2), `send` carries both
-//! successful and application-failed outcomes; `fail` is reserved for transport
-//! or system failures the handler never produced.
+//! `ask`. `deliver` MUST resolve exactly one of [`send`](ReplyHandle::send) or
+//! [`fail`](ReplyHandle::fail). Because application errors live inside
+//! `M::Reply` (spec §3.2), `send` carries both successful and
+//! application-failed outcomes; `fail` is reserved for transport or system
+//! failures the handler never produced.
 
 use std::sync::Arc;
 
@@ -37,8 +37,13 @@ impl ReplyHandle {
 
     /// Serialize `reply` and return it to the caller (spec §4.5). Carries both
     /// successful and application-failed outcomes (the latter as values inside
-    /// `R`). Non-blocking: the return channel never applies backpressure.
+    /// `R`). Non-blocking: the return channel never applies backpressure. A
+    /// receiver already gone (a one-way `tell`, or an `ask` that stopped
+    /// waiting) reads nothing, so the reply is not encoded at all.
     pub fn send<R: SerializationRequirement>(self, reply: R) {
+        if self.tx.is_canceled() {
+            return;
+        }
         let encoded = actor_serialization::encode(&*self.codec, &reply).map_err(CallError::from);
         let _ = self.tx.send(encoded);
     }
@@ -50,8 +55,4 @@ impl ReplyHandle {
     pub fn fail(self, failure: CallError) {
         let _ = self.tx.send(Err(failure));
     }
-
-    /// Resolve with no reply, for a one-way `tell` (spec §4.5): dropping the
-    /// sender is the resolution, and the receiver observes a cancelled channel.
-    pub fn none(self) {}
 }

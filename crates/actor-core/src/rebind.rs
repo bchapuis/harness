@@ -2,9 +2,11 @@
 //!
 //! An [`ActorRef`](crate::ActorRef) serializes to just its `ActorId`; on the
 //! wire it carries no system handle. To deserialize one back into a usable
-//! handle, the decoder must know which system to bind it to. The cluster sets
-//! the *current system* around a message decode with [`with_decoding_system`],
-//! and `ActorRef`'s `Deserialize` reads it through `current_decoding_system`.
+//! handle, the decoder must know which system to bind it to. The two decode
+//! sites set the *current system* with [`with_decoding_system`]: the host
+//! around an inbound message (`LocalHost::deliver`), and `ActorRef` around a
+//! remote reply. `ActorRef`'s `Deserialize` reads it through
+//! `current_decoding_system`.
 //!
 //! The handle is a thread-local stack, so per-thread nested decodes are safe.
 //! Decoding is synchronous, so the current system never has to span an `.await`.
@@ -26,7 +28,7 @@ thread_local! {
 /// panic.
 ///
 /// [`ActorRef`]: crate::ActorRef
-pub fn with_decoding_system<S, R>(system: &S, f: impl FnOnce() -> R) -> R
+pub(crate) fn with_decoding_system<S, R>(system: &S, f: impl FnOnce() -> R) -> R
 where
     S: ActorSystem,
 {

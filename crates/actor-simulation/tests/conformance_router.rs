@@ -1,6 +1,6 @@
 //! Conformance: group routers (utilities spec §3).
 //!
-//! Routers are node-local functions over the serving listing, so there is no
+//! Routers are node-local functions over the in-rotation listing, so there is no
 //! numbered invariant, these tests pin the §3 requirements directly:
 //! deterministic round-robin in listing order, seeded (reproducible) random,
 //! cross-node agreement of rendezvous-hashed routing with minimal movement,
@@ -215,7 +215,7 @@ fn an_empty_group_fails_fast_with_dead_letter() {
 
 #[test]
 fn a_drained_routee_is_routed_around_until_resumed() {
-    // §3 item 2: decisions draw from the serving listing, so an operator drain
+    // §3 item 2: decisions draw from the in-rotation listing, so an operator drain
     // removes a routee from rotation and a resume restores it, without any
     // re-registration.
     let sim = Simulation::new(37);

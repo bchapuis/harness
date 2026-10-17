@@ -51,7 +51,7 @@ This is stricter than the receptionist's listing filter (core §13 req 4, which 
 A group router spreads calls over the actors registered under one receptionist `Key` (core §13).
 
 1. A router is a **node-local, typed view** over a receptionist `Key`. It MUST NOT replicate state of its own or introduce wire frames; the receptionist's replication is the only cluster state involved.
-2. Every routing decision MUST draw from the **current serving listing** (core §13 req 4) at decision time, so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and a `resume` restores it without re-registration.
+2. Every routing decision MUST draw from the **current in-rotation listing** (core §13 req 4) at decision time, so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and a `resume` restores it without re-registration.
 3. Strategies and keyed routing. An unkeyed route uses the router's `RouteStrategy`, one of two **keyless** choices:
    - **Round-robin** MUST cycle the listing in its deterministic order (the registry is an ordered set), so the cycle is reproducible under a fixed seed (core §18.1).
    - **Random** MUST draw from the system's seeded entropy (core §4.6, §18.1), never an ambient RNG.
@@ -99,7 +99,7 @@ The catalogue mirrors the core catalogue's structure (core §17, §18.5), machin
 | U1 | **Deterministic placement.** Rendezvous placement is a pure, version-stable function of the serving set and key: nodes with identical serving sets compute identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2 | property + cluster tests (`conformance_placement.rs`); pinned known-answer hash vectors |
 | U2 | **Singleton activation discipline.** A node never runs two live activations of one singleton name concurrently; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor failure re-activates the singleton within bounded logical time. | §4 | continuous checker (`singleton-at-most-one-per-node`, the per-node half); scenario + swarm tests (`conformance_singleton.rs`, `conformance_swarm.rs`) for the converged-exactly-one and re-activation halves |
 
-Group routers (§3) define no numbered invariant: selecting only from the current serving listing and failing fast when it is empty are local function properties, not emergent ones, pinned directly by `conformance_router.rs`.
+Group routers (§3) define no numbered invariant: selecting only from the current in-rotation listing and failing fast when it is empty are local function properties, not emergent ones, pinned directly by `conformance_router.rs`.
 
 The utilities are also held to the core testing contract (core §18.1, §18.3):
 

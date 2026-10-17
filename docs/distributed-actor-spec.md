@@ -256,7 +256,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn spawn_factory<A: Actor<System = Self>>(&self, factory: ActorFactory<A>, parent: Option<ActorId>) -> ActorRef<A>;
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>>;
     fn is_local(&self, id: &ActorId) -> bool;                                  // §4.3, from the id alone
-    fn is_serving(&self, node: NodeId) -> bool;                                // §9.4, §13; defaults to `true`
+    fn in_rotation(&self, node: NodeId) -> bool;                               // §9.4, §13; defaults to `true`
     fn codec(&self) -> Arc<dyn Codec>;                                         // §5
     fn remote_ask(&self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration)
         -> impl Future<Output = Result<Vec<u8>, CallError>> + Send;
@@ -269,7 +269,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
 }
 ```
 
-The provided forms (`spawn`, `spawn_with`, `resolve`, `now`, `sleep`, `receptionist`) are defined in terms of the supplied ones, and `is_serving` and `replicate_registration` carry single-node defaults (every node serves; nothing to replicate), so an implementation writes the second group and gets the first. On the transport boundary the wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations it does not expose as API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the receive loop invokes to dispatch a decoded message to a local actor (§4.4).
+The provided forms (`spawn`, `spawn_with`, `resolve`, `now`, `sleep`, `receptionist`) are defined in terms of the supplied ones, and `in_rotation` and `replicate_registration` carry single-node defaults (every node is in rotation; nothing to replicate), so an implementation writes the second group and gets the first. On the transport boundary the wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations it does not expose as API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
 ### 4.2 Lifecycle ordering
 
@@ -330,6 +330,8 @@ An optional derive MAY generate a message's `MANIFEST` and an actor's `register`
 2. **Local:** enqueue `msg` *by value* on the mailbox; await the typed reply. No serialization occurs.
 3. **Remote:** `payload = encode(codec, &msg)?`; `bytes = system.remote_ask(&self.id, M::MANIFEST, payload, deadline).await?`; return `decode::<M::Reply>(codec, &bytes)?`.
 
+`ask` brackets all three steps, whatever the path or outcome, with one `AskIssued` before step 1 and exactly one `AskOutcome` when the call resolves (§16, §18.5 #1). The bracket lives in this typed layer, the one place every `ask` passes, so an implementation's `remote_ask` emits neither.
+
 `tell<M>` is identical but expects no reply (`remote_tell`); for a local target it enqueues without a reply channel.
 
 **Inbound, system receive loop (remote path):**
@@ -351,11 +353,10 @@ pub struct ReplyHandle { /* opaque; holds correlation + reply channel */ }
 impl ReplyHandle {
     pub fn send<R: SerializationRequirement>(self, reply: R);  // serialize + return to caller
     pub fn fail(self, failure: CallError);                     // transport/system-level failure
-    pub fn none(self);                                         // for `tell`: no reply expected
 }
 ```
 
-These are synchronous: each serializes its outcome and hands it to the correlation channel, which applies no backpressure to the handler. `deliver` MUST resolve exactly one of them per `ask`. `send` carries both successful and application-failed outcomes (§3.2); `fail` is only for transport or system failures the handler never produced.
+These are synchronous: each serializes its outcome and hands it to the correlation channel, which applies no backpressure to the handler. `deliver` MUST resolve exactly one of them per `ask`. `send` skips the encode when nothing waits for the reply, as for a `tell` or an `ask` that stopped waiting. `send` carries both successful and application-failed outcomes (§3.2); `fail` is only for transport or system failures the handler never produced.
 
 ### 4.6 Runtime environment (clock, randomness, concurrency)
 
@@ -758,7 +759,7 @@ Requirements:
 1. The receptionist is not an actor and has no resolvable path (§3.6): it is a handle from `ActorSystem::receptionist`, available on every node without prior introduction, and its registrations replicate over the `Receptionist` frame (§7.1).
 2. Registrations are **replicated** across the cluster and **eventually consistent**. A CRDT (an OR-Set keyed by registering node) is RECOMMENDED so concurrent registrations merge without coordination.
 3. When a node goes `down` (§9.4), the receptionist MUST prune every registration whose actor is *hosted* on it, and subscribers MUST receive an updated `Listing`. Pruning is driven by the `Terminated` the cascade synthesizes for each watched actor (§8.1 step 4), so it follows the actor's host, not the node that registered it.
-4. A `lookup` or `subscribe` listing MUST omit actors on a node that is not serving: one an operator has `draining` (§9.4), or one that is `down`. A node confirmed `unreachable` (§10) but not `down` stays listed, since reachability is refutable and only the down authority takes a node out of rotation. A `draining` node's registrations are **retained** and routed around, not pruned; `resume` restores them without re-registration, and a drained node still answers a direct `ask`.
+4. A `lookup` or `subscribe` listing MUST omit actors on a node out of rotation: one an operator has `draining` (§9.4), or one that is `down`. A node confirmed `unreachable` (§10) but not `down` stays listed, since reachability is refutable and only the down authority takes a node out of rotation. A `draining` node's registrations are **retained** and routed around, not pruned; `resume` restores them without re-registration, and a drained node still answers a direct `ask`.
 5. `subscribe` MUST deliver the current listing on subscription and a fresh listing on every change.
 6. `Key` is typed by actor type, so `lookup` and `subscribe` return correctly typed `ActorRef`s.
 

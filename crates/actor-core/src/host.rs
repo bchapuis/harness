@@ -2,8 +2,8 @@
 //!
 //! **This module is not application API.** Programs use [`Actor`], [`ActorRef`],
 //! [`Ctx`], and the [`ActorSystem`] trait; only code implementing a *new*
-//! `ActorSystem` reaches for [`LocalHost`], [`WatchDelivery`], or
-//! [`ActorFactory`].
+//! `ActorSystem` reaches for [`LocalHost`], [`WatchDelivery`], [`ActorFactory`],
+//! [`ReceptionistState`], or [`DispatchFn`].
 //!
 //! Death-watch is split across the boundary. The host owns *local* delivery:
 //! when a watched actor on this node stops, its local watchers receive a
@@ -28,6 +28,9 @@ use std::sync::atomic::Ordering;
 use actor_serialization::Codec;
 use futures::FutureExt;
 
+pub use crate::receptionist::ReceptionistState;
+pub use crate::registry::DispatchFn;
+
 use crate::actor::Actor;
 use crate::actor::StopReason;
 use crate::actor::Terminated;
@@ -43,13 +46,13 @@ use crate::id::Path;
 use crate::mailbox::Envelope;
 use crate::mailbox::Inbox;
 use crate::mailbox::Mailbox;
+use crate::rebind::with_decoding_system;
 use crate::refs::ActorRef;
 use crate::registry::HandlerRegistry;
 use crate::reply::ReplyHandle;
 use crate::runtime::BoxFuture;
 use crate::runtime::Clock;
 use crate::runtime::Instant;
-use crate::runtime::Spawner;
 use crate::supervision::Fault;
 use crate::supervision::Supervision;
 use crate::supervision::SupervisionDirective;
@@ -216,8 +219,8 @@ impl LocalHost {
     /// `DeadLetter`, the one outcome that proves the command never ran (§8), so
     /// the caller re-resolves and re-issues safely.
     ///
-    /// A single-node system passes `0`: it has no restart-under-the-same-identity
-    /// path, and holding the value at zero keeps its ids byte-identical.
+    /// A single-node system passes `0`: every ref to its actors lives in its own
+    /// process and dies with it, so no stale ref can outlive a restart.
     pub fn with_incarnation(
         node: NodeId,
         events: Arc<dyn EventSink>,
@@ -305,21 +308,16 @@ impl LocalHost {
 
     /// Spawn an actor from a `factory`, returning a handle (spec §4.1, §4.2). The
     /// factory supplies the initial instance and any restart re-creations
-    /// (spec §11.2); `clock` drives supervision backoff. `parent` is the spawning
-    /// actor (the supervisor), or `None` for a root (spec §11.1).
-    pub fn spawn_actor<A, C, Sp>(
+    /// (spec §11.2). The executor runs on `system`'s spawner and takes
+    /// supervision backoff's time and jitter from its clock and entropy (§4.6).
+    /// `parent` is the spawning actor (the supervisor), or `None` for a root
+    /// (spec §11.1).
+    pub fn spawn_actor<A: Actor>(
         &self,
         system: A::System,
-        clock: C,
-        spawner: &Sp,
         factory: ActorFactory<A>,
         parent: Option<ActorId>,
-    ) -> ActorRef<A>
-    where
-        A: Actor,
-        C: Clock,
-        Sp: Spawner,
-    {
+    ) -> ActorRef<A> {
         let id = self.assign_id();
         let (mailbox, inbox) = Mailbox::<A>::channel(
             id.clone(),
@@ -348,14 +346,13 @@ impl LocalHost {
         let handle = ActorRef::from_parts(id.clone(), system.clone());
         let executor = Executor {
             host: self.clone(),
-            ctx: Ctx::<A>::new(id, system),
+            ctx: Ctx::<A>::new(id, system.clone()),
             factory,
             supervision: A::supervision(),
-            clock,
             restarts: Vec::new(),
             parent,
         };
-        spawner.launch(Box::pin(executor.run(inbox, escalation_rx)));
+        system.launch(Box::pin(executor.run(inbox, escalation_rx)));
 
         handle
     }
@@ -371,14 +368,16 @@ impl LocalHost {
             .map(|entry| entry.mailbox.clone())
     }
 
-    /// Dispatch an inbound remote message to a local actor (spec §4.4). A
+    /// Dispatch an inbound remote message to a local actor (spec §4.4), decoding
+    /// it with `system`'s codec and under `system`, so an `ActorRef` the message
+    /// carries rebinds to a usable handle on this node (invariant #10). A
     /// refusal always resolves `reply` with its error and is recorded as
     /// [`Event::Undelivered`]: an `ask` learns of it through the reply, but a
     /// one-way `tell` has no reply, and a message MUST NOT vanish without a
     /// trace (spec §6 rule 4).
-    pub fn deliver(
+    pub fn deliver<S: ActorSystem>(
         &self,
-        codec: &dyn Codec,
+        system: &S,
         recipient: &ActorId,
         manifest: &str,
         payload: &[u8],
@@ -389,7 +388,10 @@ impl LocalHost {
             actors.get(recipient).cloned()
         };
         let outcome = match entry {
-            Some(entry) => entry.deliver(codec, manifest, payload, reply),
+            Some(entry) => {
+                let codec = system.codec();
+                with_decoding_system(system, || entry.deliver(&*codec, manifest, payload, reply))
+            }
             None => {
                 reply.fail(CallError::DeadLetter);
                 Err(CallError::DeadLetter)
@@ -603,19 +605,19 @@ enum Step<A> {
 
 /// The serial executor + supervisor for one actor (spec §6, §11): the
 /// loop-invariant state of one actor's whole life (host, context, factory,
-/// supervision, clock) bundled once, so each step below reads as a method.
-struct Executor<A: Actor, C: Clock> {
+/// supervision) bundled once, so each step below reads as a method. The
+/// context's system supplies the clock and entropy supervision reads.
+struct Executor<A: Actor> {
     host: LocalHost,
     ctx: Ctx<A>,
     factory: ActorFactory<A>,
     supervision: Supervision,
-    clock: C,
     restarts: Vec<Instant>,
     /// The spawning actor (the supervisor), or `None` for a root (spec §11.1).
     parent: Option<ActorId>,
 }
 
-impl<A: Actor, C: Clock> Executor<A, C> {
+impl<A: Actor> Executor<A> {
     /// Run the actor's life to completion. Processes one message at a time (so
     /// `&mut self` is never aliased), and on a fault applies the actor's
     /// [`Supervision`] strategy: `Resume` keeps the actor, `Restart` re-creates
@@ -704,10 +706,12 @@ impl<A: Actor, C: Clock> Executor<A, C> {
     /// which emits the *effective* decision once it knows whether a fresh
     /// instance exists.
     async fn handle_fault(&mut self, fault: Fault, actor: A) -> Step<A> {
-        let (ctx, clock) = (&self.ctx, &self.clock);
-        let decision = supervise(&self.supervision, fault, clock, &mut self.restarts, &|| {
-            ctx.system().next_random()
-        })
+        let decision = supervise(
+            &self.supervision,
+            fault,
+            self.ctx.system(),
+            &mut self.restarts,
+        )
         .await;
         match decision {
             SupervisionDecision::Resume => {
@@ -838,15 +842,14 @@ async fn stop_contained<A: Actor>(actor: A, reason: StopReason) {
 /// Apply the supervision directive for `fault`, including the restart window
 /// (`max` within `within` → escalate to stop) and backoff sleep (spec §11.2),
 /// reporting the effective decision (`Stop` means "stop with `Failed`").
-/// `draw_random` yields a value from the system's seeded `Entropy` (§4.6) for
-/// backoff jitter; it is called only when a jittered sleep actually happens, so
-/// a non-restart fault consumes no randomness and never perturbs the run.
-async fn supervise<C: Clock>(
+/// `system` supplies the clock and, for backoff jitter, a draw from its seeded
+/// `Entropy` (§4.6). The draw happens only when a jittered sleep actually does,
+/// so a non-restart fault consumes no randomness and never perturbs the run.
+async fn supervise<S: ActorSystem>(
     supervision: &Supervision,
     fault: Fault,
-    clock: &C,
+    system: &S,
     restarts: &mut Vec<Instant>,
-    draw_random: &(dyn Fn() -> u64 + Send + Sync),
 ) -> SupervisionDecision {
     match supervision.decide(fault) {
         SupervisionDirective::Stop => SupervisionDecision::Stop,
@@ -863,7 +866,7 @@ async fn supervise<C: Clock>(
             within,
             backoff,
         } => {
-            let now = clock.now();
+            let now = system.now();
             restarts.retain(|t| now.duration_since(*t) < within);
             restarts.push(now);
             if restarts.len() as u32 > max {
@@ -873,9 +876,9 @@ async fn supervise<C: Clock>(
                 let delay = if base.is_zero() {
                     base
                 } else {
-                    jittered(base, draw_random())
+                    jittered(base, system.next_random())
                 };
-                clock.sleep(delay).await;
+                system.clock().sleep(delay).await;
                 SupervisionDecision::Restart
             }
         }

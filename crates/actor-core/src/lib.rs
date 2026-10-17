@@ -7,22 +7,22 @@
 //! the traits defined here, so simulation runs the real code rather than a
 //! model of it.
 
-pub mod actor;
-pub mod context;
-pub mod error;
-pub mod event;
+mod actor;
+mod context;
+mod error;
+mod event;
 pub mod host;
-pub mod id;
-pub mod mailbox;
-pub mod message;
-pub mod rebind;
-pub mod receptionist;
-pub mod refs;
-pub mod registry;
-pub mod reply;
-pub mod runtime;
-pub mod supervision;
-pub mod system;
+mod id;
+mod mailbox;
+mod message;
+mod rebind;
+mod receptionist;
+mod refs;
+mod registry;
+mod reply;
+mod runtime;
+mod supervision;
+mod system;
 
 pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationReason};
 // The codec vocabulary, re-exported so a deployment choosing a wire codec
@@ -35,7 +35,6 @@ pub use event::{AppEvent, Event, EventSink, SupervisionDecision};
 pub use id::{ActorId, NodeId, Path};
 pub use mailbox::Mailbox;
 pub use message::{Manifest, Message};
-pub use rebind::with_decoding_system;
 pub use receptionist::{Key, Listing, Receptionist};
 pub use refs::ActorRef;
 pub use registry::HandlerRegistry;

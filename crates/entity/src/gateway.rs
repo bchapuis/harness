@@ -36,11 +36,11 @@ use actor_core::ActorSystem;
 use actor_core::Ctx;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
+use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Terminated;
-use actor_core::receptionist::Key;
 use serde::Deserialize;
 use serde::Serialize;
 

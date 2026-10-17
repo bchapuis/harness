@@ -332,7 +332,7 @@ async fn read_record(sock: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 async fn handshake_raw(addr: SocketAddr, node: u64) -> TcpStream {
     let mut sock = TcpStream::connect(addr).await.unwrap();
     let hello = serde_json::json!({
-        "version": actor_runtime::WIRE.version(),
+        "version": actor_cluster::WIRE.version(),
         "node": node,
         // Dialed back only by endpoint gossip, and refused there: this end
         // speaks, it is never spoken to.

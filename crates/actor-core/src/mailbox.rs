@@ -39,8 +39,9 @@ use crate::runtime::Clock;
 type Runner<A> =
     Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>, Option<ReplyHandle>) -> BoxFuture<'a, ()> + Send>;
 
-/// The fire-and-forget runner shared by [`Mailbox::tell`] and
-/// [`Mailbox::try_tell`]: drives the handler to completion and discards the reply.
+/// The fire-and-forget runner shared by [`Mailbox::tell`], [`Mailbox::try_tell`],
+/// and the death-watch signal: drives the handler to completion and discards the
+/// reply.
 fn tell_runner<A, M>(msg: M) -> Runner<A>
 where
     A: Actor + Handler<M>,
@@ -122,6 +123,8 @@ impl<A: Actor> Mailbox<A> {
     /// Request/response: enqueue `msg` by value and await its typed reply (spec
     /// §4.4), failing with [`CallError::Timeout`] once `within` of `clock`'s
     /// time has elapsed (spec §14.2). No serialization occurs on this path.
+    /// Emits no `AskIssued`/`AskOutcome`: [`ActorRef::ask`](crate::ActorRef::ask)
+    /// brackets the call.
     pub async fn ask<M, C>(
         &self,
         msg: M,
@@ -133,15 +136,6 @@ impl<A: Actor> Mailbox<A> {
         M: Message,
         C: Clock,
     {
-        let manifest = M::MANIFEST;
-        // `AskIssued`/`AskOutcome` always pair, so a checker can prove every ask
-        // terminates and none stays pending at quiescence (invariant #1).
-        self.events.emit(Event::AskIssued {
-            actor: self.id.clone(),
-            // A local ask: the caller is the actor's own node by construction.
-            caller: self.id.node(),
-            manifest,
-        });
         let (reply_tx, reply_rx) = oneshot::channel::<M::Reply>();
         let run: Runner<A> = Box::new(move |actor, ctx, _reply| {
             Box::pin(async move {
@@ -150,27 +144,20 @@ impl<A: Actor> Mailbox<A> {
             })
         });
         let call = async {
-            match self.enqueue(Envelope::local(manifest, run)).await {
+            match self.enqueue(Envelope::local(M::MANIFEST, run)).await {
                 // Sender dropped without replying ⇒ the actor died mid-handling.
                 Ok(()) => reply_rx.await.map_err(|_| CallError::DeadLetter),
                 Err(err) => Err(err),
             }
         };
-        // The deadline is applied here, inside the event bracket, so a timed-out
-        // ask still reaches its `AskOutcome` (invariant #1). It covers the whole
-        // call, waiting for mailbox space as much as the reply. A handler still
-        // running when it elapses finishes on its own; its reply has no taker.
-        let result = match clock.timeout(within, call).await {
+        // The deadline covers the whole call, waiting for mailbox space as much
+        // as the reply, so a timed-out ask still resolves and its caller's
+        // bracket closes (invariant #1). A handler still running when it elapses
+        // finishes on its own; its reply has no taker.
+        match clock.timeout(within, call).await {
             Ok(result) => result,
             Err(_elapsed) => Err(CallError::Timeout),
-        };
-        self.events.emit(Event::AskOutcome {
-            actor: self.id.clone(),
-            caller: self.id.node(),
-            manifest,
-            failed: result.is_err(),
-        });
-        result
+        }
     }
 
     /// Fire-and-forget with backpressure: awaits mailbox space (spec §6).
@@ -281,12 +268,11 @@ impl<A: Actor> Mailbox<A> {
         // to mark the delivery on the event stream once it lands.
         let target = signal.id.clone();
         let reason = signal.reason;
-        let run: Runner<A> = Box::new(move |actor, ctx, _reply| {
-            Box::pin(async move {
-                actor.handle(signal, ctx).await;
-            })
-        });
-        if self.enqueue(Envelope::local(manifest, run)).await.is_ok() {
+        if self
+            .enqueue(Envelope::local(manifest, tell_runner(signal)))
+            .await
+            .is_ok()
+        {
             // The watcher's mailbox is the one and only point a `Terminated` is
             // actually *delivered* (spec §12, §16), so the event is emitted here:
             // a forward to another node is not a delivery, and a watch-after-death

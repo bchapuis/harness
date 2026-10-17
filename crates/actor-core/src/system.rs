@@ -45,7 +45,7 @@ use crate::runtime::Spawner;
 /// `launch`, `emit`, and `next_random`, taking its identity, time, randomness,
 /// scheduling, and observability from the system so one seed reproduces it under
 /// simulation. An implementation supplies the rest: `spawn_factory`,
-/// `resolve_local`, `is_local`, `is_serving`, `codec`, `remote_ask`/`remote_tell`,
+/// `resolve_local`, `is_local`, `in_rotation`, `codec`, `remote_ask`/`remote_tell`,
 /// `watch`/`unwatch`, `receptionist_state`, and `replicate_registration`. The
 /// provided methods define the first face in terms of the second.
 pub trait ActorSystem: Clone + Send + Sync + 'static {
@@ -99,14 +99,16 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// Classify `id` as owned by this node, from the id alone (spec §4.3).
     fn is_local(&self, id: &ActorId) -> bool;
 
-    /// Whether `node` is currently accepting new work: used to route service
-    /// discovery away from a node taken out of rotation. The default is `true`
-    /// (a system without membership treats every node as available); a clustered
+    /// Whether `node` is in rotation for service discovery: the receptionist
+    /// listing filter (spec §9.4, §13 requirement 4). The default is `true` (a
+    /// system without membership treats every node as available); a clustered
     /// system returns `false` for a node an operator has drained for maintenance,
-    /// or one that is down (spec §9.4, §13). It gates which actors a
-    /// receptionist [`lookup`](crate::Receptionist::lookup) hands back, not
-    /// whether a node is reachable: a drained node still answers direct calls.
-    fn is_serving(&self, _node: NodeId) -> bool {
+    /// or one that is down. It gates which actors a receptionist
+    /// [`lookup`](crate::Receptionist::lookup) hands back, not whether a node is
+    /// reachable: a drained node still answers direct calls. Looser than a
+    /// cluster's placement serving set, which also leaves out joining and
+    /// confirmed-unreachable nodes.
+    fn in_rotation(&self, _node: NodeId) -> bool {
         true
     }
 
@@ -115,15 +117,9 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn codec(&self) -> Arc<dyn Codec>;
 
     /// Send an already-encoded request to a remote actor and await its encoded
-    /// reply (spec §4.1, transport boundary).
-    ///
-    /// **Contract (invariant #1):** the implementation must bracket every call
-    /// with [`Event::AskIssued`] before dispatch and exactly one
-    /// [`Event::AskOutcome`] when it resolves (success or [`CallError`] alike)
-    /// mirroring the bracket [`Mailbox::ask`] emits on the local path. The
-    /// checker proves no ask is silently lost from those pairs, so an
-    /// implementation that skips them hides exactly the losses the invariant
-    /// exists to catch.
+    /// reply (spec §4.1, transport boundary). The typed caller,
+    /// [`ActorRef::ask`], brackets the call with [`Event::AskIssued`] and
+    /// [`Event::AskOutcome`], so an implementation emits neither.
     fn remote_ask(
         &self,
         recipient: &ActorId,
@@ -316,13 +312,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
         factory: ActorFactory<A>,
         parent: Option<ActorId>,
     ) -> ActorRef<A> {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            factory,
-            parent,
-        )
+        self.inner.host.spawn_actor(self.clone(), factory, parent)
     }
 
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {

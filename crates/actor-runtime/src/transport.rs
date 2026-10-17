@@ -32,6 +32,7 @@ use std::time::Duration;
 use actor_cluster::Frame;
 use actor_cluster::Transport;
 use actor_cluster::TransportError;
+use actor_cluster::WIRE;
 use actor_core::NodeId;
 use actor_serialization::Codec;
 use tokio::io::AsyncRead;
@@ -57,13 +58,6 @@ use crate::wire::read_hello;
 use crate::wire::read_wire;
 use crate::wire::write_hello;
 use crate::wire::write_wire;
-
-/// The wire version this build speaks (spec §7.1, compatibility spec §3).
-///
-/// Defined with the protocol it governs ([`actor_cluster::WIRE`]) and re-exported
-/// here, where the handshake that announces it lives, so this transport and the
-/// simulator's cannot drift apart on what a build speaks.
-pub use actor_cluster::WIRE;
 
 /// The transport address of node `id`: `host` at port `port_base + id - 1`.
 ///

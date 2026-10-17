@@ -216,8 +216,8 @@ impl<S: ActorSystem> Receptionist<S> {
             .replicate_registration(key.id(), node, who.id().clone());
     }
 
-    /// The current listing for `key` (spec §13). Actors on a node that is not
-    /// serving, drained for maintenance or down (spec §9.4), stay registered but
+    /// The current listing for `key` (spec §13). Actors on a node out of
+    /// rotation, drained for maintenance or down (spec §9.4), stay registered but
     /// are omitted here, so a caller never discovers a cordoned node and a later
     /// `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
@@ -258,14 +258,14 @@ impl<S: ActorSystem> Receptionist<S> {
     }
 }
 
-/// Build the listing for a set of registered ids: the one place the
-/// route-around-non-serving-nodes rule lives (spec §9.4), shared by `lookup`
-/// and `subscribe`.
+/// Build the listing for a set of registered ids: the one place the rule that
+/// lists only nodes in rotation lives (spec §9.4, §13 requirement 4), shared by
+/// `lookup` and `subscribe`.
 fn listing<A: Actor<System = S>, S: ActorSystem>(system: &S, ids: Vec<ActorId>) -> Listing<A> {
     Listing {
         refs: ids
             .into_iter()
-            .filter(|id| system.is_serving(id.node()))
+            .filter(|id| system.in_rotation(id.node()))
             .map(|id| system.resolve::<A>(id))
             .collect(),
     }
