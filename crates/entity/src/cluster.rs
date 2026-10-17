@@ -18,6 +18,22 @@ pub use crate::system::FailureDomains;
 pub use crate::system::ShardId;
 pub use crate::system::shard_for;
 
+/// The replica-store protocol (spec §7.2, §8): the messages a shard leader sends a
+/// replica's store, one per [`ReplicaTransport`] method, public because the trait's
+/// signatures carry them.
+pub mod replica {
+    pub use crate::replica_store::GetBlob;
+    pub use crate::replica_store::HasBlob;
+    pub use crate::replica_store::ListBlobs;
+    pub use crate::replica_store::ListEntities;
+    pub use crate::replica_store::Prepare;
+    pub use crate::replica_store::PutBlob;
+    pub use crate::replica_store::SealRange;
+    pub use crate::replica_store::StoreRecord;
+    pub use crate::replica_store::StoreSnapshot;
+    pub use crate::replica_store::SweepBlobs;
+}
+
 /// The alarm index's runtime vocabulary (spec §7.16): the per-shard entity that
 /// lets an alarmed entity hibernate without losing its deadline, and the commands
 /// its driver speaks to it.

@@ -81,11 +81,13 @@ pub use crate::ws::WsError;
 pub use crate::ws::WsHandle;
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blobs::PendingRoots;
 use crate::facet_blobs::RootSet;
 
 /// The record tag of facet 0: the entity's own event fold (spec §7.12).
@@ -819,6 +821,10 @@ pub(crate) struct FacetCell<FS: FacetSet> {
     /// [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) its roots: a set kept anywhere
     /// else would be swept by the entity's own sweep.
     state_roots: Mutex<RootSet>,
+    /// The activation's blob puts its roots may not show yet (**F3**): shared with
+    /// every [`EntityBlobs`](crate::blobs::EntityBlobs) handle the activation builds,
+    /// and turned over as each command begins.
+    pending_roots: Arc<PendingRoots>,
 }
 
 impl<FS: FacetSet> FacetCell<FS> {
@@ -848,10 +854,20 @@ impl<FS: FacetSet> FacetCell<FS> {
             forms: Mutex::new(FS::Forms::default()),
             stages: Mutex::new(None),
             state_roots: Mutex::new(RootSet::default()),
+            pending_roots: Arc::new(PendingRoots::default()),
         }
     }
 
+    /// The activation's pending roots, for the blob handles it builds.
+    pub(crate) fn pending_roots(&self) -> &Arc<PendingRoots> {
+        &self.pending_roots
+    }
+
+    /// Arm a fresh stage for a command. Also the turn boundary for the blobs the
+    /// previous command (and any snapshot after it) put: they are rooted by now or
+    /// orphans of a failed commit ([`PendingRoots::start_turn`]).
     pub(crate) fn begin(&self) -> Result<(), FacetError> {
+        self.pending_roots.start_turn();
         let mut forms = self.forms.lock().expect("facet forms lock");
         let mut stages = self.stages.lock().expect("facet stages lock");
         let mut fresh = FS::Stages::default();

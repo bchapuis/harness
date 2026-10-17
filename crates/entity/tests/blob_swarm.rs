@@ -5,7 +5,7 @@
 //! one tampered copy). This file applies the V&V doctrine the other way round: a
 //! [`ClusterWorkload`] of blob put/get/has/gc traffic is swept across many seeds
 //! while a seeded nemesis injects partitions, crashes, heals, loss, duplication,
-//! and delay (spec §18.3) on the *unfenced* blob RPCs (`StoreBlob`, `FetchBlob`,
+//! and delay (spec §18.3) on the *unfenced* blob RPCs (`PutBlob`, `GetBlob`,
 //! `SweepBlobs`), and a [`Checker`] watches the §13 event stream live. Four
 //! properties are asserted, the way the record path asserts its own in
 //! `entity_swarm.rs`:
@@ -16,11 +16,11 @@
 //!   a shared flag: the blob path is off the event stream (no `Seq`/term, so no
 //!   `EntityEvent`), where an event-stream invariant cannot see it. Also covers
 //!   idempotent/duplicate-tolerant put: a duplication fault re-delivering a
-//!   `StoreBlob` must not change the id (E18).
+//!   `PutBlob` must not change the id (E18).
 //! - **Safety core under faults (#4).** [`default_invariants`] (no-silent-loss,
 //!   serial execution, lifecycle exactly-once) hold on every run, so the new
-//!   blob RPCs integrate with §14 no-silent-loss: each fanned `StoreBlob`/
-//!   `FetchBlob` ask closes its `AskIssued`/`AskOutcome` bracket even when it is
+//!   blob RPCs integrate with §14 no-silent-loss: each fanned `PutBlob`/
+//!   `GetBlob` ask closes its `AskIssued`/`AskOutcome` bracket even when it is
 //!   the drained straggler of a committed quorum.
 //! - **Seed-reproducibility (#7).** The same seed yields a byte-identical event
 //!   stream ([`check_cluster_reproducible`]).

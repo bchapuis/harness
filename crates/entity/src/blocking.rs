@@ -31,12 +31,13 @@
 //! order, just on a different thread.
 //!
 //! **Which calls come through here.** Everything that writes the device:
-//! `store_record`, `store_snapshot`, `prepare` (it rewrites the shard's fence file
-//! whenever the term advances), `seal_range`, `put_blob`, and the reclamation calls
-//! `delete_blob`, `retain_blobs` and `delete_blobs`; a sweep is not an fsync but it
-//! unlinks one file per reclaimed blob, so an entity that has churned a large disk
-//! image makes thousands of synchronous unlinks against the device the durability
-//! path needs. Reads do not (`head`, `read`, `snapshot`, `get_blob`, `has_blob`,
+//! `store_record`, `store_snapshot`, `truncate`, `prepare` (it rewrites the shard's
+//! fence file whenever the term advances), `put_blob`, the split/merge calls
+//! `seal_range`, `unseal`, `remove_range` and `drop_shard`, and the reclamation calls
+//! `delete_blob`, `retain_blobs` and `delete_blobs`. A sweep or a range removal is not
+//! an fsync, but it unlinks one file per reclaimed blob or entity, so an entity that
+//! has churned a large disk image, or a split that moves thousands of entities, makes
+//! thousands of synchronous unlinks against the device the durability path needs. Reads do not (`head`, `read`, `snapshot`, `get_blob`, `has_blob`,
 //! `blob_ids`, `entities`), and that is a deliberate line rather than an omission:
 //! the argument above is about a device stalling *while a durability barrier is
 //! open*; a read has no barrier to hold, is usually served from the store's loaded
@@ -45,8 +46,10 @@
 //! deployment that finds its reads stalling should move them across too, but that is
 //! a decision to take on evidence, not a gap to close on symmetry.
 //!
-//! Call it through [`on_store`] rather than `offload` directly, so the line above is
-//! one a reader can check by grep instead of by reading every call site.
+//! The runtime reaches its store only through [`NodeStore`], whose write methods offload
+//! themselves and whose reads run inline, so the line above is the handle's interface:
+//! a write cannot be issued on the calling thread by forgetting to wrap it, and a
+//! reader checks the policy in one place instead of at every call site.
 //!
 //! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
 //! the *production* store: `raft_journal.rs` cold-restarts a real
@@ -56,7 +59,20 @@
 //! is therefore the default and runs the job on the calling thread, reproducing
 //! today's behaviour exactly; a deployment opts into [`ThreadPoolIo`].
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use crate::blobs::BlobId;
+use crate::entity::EntityName;
+use crate::journal::RecordPage;
+use crate::journal::Seq;
+use crate::journal::Term;
+use crate::store::BlobAck;
+use crate::store::EntityStore;
+use crate::store::ReadOutcome;
+use crate::store::ReadReply;
+use crate::store::StoreAck;
+use crate::store::WriteKind;
 
 /// A unit of blocking work: one synchronous store call.
 pub(crate) type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -105,30 +121,221 @@ where
     rx.await.expect("an accepted job always sends its value")
 }
 
-/// Run one [`EntityStore`] call on `io` and await its outcome: `offload` in the
-/// shape every replication seam wants, and **the** way a store call reaches the pool.
+/// This node's durable store as the runtime calls it (spec §7.4): the [`EntityStore`]
+/// plug point paired with the [`BlockingIo`] its writes run on. Built once per hosted
+/// entity type at `entities()` time and cloned into every journal, replicator, shard
+/// map, and replica-store actor that type uses.
 ///
-/// The `Arc::clone` is here rather than at each call site: the job must own
-/// everything it touches to be `'static`, so every caller wrote the same two lines
-/// ahead of the same `offload`. Naming the pattern also makes it greppable: which
-/// store calls run on the pool is a policy question (see the module docs), not an
-/// accident of how each site was written.
+/// **Writes** (everything that changes the device: the module docs list them) are
+/// `async` and run on the pool. Each returns a future that owns what it needs, so it
+/// can join a quorum's fan-out or outlive its caller's borrow, and that submits its job
+/// on **first poll**, not when it is built: a quorum append builds the local write
+/// beside the peer asks and the peers go on the wire first (see `local_store_ack` in
+/// the replicator).
 ///
-/// The outcome comes back as whatever the call returns, unexamined: a store call's
-/// ack is the caller's to read where it means something (**E14**), and a helper that
-/// inspected or discarded it here would move that decision away from the site that
-/// makes it.
-pub(crate) async fn on_store<T, F>(
-    io: &Arc<dyn BlockingIo>,
-    store: &Arc<dyn crate::store::EntityStore>,
-    call: F,
-) -> T
-where
-    T: Send + 'static,
-    F: FnOnce(&dyn crate::store::EntityStore) -> T + Send + 'static,
-{
-    let store = Arc::clone(store);
-    offload(io, move || call(store.as_ref())).await
+/// The pool promises threads, not order ([`BlockingIo`]), so a caller that needs one
+/// write to land before its next step **awaits** it: the store's effect has happened
+/// when the future resolves, with the guarantees [`EntityStore`] states for the call.
+///
+/// **Reads** stay synchronous and inline, for the reason the module docs give: no
+/// durability barrier is open across them, and they sit on the activation path.
+#[derive(Clone)]
+pub struct NodeStore {
+    store: Arc<dyn EntityStore>,
+    io: Arc<dyn BlockingIo>,
+}
+
+impl NodeStore {
+    /// `store`'s calls, with its writes on `io`.
+    pub(crate) fn new(store: Arc<dyn EntityStore>, io: Arc<dyn BlockingIo>) -> NodeStore {
+        NodeStore { store, io }
+    }
+
+    /// Run one store write on the pool. The outcome comes back unexamined: a store
+    /// call's ack is the caller's to read where it means something (**E14**).
+    fn write<T, F>(&self, call: F) -> impl Future<Output = T> + Send + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn EntityStore) -> T + Send + 'static,
+    {
+        let (io, store) = (Arc::clone(&self.io), Arc::clone(&self.store));
+        // An `async` block runs nothing until polled, which is what defers the submit.
+        async move { offload(&io, move || call(store.as_ref())).await }
+    }
+
+    // --- writes: offloaded, see the type docs ---
+
+    /// [`EntityStore::store_record`] on the pool.
+    pub(crate) fn store_record(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        after: Seq,
+        term: Term,
+        records: Vec<Vec<u8>>,
+        kind: WriteKind,
+    ) -> impl Future<Output = StoreAck> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.store_record(shard, &entity, after, term, records, kind))
+    }
+
+    /// [`EntityStore::store_snapshot`] on the pool.
+    pub(crate) fn store_snapshot(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        at: Seq,
+        term: Term,
+        state: Vec<u8>,
+        kind: WriteKind,
+    ) -> impl Future<Output = StoreAck> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.store_snapshot(shard, &entity, at, term, state, kind))
+    }
+
+    /// [`EntityStore::prepare`] on the pool: it rewrites the shard's fence file
+    /// whenever the term advances, so every failover makes it a durable write.
+    pub(crate) fn prepare(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        term: Term,
+    ) -> impl Future<Output = ReadOutcome> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.prepare(shard, &entity, term))
+    }
+
+    /// [`EntityStore::truncate`] on the pool.
+    pub(crate) fn truncate(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        after: Seq,
+        term: Term,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.truncate(shard, &entity, after, term))
+    }
+
+    /// [`EntityStore::put_blob`] on the pool.
+    pub(crate) fn put_blob(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> impl Future<Output = BlobAck> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.put_blob(shard, &entity, id, bytes))
+    }
+
+    /// [`EntityStore::delete_blob`] on the pool.
+    pub(crate) fn delete_blob(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        id: BlobId,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.delete_blob(shard, &entity, id))
+    }
+
+    /// [`EntityStore::delete_blobs`] on the pool.
+    pub(crate) fn delete_blobs(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.delete_blobs(shard, &entity))
+    }
+
+    /// [`EntityStore::retain_blobs`] on the pool.
+    pub(crate) fn retain_blobs(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        retain: BTreeSet<BlobId>,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        let entity = entity.clone();
+        self.write(move |store| store.retain_blobs(shard, &entity, &retain))
+    }
+
+    /// [`EntityStore::seal_range`] on the pool.
+    pub(crate) fn seal_range(
+        &self,
+        shard: u32,
+        from: u64,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        self.write(move |store| store.seal_range(shard, from))
+    }
+
+    /// [`EntityStore::unseal`] on the pool.
+    pub(crate) fn unseal(&self, shard: u32) -> impl Future<Output = ()> + Send + use<> {
+        self.write(move |store| store.unseal(shard))
+    }
+
+    /// [`EntityStore::remove_range`] on the pool: one unlink per moved entity.
+    pub(crate) fn remove_range(
+        &self,
+        shard: u32,
+        from: u64,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        self.write(move |store| store.remove_range(shard, from))
+    }
+
+    /// [`EntityStore::drop_shard`] on the pool: one unlink per entity in the shard.
+    pub(crate) fn drop_shard(&self, shard: u32) -> impl Future<Output = ()> + Send + use<> {
+        self.write(move |store| store.drop_shard(shard))
+    }
+
+    // --- reads: inline, see the type docs ---
+
+    pub(crate) fn read(&self, shard: u32, entity: &EntityName) -> ReadReply {
+        self.store.read(shard, entity)
+    }
+
+    pub(crate) fn head(&self, shard: u32, entity: &EntityName) -> Seq {
+        self.store.head(shard, entity)
+    }
+
+    pub(crate) fn snapshot(&self, shard: u32, entity: &EntityName) -> Option<(Seq, Vec<u8>)> {
+        self.store.snapshot(shard, entity)
+    }
+
+    pub(crate) fn read_from(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        from: Seq,
+        limit: usize,
+    ) -> RecordPage {
+        self.store.read_from(shard, entity, from, limit)
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.store.failed()
+    }
+
+    pub(crate) fn get_blob(&self, shard: u32, entity: &EntityName, id: BlobId) -> Option<Vec<u8>> {
+        self.store.get_blob(shard, entity, id)
+    }
+
+    pub(crate) fn has_blob(&self, shard: u32, entity: &EntityName, id: BlobId) -> bool {
+        self.store.has_blob(shard, entity, id)
+    }
+
+    pub(crate) fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<BlobId> {
+        self.store.blob_ids(shard, entity)
+    }
+
+    pub(crate) fn entities(&self, shard: u32) -> Vec<EntityName> {
+        self.store.entities(shard)
+    }
+
+    pub(crate) fn shard_bytes(&self, shard: u32) -> u64 {
+        self.store.shard_bytes(shard)
+    }
 }
 
 /// Run the job on the calling thread: the default, and the only implementation the
@@ -228,6 +435,42 @@ impl Drop for ThreadPoolIo {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+    }
+}
+
+/// A pool that accepts jobs and runs none of them until told, standing in for a
+/// device that has not answered yet. [`InlineIo`] cannot express that, because it runs
+/// the job inside `submit` and so can never be observed mid-flight.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DeferredIo {
+    queued: std::sync::Mutex<Vec<Job>>,
+    submitted: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl DeferredIo {
+    /// How many jobs have been submitted so far, run or not.
+    pub(crate) fn submitted(&self) -> usize {
+        self.submitted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Let the device answer: run every queued job, in submission order.
+    pub(crate) fn run_queued(&self) {
+        let jobs: Vec<Job> = std::mem::take(&mut *self.queued.lock().unwrap());
+        for job in jobs {
+            job();
+        }
+    }
+}
+
+#[cfg(test)]
+impl BlockingIo for DeferredIo {
+    fn submit(&self, job: Job) -> bool {
+        self.submitted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.queued.lock().unwrap().push(job);
+        true
     }
 }
 

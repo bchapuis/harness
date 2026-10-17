@@ -49,14 +49,16 @@
 //! [`atomic_replace`] writes `tmp → fsync → rename → fsync dir` so a reader sees
 //! either the old file or the whole new one, never a torn mix. [`Sidecar`] is the
 //! stamped, checksummed `u64` sidecar every such file in the tree is (a fence term,
-//! a seal bound, a deletion stamp), written and read here once; [`checksum`] and
+//! a seal bound), written and read here once; [`checksum`] and
 //! [`sync_dir`] are exposed for framing one's own sidecar bytes.
 //!
 //! # Failure policy
 //!
 //! Every method returns [`io::Result`]: this crate does not decide what an I/O
-//! failure *means*. The caller does: code that cannot persist a record it must not
-//! lose may have no safe way to continue, so it panics with a domain-specific message.
+//! failure *means*. The caller does. Code that cannot persist a record it must not
+//! lose cannot safely acknowledge anything after it, so both callers in this tree
+//! poison themselves: they record the cause and refuse every later write, rather
+//! than unwinding a task and leaving the node up with nothing behind it.
 //!
 //! [`open`](Wal::open) has a second failure that is not an I/O event at all: a file
 //! this build cannot read. The bytes are intact and the disk is fine; the refusal is
@@ -125,7 +127,10 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// A crash between create and rename leaves the scratch file behind, where the old
 /// fixed name would have been reused by the next call. Every directory this crate's
 /// callers scan already skips names it cannot decode (a blob id, a shard number), so
-/// a stray is inert, and entity's blob sweep removes anything not retained.
+/// a stray is inert. It is also indistinguishable from the live scratch file of a call
+/// still in flight, so a caller removes strays only with the whole directory (entity's
+/// blob area goes when the entity is destroyed or its range reclaimed), never by name
+/// while another call may be replacing into it: that would fail the call's rename.
 fn temp_name(name: &str) -> String {
     let seq = REPLACE_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{name}.{}.{seq}.tmp", std::process::id())
@@ -141,6 +146,10 @@ fn temp_name(name: &str) -> String {
 /// decides the winner. Concurrent callers writing *different* bytes still race for
 /// which content survives (this replaces atomically, it does not serialize), but the
 /// file that lands is always exactly one caller's whole bytes.
+///
+/// The scratch file lives in `dir` until the rename, so a caller that deletes names in
+/// `dir` it does not recognize MUST NOT do so while a call may be in flight there:
+/// deleting a live scratch file fails that call with `ENOENT` (see [`temp_name`]).
 pub fn atomic_replace(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let tmp_path = dir.join(temp_name(name));
     let final_path = dir.join(name);

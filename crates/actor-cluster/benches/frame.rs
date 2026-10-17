@@ -15,7 +15,7 @@
 //! - [`Frame::Envelope`] is the **request** direction: a blob being replicated to a
 //!   peer, an entity record being appended. Its `payload` takes
 //!   `#[serde(with = "serde_bytes")]` directly.
-//! - [`Frame::Reply`] is the **answer**: a `fetch_blob` returning a block to a leader
+//! - [`Frame::Reply`] is the **answer**: a `get_blob` returning a block to a leader
 //!   that lacks it, an entity read returning its records. Its outcome is `ReplyResult`,
 //!   a `Result<Vec<u8>, CallError>` *type alias* with no field to hang an attribute
 //!   on, so `protocol::reply_bytes` mirrors serde's `Result` representation instead.

@@ -33,6 +33,7 @@ use async_channel::Receiver;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blocking::NodeStore;
 use crate::event::EntityEvent;
 use crate::journal::DynEntityJournal;
 use crate::memory::LocalEntityJournal;
@@ -42,7 +43,6 @@ use crate::replicator::InFlight;
 use crate::replicator::MergeRole;
 use crate::replicator::QuorumReplicator;
 use crate::replicator::SplitPlan;
-use crate::store::EntityStore;
 use crate::system::KeyRange;
 use crate::system::MAP_SHARD_INDEX;
 use crate::system::ShardId;
@@ -286,26 +286,18 @@ fn admit(
 // --- the `Local` tier: the single node replicates everything ---------------------------
 
 /// The single-node shard map (`Local` tier): this node is the sole replica of every
-/// shard, all keyed in one local [`EntityStore`] by shard index.
+/// shard, all keyed in one local [`NodeStore`] by shard index.
 pub(crate) struct LocalShardMap {
     node: NodeId,
     journals: Vec<Arc<dyn DynEntityJournal>>,
 }
 
 impl LocalShardMap {
-    pub(crate) fn new(
-        node: NodeId,
-        shards: usize,
-        store: Arc<dyn EntityStore>,
-        io: Arc<dyn crate::blocking::BlockingIo>,
-    ) -> LocalShardMap {
+    pub(crate) fn new(node: NodeId, shards: usize, store: NodeStore) -> LocalShardMap {
         let journals = (0..shards)
             .map(|shard| {
-                Arc::new(LocalEntityJournal::over(
-                    Arc::clone(&store),
-                    shard as u32,
-                    Arc::clone(&io),
-                )) as Arc<dyn DynEntityJournal>
+                Arc::new(LocalEntityJournal::over(store.clone(), shard as u32))
+                    as Arc<dyn DynEntityJournal>
             })
             .collect();
         LocalShardMap { node, journals }
@@ -496,9 +488,8 @@ impl RaftShardMap {
         shards: usize,
         replicas: usize,
         split_target_bytes: u64,
-        local: Arc<dyn EntityStore>,
+        local: NodeStore,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
         domains: Option<crate::system::FailureDomains>,
         emit: EmitEvent,
@@ -538,9 +529,8 @@ impl RaftShardMap {
                 self_node,
                 inner: Arc::clone(&inner),
                 handles: Arc::clone(&handles),
-                local: Arc::clone(&local),
+                local: local.clone(),
                 transport,
-                io,
                 deadlines,
                 emit: Arc::clone(&emit),
             },
@@ -764,16 +754,17 @@ impl ShardMapSource for RaftShardMap {
 /// append still completes or fails cleanly as `NotLeader`.
 ///
 /// Every method runs on [`apply_loop`]'s single task, in committed order, so none
-/// of them races another.
+/// of them races another. A method that writes this node's store awaits the write
+/// (on the blocking pool, see [`crate::blocking`]) before it moves on, so the store
+/// sees one command's effects complete, in order, before the next command's begin.
 struct ShardApply<R: RaftConsensus> {
     consensus: R,
     entity_type: &'static str,
     self_node: NodeId,
     inner: Arc<Mutex<Inner>>,
     handles: Arc<Mutex<ShardHandles<R>>>,
-    local: Arc<dyn EntityStore>,
+    local: NodeStore,
     transport: Arc<dyn ReplicaTransport>,
-    io: Arc<dyn crate::blocking::BlockingIo>,
     deadlines: crate::replicator::Deadlines,
     emit: EmitEvent,
 }
@@ -789,9 +780,8 @@ impl<R: RaftConsensus> ShardApply<R> {
             shard_group,
             shard,
             allocation,
-            Arc::clone(&self.local),
+            self.local.clone(),
             Arc::clone(&self.transport),
-            Arc::clone(&self.io),
             self.deadlines,
         );
         self.handles
@@ -803,6 +793,16 @@ impl<R: RaftConsensus> ShardApply<R> {
             .expect("shard map mutex poisoned")
             .journals
             .insert(shard, Arc::new(replicator) as Arc<dyn DynEntityJournal>);
+    }
+
+    /// Whether this node hosts `shard`'s journal. Read under the handles lock and
+    /// released at once, so no store write below holds it across its await; only
+    /// this task changes the set, so the answer stays true for the write after it.
+    fn hosts(&self, shard: u32) -> bool {
+        self.handles
+            .lock()
+            .expect("shard handles mutex poisoned")
+            .contains_key(&shard)
     }
 
     /// The founding allocation for a shard, or the start of a migration toward
@@ -913,7 +913,7 @@ impl<R: RaftConsensus> ShardApply<R> {
     }
 
     /// A split was proposed: record the plan and freeze the moving range (§7.7).
-    fn split_started(&self, parent: u32, child: u32, boundary: u64) {
+    async fn split_started(&self, parent: u32, child: u32, boundary: u64) {
         // Deterministic validation against committed state: a pure
         // function of (command, map state), so every node accepts or
         // rejects identically. Rejection is a silent no-op: the proposer
@@ -943,15 +943,14 @@ impl<R: RaftConsensus> ShardApply<R> {
             // The plan on the shared allocation is the leader-local freeze; a
             // parent replica also bounds its own store as apply-time catch-up.
             // The driver's majority-acked seal fan is the authoritative barrier.
-            let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if handles.contains_key(&parent) {
-                self.local.seal_range(parent, boundary);
+            if self.hosts(parent) {
+                self.local.seal_range(parent, boundary).await;
             }
         }
     }
 
     /// A split committed: the child becomes a shard of its own (§7.7).
-    fn split_committed(&self, parent: u32) {
+    async fn split_committed(&self, parent: u32) {
         // Flip the mapping: shrink the parent's range, allocate the
         // child on the parent's replicas. A duplicate commit finds no
         // plan and is a no-op.
@@ -992,14 +991,12 @@ impl<R: RaftConsensus> ShardApply<R> {
         // missed the driver's fan, and GC the moved entities' parent-keyed
         // data; the child copy is quorum-durable, that is what licensed
         // `SplitCommitted`.
-        {
-            let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if handles.contains_key(&parent) {
-                // One bound and one range reclamation, rather than a walk
-                // of every entity in the shard (§7.7).
-                self.local.seal_range(parent, plan.boundary);
-                self.local.remove_range(parent, plan.boundary);
-            }
+        if self.hosts(parent) {
+            // One bound and one range reclamation, rather than a walk of every
+            // entity in the shard (§7.7). The bound lands first, so no append to the
+            // moved range can reach this store after its data is gone.
+            self.local.seal_range(parent, plan.boundary).await;
+            self.local.remove_range(parent, plan.boundary).await;
         }
         // Child replicas (the parent's set, inherited): create the
         // child's leader-election group and journal, only now, so no
@@ -1021,7 +1018,7 @@ impl<R: RaftConsensus> ShardApply<R> {
     }
 
     /// A merge was proposed: record both roles and freeze the right shard (§7.7).
-    fn merge_started(&self, left: u32, right: u32) {
+    async fn merge_started(&self, left: u32, right: u32) {
         // Deterministic validation: both allocated, both idle, adjacent
         // (left's range ends just below right's). Replica sets need not
         // match: the right driver recovers from right's quorum and
@@ -1055,15 +1052,14 @@ impl<R: RaftConsensus> ShardApply<R> {
             // The role on the shared allocation freezes the whole right range at
             // the leader; a right replica also bounds its store (the driver's
             // majority-acked seal is authoritative).
-            let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if handles.contains_key(&right) {
-                self.local.seal_range(right, start);
+            if self.hosts(right) {
+                self.local.seal_range(right, start).await;
             }
         }
     }
 
     /// A merge committed: left absorbs right's range, right is retired (§7.7).
-    fn merge_committed(&self, left: u32, right: u32) {
+    async fn merge_committed(&self, left: u32, right: u32) {
         // Flip the mapping: extend left over right, drop right. A
         // duplicate commit finds no merge role and is a no-op.
         let committed = {
@@ -1094,13 +1090,10 @@ impl<R: RaftConsensus> ShardApply<R> {
         // still lie above left (a no-op-safe backstop when none do), so a stale
         // higher-term leader can never append past left's committed range
         // (E15). Left keeps its journal/group.
-        {
-            let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if handles.contains_key(&left) {
-                self.local.unseal(left);
-                if let Some(bound) = new_end.checked_add(1) {
-                    self.local.seal_range(left, bound);
-                }
+        if self.hosts(left) {
+            self.local.unseal(left).await;
+            if let Some(bound) = new_end.checked_add(1) {
+                self.local.seal_range(left, bound).await;
             }
         }
         // Right replicas: GC the now-unreachable right-keyed data (the
@@ -1119,7 +1112,7 @@ impl<R: RaftConsensus> ShardApply<R> {
             // The whole shard goes, so drop it in one call rather than
             // walking its entities; `drop_shard` also clears right's fence
             // and bound.
-            self.local.drop_shard(right);
+            self.local.drop_shard(right).await;
         }
         self.handles
             .lock()
@@ -1207,10 +1200,12 @@ async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Co
                 parent,
                 child,
                 boundary,
-            } => apply.split_started(parent, child, boundary),
-            ShardMapCommand::SplitCommitted { parent } => apply.split_committed(parent),
-            ShardMapCommand::MergeStarted { left, right } => apply.merge_started(left, right),
-            ShardMapCommand::MergeCommitted { left, right } => apply.merge_committed(left, right),
+            } => apply.split_started(parent, child, boundary).await,
+            ShardMapCommand::SplitCommitted { parent } => apply.split_committed(parent).await,
+            ShardMapCommand::MergeStarted { left, right } => apply.merge_started(left, right).await,
+            ShardMapCommand::MergeCommitted { left, right } => {
+                apply.merge_committed(left, right).await
+            }
         }
     }
 }
@@ -1872,7 +1867,7 @@ async fn split_trigger_loop<R: RaftConsensus>(
     consensus: R,
     entity_type: &'static str,
     target_bytes: u64,
-    local: Arc<dyn EntityStore>,
+    local: NodeStore,
     inner: Weak<Mutex<Inner>>,
 ) {
     let consensus = &consensus;

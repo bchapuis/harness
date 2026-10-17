@@ -29,7 +29,7 @@ use crate::replica_store::ReplicaTransport;
 use crate::shardmap::LocalShardMap;
 use crate::shardmap::RaftShardMap;
 use crate::shardmap::ShardMapSource;
-use crate::store::EntityStore;
+use crate::store::NodeStore;
 
 /// A shard of one entity type's namespace (spec §7.1): the entity-local handle a
 /// [`EntitySystem`] maps to its backing store and consensus group. Kept distinct
@@ -304,9 +304,10 @@ pub trait EntitySystem: ActorSystem {
     /// group whose committed log is the allocation, so every node agrees regardless
     /// of join order. The allocation targets `replicas` nodes per shard, and the
     /// leader auto-splits a shard past `split_target_bytes` (§7.7; `0` disables the
-    /// size trigger). `local` is this node's durable [`EntityStore`] and `transport`
-    /// reaches peer replicas' stores (§7.2). Created once at `entities()` time;
-    /// routing reads it through the [`ShardMapSource`] seam.
+    /// size trigger). `local` is this node's durable store, its writes on the node's
+    /// blocking pool ([`NodeStore`]), and `transport` reaches peer replicas' stores
+    /// (§7.2). Created once at `entities()` time; routing reads it through the
+    /// [`ShardMapSource`] seam.
     #[allow(clippy::too_many_arguments)] // one call site, from `entities()`
     fn shard_map(
         &self,
@@ -314,9 +315,8 @@ pub trait EntitySystem: ActorSystem {
         shards: usize,
         replicas: usize,
         split_target_bytes: u64,
-        local: Arc<dyn EntityStore>,
+        local: NodeStore,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
         domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource>;
@@ -339,9 +339,8 @@ impl<C: Clock, E: Entropy, S: Spawner> EntitySystem for LocalSystem<C, E, S> {
         shards: usize,
         _replicas: usize,
         _split_target_bytes: u64,
-        local: Arc<dyn EntityStore>,
+        local: NodeStore,
         _transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::blocking::BlockingIo>,
         // The `Local` tier has no quorum and no recovery read to bound.
         _deadlines: crate::replicator::Deadlines,
         // One node replicates everything, so there is nothing to spread.
@@ -350,7 +349,7 @@ impl<C: Clock, E: Entropy, S: Spawner> EntitySystem for LocalSystem<C, E, S> {
         // `Local` tier: the single node replicates every shard, all keyed in one
         // local store (the peer transport is unused; there are no peers). Split
         // and merge are `Quorum` elasticity, so the size trigger is inert here.
-        Arc::new(LocalShardMap::new(self.node(), shards, local, io))
+        Arc::new(LocalShardMap::new(self.node(), shards, local))
     }
 
     fn shard_leader(&self, _shard: ShardId) -> Option<NodeId> {
@@ -375,9 +374,8 @@ where
         shards: usize,
         replicas: usize,
         split_target_bytes: u64,
-        local: Arc<dyn EntityStore>,
+        local: NodeStore,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
         domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
@@ -395,7 +393,6 @@ where
             split_target_bytes,
             local,
             transport,
-            io,
             deadlines,
             domains,
             Arc::new(move |event| system.emit_entity_event(event)),

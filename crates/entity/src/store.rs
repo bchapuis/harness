@@ -29,6 +29,7 @@
 // read back out, and the commit metrics.
 pub use crate::blocking::BlockingIo;
 pub use crate::blocking::InlineIo;
+pub use crate::blocking::NodeStore;
 pub use crate::blocking::ThreadPoolIo;
 pub use crate::file_store::FileEntityStore;
 pub use crate::journal::AppendOutcome;
@@ -72,7 +73,13 @@ pub(crate) struct RecordSlot {
 }
 
 /// The outcome of a fenced store (`store_record`/`store_snapshot`, §7.2, §8).
+///
+/// `#[must_use]` on the type as well as on the store methods, so an outcome that
+/// reached its caller through a future (a [`NodeStore`] write, a replica's reply) is
+/// held to the same discipline: dropping a refusal unread is how a deposed leader
+/// convinces itself it committed (**E14**).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[must_use = "a store can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (E14)"]
 pub enum StoreAck {
     /// Durable in this store; carries the replica's contiguous head after the write.
     Stored(Seq),
@@ -112,6 +119,7 @@ pub enum StoreAck {
 /// Blobs are unfenced and unordered, so unlike [`StoreAck`] there is no term or
 /// head to refuse on: the only refusal is a store that cannot write at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[must_use = "a blob store can fail to persist (BlobAck::Failed); read the outcome (E18)"]
 pub enum BlobAck {
     /// Durable in this store (or already present: a blob put is idempotent by
     /// content, E18).
@@ -168,6 +176,7 @@ impl ReadReply {
 /// ordinary [`read`](EntityStore::read) does not fence and is used only for local
 /// replay.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[must_use = "a prepare can refuse (Fenced/Failed); read the outcome (E14)"]
 pub enum ReadOutcome {
     /// The replica's slots and snapshot; it has promised not to accept a lower term.
     Prepared(ReadReply),
@@ -186,8 +195,10 @@ pub enum ReadOutcome {
 /// Whether a record store is a normal append or a recovery write-back (§8): the
 /// one bit that decides whether the optimistic head check applies.
 ///
-/// The variant order is load-bearing: `Append` is the zero discriminant, so an
-/// already-written segment log reads back unchanged.
+/// The variant list is part of the `entity.store.segment` format: the file store logs
+/// a record store's kind by its `postcard` discriminant, so reordering, inserting, or
+/// appending a variant changes what a segment's bytes mean and is a version bump
+/// (compatibility §3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteKind {
     /// A normal append: applies the optimistic head check and may report `Stale`.
@@ -490,9 +501,10 @@ pub(crate) struct EntityRecords {
 /// entity's segment to a single `Checkpoint` op holding this, folding away the record
 /// ops the entity's snapshot made redundant.
 ///
-/// Distinct from `EntityRecords` because this is the frozen on-disk contract (it must
-/// deserialize old segments), while `EntityRecords` is the live in-memory
-/// representation and stays free to change. [`export`](EntityRecords::export) and
+/// Distinct from `EntityRecords` because this is the on-disk shape (the `Checkpoint`
+/// op of the `entity.store.segment` format, so any change to it is a version bump,
+/// compatibility §3.2), while `EntityRecords` is the live in-memory representation
+/// and stays free to change. [`export`](EntityRecords::export) and
 /// [`from_checkpoint`](EntityRecords::from_checkpoint) are the only bridge.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EntityCheckpoint {

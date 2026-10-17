@@ -294,7 +294,11 @@ impl<G: Entity> Host<G> {
     /// nodes' materializations of the same entity on one path.
     fn facet_env(&self, ctx: &Ctx<Host<G>>) -> FacetEnv {
         FacetEnv::new(
-            EntityBlobs::new(Arc::clone(&self.activation.journal), self.activation.name.clone()),
+            EntityBlobs::new(
+                Arc::clone(&self.activation.journal),
+                self.activation.name.clone(),
+                Arc::clone(self.activation.facets.pending_roots()),
+            ),
             self.config
                 .scratch_dir()
                 .join(ctx.system().node().to_string()),

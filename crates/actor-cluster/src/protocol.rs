@@ -130,7 +130,7 @@ pub enum Frame {
     Reply {
         correlation: CallId,
         /// The request direction's bytes problem, in the direction that answers:
-        /// a `fetch_blob` or an entity read returns a mebibyte through here. See
+        /// a `get_blob` or an entity read returns a mebibyte through here. See
         /// [`reply_bytes`] for why it needs a module where the others needed an
         /// attribute.
         #[serde(with = "reply_bytes")]

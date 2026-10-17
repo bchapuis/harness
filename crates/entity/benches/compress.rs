@@ -125,7 +125,7 @@ fn synthetic_block(seed: u64) -> Vec<u8> {
 }
 
 /// The blob payloads: real 1 MiB image blocks from a machine run's blob area; the
-/// exact unit `StoreBlob` carries, one per `put_blob`.
+/// exact unit `PutBlob` carries, one per `put_blob`.
 fn blocks() -> (Vec<Vec<u8>>, &'static str) {
     let real = sample("machine-data", "blobs", |m| m.len() == BLOCK as u64, 48);
     if real.is_empty() {

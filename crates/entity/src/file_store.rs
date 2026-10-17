@@ -116,7 +116,6 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -185,9 +184,12 @@ type StoreCache = Mutex<HashMap<(String, NodeId), Arc<FileEntityStore>>>;
 /// evolve independently: adding a field to [`SegOp`] says nothing about
 /// [`ManifestEntry`].
 ///
-/// Both are `postcard`, so neither type can gain or reorder a field within a version.
-/// An enum may still grow variants at its **end**, which `postcard` encodes as a higher
-/// discriminant and which no existing record can carry; that needs no bump.
+/// Both are `postcard`, so neither type can gain or reorder a field within a version,
+/// and neither enum can gain a variant either, not even at its end: a build that
+/// predates the variant cannot decode the record, and the log's recovery reads an
+/// undecodable frame as a torn tail and truncates it (wal **L1**), silently dropping a
+/// committed record. Any change to either type is a version bump (compatibility
+/// §3.2), so an older build refuses the log by name instead.
 const MANIFEST_RECORDS: compat::Format = compat::Format::new("entity.store.manifest", 1);
 const SEGMENT_RECORDS: compat::Format = compat::Format::new("entity.store.segment", 1);
 
@@ -796,7 +798,10 @@ fn open_segment(dir: &Path, id: u64) -> io::Result<Segment> {
                 records: recs,
                 kind,
             } => {
-                records.store_record(after, term, recs, kind);
+                // The same deterministic apply over the same prior state, in log order,
+                // reaches the outcome the live call already reported (a logged `Stale`
+                // is a no-op both times), so replay has nothing to learn from it.
+                let _replayed = records.store_record(after, term, recs, kind);
             }
             SegOp::Snapshot { at, term, state } => {
                 records.store_snapshot(at, term, state);
@@ -972,7 +977,8 @@ impl EntityStore for FileEntityStore {
         if let Some(seg_id) = self.segment_id(shard, entity, false) {
             // Reclamation is best-effort (a leaked blob is harmless, only space): a
             // missing subtree is already-done, any other error is left for a later
-            // sweep.
+            // sweep. The whole directory goes, so a crash's stray scratch file goes
+            // with it, as in `remove_entity`; `retain_blobs` leaves strays alone.
             let _ = fs::remove_dir_all(self.blob_dir(seg_id));
         }
     }
@@ -981,14 +987,18 @@ impl EntityStore for FileEntityStore {
         let Some(seg_id) = self.segment_id(shard, entity, false) else {
             return;
         };
-        let dir = self.blob_dir(seg_id);
-        let keep: HashSet<String> = retain.iter().map(|id| id.to_string()).collect();
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let Ok(entries) = fs::read_dir(self.blob_dir(seg_id)) else {
             return;
         };
+        // Only names that parse as a blob id are this sweep's to judge. Anything else
+        // in the area is a `put_blob` scratch file (`wal::atomic_replace`), and a
+        // sweep cannot tell a crash's stray from the live one of a put in flight on
+        // another pool thread: deleting the live one fails that put's rename, and
+        // `put_blob` then poisons the whole store. Strays go with the area instead,
+        // when `delete_blobs` or a range reclamation removes the directory whole.
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && !keep.contains(name)
+            if let Some(id) = entry.file_name().to_str().and_then(BlobId::from_hex)
+                && !retain.contains(&id)
             {
                 let _ = fs::remove_file(entry.path());
             }
@@ -1756,6 +1766,62 @@ mod tests {
             ),
             StoreAck::Stored(_)
         ));
+    }
+
+    /// A sweep running beside a `put_blob` on another pool thread must not touch the
+    /// put's scratch file: it is the put's only copy until the rename, so deleting it
+    /// fails the rename, and a failed blob write poisons the whole store. The scratch
+    /// file is staged by hand so the interleaving is the one the race produces, every
+    /// time.
+    #[test]
+    fn a_sweep_leaves_the_scratch_file_of_a_put_in_flight_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileEntityStore::open(dir.path(), TEST_CODEC).unwrap();
+        let n = name("swept");
+        let (kept, orphan, landing) = (
+            BlobId::of(b"kept"),
+            BlobId::of(b"orphan"),
+            BlobId::of(b"landing"),
+        );
+        assert_eq!(
+            store.put_blob(0, &n, kept, b"kept".to_vec()),
+            BlobAck::Stored
+        );
+        assert_eq!(
+            store.put_blob(0, &n, orphan, b"orphan".to_vec()),
+            BlobAck::Stored
+        );
+        let seg_id = store
+            .segment_id(0, &n, false)
+            .expect("the puts assigned an id");
+        // `wal::atomic_replace`'s scratch name for `landing`, mid-put.
+        let scratch = store
+            .blob_dir(seg_id)
+            .join(format!("{landing}.{}.0.tmp", std::process::id()));
+        fs::write(&scratch, b"landing").unwrap();
+
+        store.retain_blobs(0, &n, &BTreeSet::from([kept]));
+        assert!(store.has_blob(0, &n, kept), "a retained blob survives");
+        assert!(
+            !store.has_blob(0, &n, orphan),
+            "an unretained blob is swept"
+        );
+        assert!(scratch.exists(), "the sweep deleted a put's scratch file");
+        assert_eq!(
+            store.blob_ids(0, &n),
+            vec![kept],
+            "a scratch file is no blob"
+        );
+
+        // The put's rename still finds its bytes, and nothing was poisoned.
+        fs::rename(&scratch, store.blob_path(seg_id, landing)).unwrap();
+        assert!(store.has_blob(0, &n, landing));
+        assert!(store.failure().is_none());
+
+        // A crash's stray goes with the area when the entity's blobs are dropped.
+        fs::write(&scratch, b"stray").unwrap();
+        store.delete_blobs(0, &n);
+        assert!(!store.blob_dir(seg_id).exists());
     }
 
     #[test]

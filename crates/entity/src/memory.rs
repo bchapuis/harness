@@ -12,11 +12,8 @@
 //! vouch for. Every method here writes and reads the [`EntityStore`] seam this tier
 //! shares with the clustered one; there is no durability machinery under it.
 
-use std::sync::Arc;
-
 use crate::blobs::BlobId;
-use crate::blocking::BlockingIo;
-use crate::blocking::on_store;
+use crate::blocking::NodeStore;
 use crate::entity::EntityName;
 use crate::journal::AppendOutcome;
 use crate::journal::EntityJournal;
@@ -25,7 +22,6 @@ use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::store::BlobAck;
-use crate::store::EntityStore;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
 
@@ -33,11 +29,11 @@ use crate::store::WriteKind;
 /// so every host spawned for the same shard writes to the same log.
 #[derive(Clone)]
 pub struct LocalEntityJournal {
-    store: Arc<dyn EntityStore>,
+    /// This node's store, its writes on the node's blocking pool (§7.4). On this tier
+    /// the local fsync is the commit, so it is the entire cost of an append and the
+    /// worst thing to run on an async worker (see [`crate::blocking`]).
+    store: NodeStore,
     shard: u32,
-    /// Where the store's blocking writes run (§7.4). On this tier the local fsync is
-    /// the commit, so it is the entire cost of an append.
-    io: Arc<dyn BlockingIo>,
 }
 
 impl LocalEntityJournal {
@@ -45,23 +41,18 @@ impl LocalEntityJournal {
     #[cfg(test)]
     pub(crate) fn new() -> LocalEntityJournal {
         LocalEntityJournal::over(
-            Arc::new(crate::store::MemoryEntityStore::new()),
+            NodeStore::new(
+                std::sync::Arc::new(crate::store::MemoryEntityStore::new()),
+                std::sync::Arc::new(crate::blocking::InlineIo),
+            ),
             0,
-            Arc::new(crate::blocking::InlineIo),
         )
     }
 
     /// A journal over `store`, keying its records under shard index `shard` (so a
-    /// single node can back several shards from one store, §7.6). `io` is where the
-    /// store's blocking writes run (§7.4), which on this tier is the whole latency of
-    /// an append and the worst thing to run on an async worker (see
-    /// [`crate::blocking`]).
-    pub(crate) fn over(
-        store: Arc<dyn EntityStore>,
-        shard: u32,
-        io: Arc<dyn BlockingIo>,
-    ) -> LocalEntityJournal {
-        LocalEntityJournal { store, shard, io }
+    /// single node can back several shards from one store, §7.6).
+    pub(crate) fn over(store: NodeStore, shard: u32) -> LocalEntityJournal {
+        LocalEntityJournal { store, shard }
     }
 
     /// The §11 gate on every read: a failed store answers its reads as an entity
@@ -84,11 +75,17 @@ impl EntityJournal for LocalEntityJournal {
         // `after` always equals the head behind the input gate, §6). On this tier the
         // local fsync IS the commit (§7.4), so the await is the durability the
         // `Committed` outcome asserts.
-        let (name, shard) = (entity.clone(), self.shard);
-        let stored = on_store(&self.io, &self.store, move |store| {
-            store.store_record(shard, &name, after, Term::ZERO, events, WriteKind::Append)
-        })
-        .await;
+        let stored = self
+            .store
+            .store_record(
+                self.shard,
+                entity,
+                after,
+                Term::ZERO,
+                events,
+                WriteKind::Append,
+            )
+            .await;
         match stored {
             StoreAck::Stored(head) => AppendOutcome::Committed(head),
             other => {
@@ -119,11 +116,10 @@ impl EntityJournal for LocalEntityJournal {
     }
 
     async fn save_snapshot(&self, entity: &EntityName, at: Seq, state: Vec<u8>) -> AppendOutcome {
-        let (name, shard) = (entity.clone(), self.shard);
-        let stored = on_store(&self.io, &self.store, move |store| {
-            store.store_snapshot(shard, &name, at, Term::ZERO, state, WriteKind::Append)
-        })
-        .await;
+        let stored = self
+            .store
+            .store_snapshot(self.shard, entity, at, Term::ZERO, state, WriteKind::Append)
+            .await;
         match stored {
             StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
             other => {
@@ -148,12 +144,7 @@ impl EntityJournal for LocalEntityJournal {
         id: BlobId,
         bytes: Vec<u8>,
     ) -> Result<(), EntityJournalError> {
-        let (name, shard) = (entity.clone(), self.shard);
-        match on_store(&self.io, &self.store, move |store| {
-            store.put_blob(shard, &name, id, bytes)
-        })
-        .await
-        {
+        match self.store.put_blob(self.shard, entity, id, bytes).await {
             BlobAck::Stored => Ok(()),
             // The single store IS the durability on this tier (§7.4), so a store that
             // could not write means the blob is not durable anywhere.
@@ -184,19 +175,13 @@ impl EntityJournal for LocalEntityJournal {
     }
 
     async fn retain_blobs(&self, entity: &EntityName, retain: Vec<BlobId>) {
-        let (name, shard) = (entity.clone(), self.shard);
-        on_store(&self.io, &self.store, move |store| {
-            store.retain_blobs(shard, &name, &retain.into_iter().collect())
-        })
-        .await;
+        self.store
+            .retain_blobs(self.shard, entity, retain.into_iter().collect())
+            .await;
     }
 
     async fn delete_blobs(&self, entity: &EntityName) {
-        let (name, shard) = (entity.clone(), self.shard);
-        on_store(&self.io, &self.store, move |store| {
-            store.delete_blobs(shard, &name)
-        })
-        .await;
+        self.store.delete_blobs(self.shard, entity).await;
     }
 }
 
@@ -298,8 +283,14 @@ mod tests {
         use crate::file_store::FileEntityStore;
 
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(FileEntityStore::open(dir.path(), "json").expect("open"));
-        let j = LocalEntityJournal::over(store.clone(), 0, Arc::new(crate::blocking::InlineIo));
+        let store = std::sync::Arc::new(FileEntityStore::open(dir.path(), "json").expect("open"));
+        let j = LocalEntityJournal::over(
+            NodeStore::new(
+                store.clone(),
+                std::sync::Arc::new(crate::blocking::InlineIo),
+            ),
+            0,
+        );
         let entity = name("served");
         assert_eq!(
             run(j.append(&entity, Seq::ZERO, vec![b"a".to_vec()])),

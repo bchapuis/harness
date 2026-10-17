@@ -54,7 +54,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 4. **Frame version** versions §2's framing; version 1 is the layout above. The header carries no checksum of its own: every header byte is validated against a known value instead.
 
-5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Format`, stamps its version into a new file, admits the field on an existing one, and never interprets it. `postcard` is positional, so `T` cannot gain or reorder a field within a version, and its version can live only outside the payload. An enum may grow variants at its end without a bump, since no existing record carries them.
+5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Format`, stamps its version into a new file, admits the field on an existing one, and never interprets it. `postcard` is positional, so `T` cannot gain or reorder a field within a version, and its version can live only outside the payload. Any change to `T` is a version bump, an enum variant appended at the end included ([compatibility](compatibility-spec.md) §3.2): a build that predates the variant cannot decode the record, and **L1** would truncate it as a torn tail, silently dropping a committed record, where a bumped version is refused by name.
 
 6. The check is part of `open`, not an optional accessor, because an optional check is one a caller forgets. A refused file surfaces as `std::io::ErrorKind::InvalidData`, its message naming the format and either the version found or that the file is not stamped. `rewrite` stamps the header afresh.
 
@@ -112,7 +112,7 @@ Some durable state is a single small file rewritten whole: a generation counter,
 
    The scratch name MUST be unique per call and MUST NOT be a name a caller could read back as content; `<name>.<pid>.<counter>.tmp` satisfies both. Uniqueness is a correctness requirement: callers replace one name concurrently (the normal case in a content-addressed store), and two calls sharing a scratch path corrupt each other (the second create truncates the first's bytes; the second rename finds the path gone and fails), which a caller treating I/O errors as fatal turns into a node that stops accepting writes.
 
-   Concurrent calls on one `name` MUST therefore all succeed, and the file that lands MUST be exactly one caller's whole bytes; which one is unspecified (this replaces atomically, it does not serialize). A crash between create and rename MAY leave a scratch file behind, so a caller that enumerates such a directory MUST skip names it cannot decode.
+   Concurrent calls on one `name` MUST therefore all succeed, and the file that lands MUST be exactly one caller's whole bytes; which one is unspecified (this replaces atomically, it does not serialize). A crash between create and rename MAY leave a scratch file behind, so a caller that enumerates such a directory MUST skip names it cannot decode. A stray cannot be told from the live scratch file of a call in flight, so a caller MUST NOT delete an undecodable name while a call may be replacing into the directory: the deleted scratch file fails that call's rename. A caller reclaims strays with the whole directory.
 
 2. `checksum(bytes)` is the frame digest of §2 rule 2, exposed so a caller can frame its own sidecar bytes.
 
@@ -124,7 +124,7 @@ Some durable state is a single small file rewritten whole: a generation counter,
 
 ## 6. Failure policy
 
-1. Every fallible method MUST return `std::io::Result`; `open`'s policy refusal rides it as `InvalidData` (§2.1 rule 6). The crate **MUST NOT decide what an I/O failure means**: it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The caller decides: one that cannot persist a record it must not lose may panic with a domain-specific message; another might degrade or report.
+1. Every fallible method MUST return `std::io::Result`; `open`'s policy refusal rides it as `InvalidData` (§2.1 rule 6). The crate **MUST NOT decide what an I/O failure means**: it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The caller decides: both callers in this tree poison themselves on one, recording the cause and refusing every later write, since a store that could not persist a record cannot safely acknowledge anything after it.
 
 2. The crate masks no corruption: a checksum failure, a torn tail, and a parse failure all surface as a shortened valid prefix (§3.1), never as an error and never as a silently patched record.
 

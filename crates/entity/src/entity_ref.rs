@@ -41,6 +41,7 @@ use crate::shardmap::ShardMapSource;
 use crate::shardmap::resolve_shard;
 use crate::store::EntityStore;
 use crate::store::MemoryEntityStore;
+use crate::store::NodeStore;
 use crate::subscription::CloseSink;
 use crate::subscription::RecordSink;
 use crate::subscription::SUB_BUFFER;
@@ -982,8 +983,9 @@ where
         Some(factory) => factory(entity_type, system.node()),
         None => Arc::new(MemoryEntityStore::new()),
     };
-    let io = capabilities.blocking_io();
-    let replica_store = system.spawn(ReplicaStore::<S>::new(Arc::clone(&store), Arc::clone(io)));
+    // Every store write runs on the node's blocking pool (§7.4, `crate::blocking`).
+    let store = NodeStore::new(store, Arc::clone(capabilities.blocking_io()));
+    let replica_store = system.spawn(ReplicaStore::<S>::new(store.clone()));
     system
         .receptionist()
         .register(replica_store_key::<S>(entity_type), &replica_store);
@@ -1000,7 +1002,6 @@ where
         config.shard_target_bytes,
         store,
         transport,
-        Arc::clone(io),
         crate::replicator::Deadlines {
             quorum: config.quorum_timeout,
             recover: config.recover_timeout,

@@ -321,6 +321,7 @@ impl<G: Entity> EntityCtx<G> {
         EntityBlobs::new(
             Arc::clone(&self.activation.journal),
             self.activation.name.clone(),
+            Arc::clone(cell.pending_roots()),
         )
         .with_facet_roots(Arc::new(move || cell.roots()))
     }

@@ -13,6 +13,15 @@
 //! mark-from-roots sweep** ([`EntityBlobs::gc`]) plus a whole-area drop on destroy
 //! ([`EntityBlobs::destroy`]).
 //!
+//! **A sweep and a put never interleave.** A writer puts first and roots later (plan,
+//! then stage, §7.12): a facet's checkpoint puts its chunks and then extends its root
+//! set, a KV spill is rooted only when its command commits. A sweep that read the
+//! roots in between would delete bytes a manifest is about to reference, and the
+//! writer, having cached the ids as stored, would never put them again. So every put
+//! records its id in the activation's [`PendingRoots`] before the bytes leave, a
+//! sweep retains those ids on top of the roots, and the two are ordered by one gate
+//! (see [`PendingRoots`]).
+//!
 //! **Dedup saves bandwidth, not only space.** Content addressing was adopted so an
 //! unchanged region of a checkpointed facet hashes to something already stored
 //! (§7.10); on this deployment its larger effect is that the region is not
@@ -33,6 +42,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -102,6 +112,51 @@ impl fmt::Debug for BlobId {
     }
 }
 
+/// The blobs an activation has put that its roots may not show yet, and the gate that
+/// orders its puts against its sweeps (spec §7.12, **F3**). One per activation, shared
+/// by every [`EntityBlobs`] handle the activation builds.
+///
+/// **Why both halves.** A put that lands while a sweep is in flight is deleted if the
+/// sweep's retain set was read before the put's root became visible, and a writer's
+/// root becomes visible only after its put returns (a checkpoint extends its root set
+/// once its chunks are durable; a KV spill is rooted at its command's commit). The
+/// set closes that window: a put records its id *before* its bytes leave, and every
+/// sweep retains the set on top of the roots. The gate closes the remaining one: a
+/// sweep holds it from reading its retain set until every replica has answered, and a
+/// put records its id under it, so a put either is recorded before the sweep reads
+/// (and is retained) or starts only after the sweep is done (and lands after it).
+///
+/// **When an id leaves.** At the start of each command ([`start_turn`](Self::start_turn)),
+/// because by then the previous turn is over: its commit folded its records, so a KV
+/// spill is in the committed map, its captures and snapshots extended their facets'
+/// root sets, and anything it put that no root names belongs to a commit that failed,
+/// an orphan the next sweep may reclaim. A blob put in the current command therefore
+/// survives a sweep made in that same command.
+///
+/// The ids cover puts through this activation's handles. A blob an application puts
+/// from a task it detached is the application's to root, or to pass in `live`, before
+/// it sweeps.
+#[derive(Default)]
+pub(crate) struct PendingRoots {
+    /// Held by a sweep across its whole run, taken briefly by a put to record its id.
+    /// An async lock, so a waiting put or sweep yields its worker instead of blocking it.
+    gate: futures::lock::Mutex<()>,
+    ids: Mutex<BTreeSet<BlobId>>,
+}
+
+impl PendingRoots {
+    /// Record `id` as put but perhaps not yet rooted. Waits out a sweep in flight.
+    async fn record(&self, id: BlobId) {
+        let _gate = self.gate.lock().await;
+        self.ids.lock().expect("pending roots lock").insert(id);
+    }
+
+    /// Forget the previous turn's puts: called as a command begins (see the type docs).
+    pub(crate) fn start_turn(&self) {
+        self.ids.lock().expect("pending roots lock").clear();
+    }
+}
+
 /// An entity-scoped handle to its content-addressed blob area, returned by
 /// [`EntityCtx::blobs`](crate::EntityCtx::blobs).
 ///
@@ -118,14 +173,22 @@ pub struct EntityBlobs {
     /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for an
     /// entity with no facets.
     facet_roots: Arc<dyn Fn() -> BTreeSet<BlobId> + Send + Sync>,
+    /// The activation's puts not yet known to be rooted, and the gate ordering puts
+    /// against sweeps ([`PendingRoots`]).
+    pending: Arc<PendingRoots>,
 }
 
 impl EntityBlobs {
-    pub(crate) fn new(journal: Arc<dyn DynEntityJournal>, entity: EntityName) -> EntityBlobs {
+    pub(crate) fn new(
+        journal: Arc<dyn DynEntityJournal>,
+        entity: EntityName,
+        pending: Arc<PendingRoots>,
+    ) -> EntityBlobs {
         EntityBlobs {
             journal,
             entity,
             facet_roots: Arc::new(BTreeSet::new),
+            pending,
         }
     }
 
@@ -168,6 +231,9 @@ impl EntityBlobs {
     /// retry carries no double-write risk).
     pub async fn put(&self, bytes: Vec<u8>) -> Result<BlobId, EntityError> {
         let id = BlobId::of(&bytes);
+        // Before the bytes go anywhere: from here until the next command begins, no
+        // sweep of this activation drops the id (see `PendingRoots`).
+        self.pending.record(id).await;
         self.journal
             .put_blob(&self.entity, id, bytes)
             .await
@@ -215,9 +281,25 @@ impl EntityBlobs {
     /// state still references), reclaiming blocks orphaned by overwrites without any
     /// cluster-wide reference tracking. Best-effort and idempotent (so it cannot
     /// fail: a missed replica keeps its garbage until the next sweep).
+    ///
+    /// Safe to run beside the activation's own commands and snapshots, detached or
+    /// not: a blob put through this activation since its current or latest command
+    /// began is kept too, whether or not a root names it yet, and no put starts while
+    /// the sweep runs; it waits for the sweep to finish (see [`PendingRoots`]).
     pub async fn gc(&self, live: &BTreeSet<BlobId>) {
+        // Held until every replica has answered: a put recorded after the retain set
+        // is read must not land before the sweep that missed it.
+        let _gate = self.pending.gate.lock().await;
         let mut retain: Vec<BlobId> = live.iter().copied().collect();
         retain.extend((self.facet_roots)());
+        retain.extend(
+            self.pending
+                .ids
+                .lock()
+                .expect("pending roots lock")
+                .iter()
+                .copied(),
+        );
         self.journal.retain_blobs(&self.entity, retain).await;
     }
 
@@ -240,7 +322,132 @@ fn into_entity_error(err: EntityJournalError) -> EntityError {
 
 #[cfg(test)]
 mod tests {
+    use std::task::Context;
+    use std::task::Poll;
+
+    use futures::FutureExt;
+
     use super::*;
+    use crate::blocking::BlockingIo;
+    use crate::blocking::DeferredIo;
+    use crate::blocking::InlineIo;
+    use crate::blocking::NodeStore;
+    use crate::memory::LocalEntityJournal;
+    use crate::store::EntityStore;
+    use crate::store::MemoryEntityStore;
+
+    /// One activation's blob handle over a single in-memory store, with a facet root
+    /// set the test extends by hand, the way a checkpoint does after its puts.
+    struct Activation {
+        store: Arc<MemoryEntityStore>,
+        pending: Arc<PendingRoots>,
+        facet_roots: Arc<Mutex<BTreeSet<BlobId>>>,
+        blobs: EntityBlobs,
+    }
+
+    impl Activation {
+        fn over(io: Arc<dyn BlockingIo>) -> Activation {
+            let store = Arc::new(MemoryEntityStore::new());
+            let journal = LocalEntityJournal::over(NodeStore::new(store.clone(), io), 0);
+            let pending = Arc::new(PendingRoots::default());
+            let facet_roots = Arc::new(Mutex::new(BTreeSet::new()));
+            let roots = Arc::clone(&facet_roots);
+            let blobs = EntityBlobs::new(
+                Arc::new(journal),
+                EntityName::new("t", "k"),
+                Arc::clone(&pending),
+            )
+            .with_facet_roots(Arc::new(move || roots.lock().unwrap().clone()));
+            Activation {
+                store,
+                pending,
+                facet_roots,
+                blobs,
+            }
+        }
+
+        fn holds(&self, id: BlobId) -> bool {
+            self.store.has_blob(0, self.blobs.entity(), id)
+        }
+    }
+
+    fn poll<F: std::future::Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        future.poll_unpin(&mut Context::from_waker(futures::task::noop_waker_ref()))
+    }
+
+    /// The race a detached sweep runs into: a checkpoint puts its chunk, the sweep
+    /// reads the roots before the checkpoint extends them, and the sweep would then
+    /// delete the chunk the manifest is about to reference.
+    #[test]
+    fn a_sweep_between_a_put_and_its_root_keeps_the_blob() {
+        let act = Activation::over(Arc::new(InlineIo));
+        let chunk = futures::executor::block_on(act.blobs.put(b"chunk".to_vec())).unwrap();
+
+        // The facet has not rooted the chunk yet, and the application's live set is
+        // empty: only the pending record stands between the chunk and the sweep.
+        futures::executor::block_on(act.blobs.gc(&BTreeSet::new()));
+        assert!(
+            act.holds(chunk),
+            "a sweep deleted a blob put before its root was visible",
+        );
+
+        // The checkpoint roots it; an orphan from a failed command does not get rooted.
+        act.facet_roots.lock().unwrap().insert(chunk);
+        let orphan = futures::executor::block_on(act.blobs.put(b"orphan".to_vec())).unwrap();
+        // The next command begins: the previous turn's puts are rooted or orphaned.
+        act.pending.start_turn();
+        futures::executor::block_on(act.blobs.gc(&BTreeSet::new()));
+        assert!(act.holds(chunk), "a rooted blob survives");
+        assert!(
+            !act.holds(orphan),
+            "an orphan of an earlier turn is reclaimed"
+        );
+    }
+
+    /// The other half: a put cannot land inside a sweep that has already read its
+    /// retain set. The device is held so the sweep is observably in flight, and the
+    /// put must not even reach the store until the sweep has finished.
+    #[test]
+    fn a_put_waits_for_a_sweep_in_flight() {
+        let io = Arc::new(DeferredIo::default());
+        let act = Activation::over(io.clone());
+        let live = BTreeSet::new();
+
+        let mut sweep = Box::pin(act.blobs.gc(&live));
+        assert!(
+            poll(&mut sweep).is_pending(),
+            "the sweep waits on the device"
+        );
+        assert_eq!(io.submitted(), 1, "the sweep's store call is queued");
+
+        let mut put = Box::pin(act.blobs.put(b"late".to_vec()));
+        assert!(poll(&mut put).is_pending());
+        assert_eq!(
+            io.submitted(),
+            1,
+            "a put started while a sweep that never saw it was in flight",
+        );
+
+        io.run_queued();
+        assert!(poll(&mut sweep).is_ready());
+        assert!(
+            poll(&mut put).is_pending(),
+            "the put now waits on the device"
+        );
+        assert_eq!(io.submitted(), 2);
+        io.run_queued();
+        let Poll::Ready(Ok(late)) = poll(&mut put) else {
+            panic!("the put did not complete");
+        };
+        assert!(act.holds(late));
+
+        // And a sweep in the same turn keeps it, rooted or not.
+        let mut again = Box::pin(act.blobs.gc(&live));
+        assert!(poll(&mut again).is_pending());
+        io.run_queued();
+        assert!(poll(&mut again).is_ready());
+        assert!(act.holds(late));
+    }
 
     #[test]
     fn id_is_the_blake3_digest_and_dedups_equal_content() {

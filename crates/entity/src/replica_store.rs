@@ -6,7 +6,7 @@
 //! quorum has stored them. This module is the replicas' side of that protocol and
 //! the leader's way of reaching them, both built on actor messaging so entity adds
 //! no transport (spec §2.2): a per-node [`ReplicaStore`] actor, registered in the
-//! receptionist under one key per entity type, owns this node's [`EntityStore`], and
+//! receptionist under one key per entity type, owns this node's [`NodeStore`], and
 //! [`ActorReplicaTransport`] reaches a replica's store by an ordinary `ask` to that
 //! node's actor (local on the leader's own replica, §5.2).
 
@@ -24,24 +24,20 @@ use actor_core::CallError;
 use actor_core::Ctx;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
+use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::receptionist::Key;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
+use serde_bytes::ByteBuf;
 
 use crate::blobs::BlobId;
-use crate::blocking::BlockingIo;
-use crate::blocking::on_store;
+use crate::blocking::NodeStore;
 use crate::entity::EntityName;
 use crate::journal::Seq;
 use crate::journal::Term;
-use serde_bytes::ByteBuf;
-
 use crate::store::BlobAck;
-use crate::store::EntityStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
@@ -75,19 +71,22 @@ pub(crate) fn replica_store_key<S: ActorSystem>(
 }
 
 /// Quorum-append an entity's records to one replica, fenced by the shard `term`
-/// (spec §7.2, §8). The reply is the replica's [`StoreAck`].
-#[derive(Serialize, Deserialize)]
-pub(crate) struct StoreRecord {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) after: Seq,
-    pub(crate) term: Term,
-    /// `ByteBuf` rather than `Vec<u8>` so the codec is told these are bytes: it
-    /// reaches `serialize_bytes`/`deserialize_bytes` instead of serde's default
+/// (spec §7.2, §8): [`EntityStore::store_record`](crate::store::EntityStore::store_record)
+/// on a peer. The reply is the replica's [`StoreAck`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoreRecord {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub after: Seq,
+    pub term: Term,
+    /// Encoded as a sequence of byte strings, so the codec reaches
+    /// `serialize_bytes`/`deserialize_bytes` per record instead of serde's default
     /// element-at-a-time sequence path.
-    pub(crate) records: Vec<ByteBuf>,
-    /// A recovery write-back (read-repair, §8) versus a normal append.
-    pub(crate) kind: WriteKind,
+    #[serde(with = "byte_strings")]
+    pub records: Vec<Vec<u8>>,
+    /// A normal append, a recovery write-back (read-repair, §8), or a split/merge
+    /// transfer copy (§7.7).
+    pub kind: WriteKind,
 }
 
 impl Message for StoreRecord {
@@ -95,34 +94,36 @@ impl Message for StoreRecord {
     const MANIFEST: Manifest = Manifest::new("entity.StoreRecord");
 }
 
-/// Fenced recovery read of one replica's view of an entity (spec §8): promise not to
-/// accept a lower shard term, then return every occupied slot with its term and the
-/// latest snapshot. The reply is a [`ReadOutcome`] (`Prepared` or `Fenced`).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ReadEntity {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) term: Term,
+/// The fenced recovery read of one replica's view of an entity (spec §8):
+/// [`EntityStore::prepare`](crate::store::EntityStore::prepare) on a peer. The replica
+/// promises not to accept a lower shard term, then returns every occupied slot with
+/// its term and the latest snapshot. The reply is a [`ReadOutcome`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Prepare {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub term: Term,
 }
 
-impl Message for ReadEntity {
+impl Message for Prepare {
     type Reply = ReadOutcome;
-    const MANIFEST: Manifest = Manifest::new("entity.ReadEntity");
+    const MANIFEST: Manifest = Manifest::new("entity.Prepare");
 }
 
 /// Quorum-store an entity snapshot to one replica, fenced by the shard `term`
-/// (spec §9). The reply is the replica's [`StoreAck`]. A
-/// [`WriteKind::Transfer`] skips the fence: the split/merge driver landing a
-/// moved entity's snapshot under the destination shard's keys (§7.7).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct StoreSnapshot {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) at: Seq,
-    pub(crate) term: Term,
+/// (spec §9): [`EntityStore::store_snapshot`](crate::store::EntityStore::store_snapshot)
+/// on a peer. The reply is the replica's [`StoreAck`]. A [`WriteKind::Transfer`]
+/// skips the fence: the split/merge driver landing a moved entity's snapshot under
+/// the destination shard's keys (§7.7).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoreSnapshot {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub at: Seq,
+    pub term: Term,
     #[serde(with = "serde_bytes")]
-    pub(crate) state: Vec<u8>,
-    pub(crate) kind: WriteKind,
+    pub state: Vec<u8>,
+    pub kind: WriteKind,
 }
 
 impl Message for StoreSnapshot {
@@ -136,10 +137,10 @@ impl Message for StoreSnapshot {
 /// majority has acked, from then on no append to the moved range can assemble
 /// a write quorum, the store half of E15. Idempotent and monotone (the bound
 /// only tightens). The ask resolving is the durable acknowledgement.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SealRange {
-    pub(crate) shard: u32,
-    pub(crate) from: u64,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealRange {
+    pub shard: u32,
+    pub from: u64,
 }
 
 impl Message for SealRange {
@@ -147,52 +148,55 @@ impl Message for SealRange {
     const MANIFEST: Manifest = Manifest::new("entity.SealRange");
 }
 
-/// Store one immutable, content-addressed blob on a replica (durable-workspace
-/// design). No `after`, no `term`, no `repair`: a content hash names exactly one byte
-/// sequence, so there is nothing to fence or order and no `Fenced`/`Stale` outcome to
-/// report. The reply is a [`BlobAck`]: the one thing a replica can still refuse is
-/// storing at all, and a quorum that could not distinguish that from success would
-/// count a failed replica as a durable copy (**E18**).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct StoreBlob {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) id: BlobId,
+/// Store one immutable, content-addressed blob on a replica (§7.10):
+/// [`EntityStore::put_blob`](crate::store::EntityStore::put_blob) on a peer. No
+/// `after`, no `term`, no `kind`: a content hash names exactly one byte sequence, so
+/// there is nothing to fence or order and no `Fenced`/`Stale` outcome to report. The
+/// reply is a [`BlobAck`]: the one thing a replica can still refuse is storing at
+/// all, and a quorum that could not distinguish that from success would count a
+/// failed replica as a durable copy (**E18**).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PutBlob {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub id: BlobId,
     /// One encode on the leader and one decode on every peer, per mebibyte block, on
     /// the create path.
     #[serde(with = "serde_bytes")]
-    pub(crate) bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
-impl Message for StoreBlob {
+impl Message for PutBlob {
     type Reply = BlobAck;
-    const MANIFEST: Manifest = Manifest::new("entity.StoreBlob");
+    const MANIFEST: Manifest = Manifest::new("entity.PutBlob");
 }
 
-/// Fetch one blob's bytes from a replica, or `None` if it does not hold it. The
+/// Fetch one blob's bytes from a replica, or `None` if it does not hold it:
+/// [`EntityStore::get_blob`](crate::store::EntityStore::get_blob) on a peer. The
 /// caller verifies the bytes against the id (B1), so a misdelivery is detectable.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FetchBlob {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) id: BlobId,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetBlob {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub id: BlobId,
 }
 
-impl Message for FetchBlob {
-    /// `ByteBuf` for the same reason `StoreBlob::bytes` uses it: this is the read
-    /// half of the same mebibyte, and a restore fetches every block of an image, so
-    /// the decode is paid per block there too. The transport's own signature keeps
+impl Message for GetBlob {
+    /// `ByteBuf` for the same reason `PutBlob::bytes` is bytes: this is the read half
+    /// of the same mebibyte, and a restore fetches every block of an image, so the
+    /// decode is paid per block there too. [`ReplicaTransport::get_blob`] hands back a
     /// `Vec<u8>`: unwrapping the newtype is a move, not a copy.
     type Reply = Option<ByteBuf>;
-    const MANIFEST: Manifest = Manifest::new("entity.FetchBlob");
+    const MANIFEST: Manifest = Manifest::new("entity.GetBlob");
 }
 
-/// Whether a replica holds one blob.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct HasBlob {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) id: BlobId,
+/// Whether a replica holds one blob:
+/// [`EntityStore::has_blob`](crate::store::EntityStore::has_blob) on a peer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HasBlob {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub id: BlobId,
 }
 
 impl Message for HasBlob {
@@ -200,15 +204,16 @@ impl Message for HasBlob {
     const MANIFEST: Manifest = Manifest::new("entity.HasBlob");
 }
 
-/// Reclaim an entity's blobs on a replica (durable-workspace design): `retain = None`
-/// drops the whole area (destroy), `retain = Some(ids)` keeps only those (the
-/// mark-from-roots sweep). Idempotent; the reply is `()` (the ask resolving is the
-/// acknowledgement).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SweepBlobs {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
-    pub(crate) retain: Option<Vec<BlobId>>,
+/// Reclaim an entity's blobs on a replica (§7.10): `retain = None` drops the whole
+/// area ([`EntityStore::delete_blobs`](crate::store::EntityStore::delete_blobs), on
+/// destroy), `retain = Some(ids)` keeps only those
+/// ([`EntityStore::retain_blobs`](crate::store::EntityStore::retain_blobs), the
+/// mark-from-roots sweep). Idempotent; the ask resolving is the acknowledgement.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SweepBlobs {
+    pub shard: u32,
+    pub entity: EntityName,
+    pub retain: Option<Vec<BlobId>>,
 }
 
 impl Message for SweepBlobs {
@@ -216,12 +221,13 @@ impl Message for SweepBlobs {
     const MANIFEST: Manifest = Manifest::new("entity.SweepBlobs");
 }
 
-/// Enumerate every entity a replica holds anything for under one shard: the
-/// migration driver's entity discovery (replica-set migration, §7.7). Read from a
-/// quorum of the shard's replicas so no committed entity is missed.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ListEntities {
-    pub(crate) shard: u32,
+/// Enumerate every entity a replica holds anything for under one shard:
+/// [`EntityStore::entities`](crate::store::EntityStore::entities) on a peer, the
+/// migration driver's entity discovery (§7.7). Read from a quorum of the shard's
+/// replicas so no committed entity is missed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListEntities {
+    pub shard: u32,
 }
 
 impl Message for ListEntities {
@@ -229,12 +235,13 @@ impl Message for ListEntities {
     const MANIFEST: Manifest = Manifest::new("entity.ListEntities");
 }
 
-/// Enumerate one entity's blob ids on a replica: the migration driver's source
-/// list when copying an entity's blob area to a new replica (§7.7).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ListBlobs {
-    pub(crate) shard: u32,
-    pub(crate) entity: EntityName,
+/// Enumerate one entity's blob ids on a replica:
+/// [`EntityStore::blob_ids`](crate::store::EntityStore::blob_ids) on a peer, the
+/// migration driver's source list when copying an entity's blob area (§7.7).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListBlobs {
+    pub shard: u32,
+    pub entity: EntityName,
 }
 
 impl Message for ListBlobs {
@@ -242,33 +249,58 @@ impl Message for ListBlobs {
     const MANIFEST: Manifest = Manifest::new("entity.ListBlobs");
 }
 
+/// `serde_bytes` for a list of byte strings, which `serde_bytes` itself does not
+/// cover: each record is written with `serialize_bytes` and read back through
+/// [`ByteBuf`], whose visitor also accepts a plain sequence.
+mod byte_strings {
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serializer;
+    use serde_bytes::ByteBuf;
+    use serde_bytes::Bytes;
+
+    pub(super) fn serialize<S: Serializer>(
+        records: &[Vec<u8>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(records.iter().map(|record| Bytes::new(record)))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        // A `ByteBuf` is a newtype over its allocation, so each `into_vec` moves.
+        let records = Vec::<ByteBuf>::deserialize(deserializer)?;
+        Ok(records.into_iter().map(ByteBuf::into_vec).collect())
+    }
+}
+
 /// The node-local replica store for one entity type (spec §7.2): a thin actor over
-/// this node's [`EntityStore`], reachable across the cluster so the shard leader's
+/// this node's [`NodeStore`], reachable across the cluster so the shard leader's
 /// replicator can quorum-append to it and read it back for recovery. One per node
 /// per entity type (like the gateway), registered under [`replica_store_key`].
 ///
 /// Parameterized by the **system**, not by the entity type: this actor never folds
 /// state, applies an event, or names a facet, so a bare `ActorSystem` is the whole
-/// of what it needs: the storage half names the model through `EntityName` alone. Two entity types on one system therefore share this Rust type and
-/// are told apart by the key string [`replica_store_key_id`] interns per type. The
-/// parameter survives only because [`Actor::System`] must name a system and a struct
-/// must use its parameters.
+/// of what it needs: the storage half names the model through `EntityName` alone.
+/// Two entity types on one system therefore share this Rust type and are told apart
+/// by the key string [`replica_store_key_id`] interns per type. The parameter
+/// survives only because [`Actor::System`] must name a system and a struct must use
+/// its parameters.
+///
+/// Every durable write in the cluster that is not the leader's own copy arrives here,
+/// so this is the hottest fsync path there is, and why the store is a [`NodeStore`]:
+/// its writes run on the node's blocking pool, never on the async worker that is also
+/// driving this node's Raft heartbeats (see [`crate::blocking`]).
 pub(crate) struct ReplicaStore<S: ActorSystem> {
-    store: Arc<dyn EntityStore>,
-    /// Where this replica's blocking store calls run (§7.4). Every durable write in
-    /// the cluster that is not the leader's own copy arrives here, so this is the
-    /// hottest fsync path there is: run inline it would block the async worker that
-    /// is also driving this node's Raft heartbeats and every other shard's quorum
-    /// wait (see [`crate::blocking`]).
-    io: Arc<dyn BlockingIo>,
+    store: NodeStore,
     _marker: PhantomData<fn() -> S>,
 }
 
 impl<S: ActorSystem> ReplicaStore<S> {
-    pub(crate) fn new(store: Arc<dyn EntityStore>, io: Arc<dyn BlockingIo>) -> ReplicaStore<S> {
+    pub(crate) fn new(store: NodeStore) -> ReplicaStore<S> {
         ReplicaStore {
             store,
-            io,
             _marker: PhantomData,
         }
     }
@@ -279,11 +311,11 @@ impl<S: ActorSystem> Actor for ReplicaStore<S> {
 
     fn register(registry: &mut HandlerRegistry<ReplicaStore<S>>) {
         registry.accept::<StoreRecord>();
-        registry.accept::<ReadEntity>();
+        registry.accept::<Prepare>();
         registry.accept::<StoreSnapshot>();
         registry.accept::<SealRange>();
-        registry.accept::<StoreBlob>();
-        registry.accept::<FetchBlob>();
+        registry.accept::<PutBlob>();
+        registry.accept::<GetBlob>();
         registry.accept::<HasBlob>();
         registry.accept::<SweepBlobs>();
         registry.accept::<ListEntities>();
@@ -293,40 +325,34 @@ impl<S: ActorSystem> Actor for ReplicaStore<S> {
 
 // Every handler's reply IS the peer's acknowledgement, so each returns only what the
 // store has already made durable: a reply released early would let the leader count
-// this replica toward a quorum for something this node has not stored (**E14**). The
-// store settles the write before it returns, so there is nothing further to await.
+// this replica toward a quorum for something this node has not stored (**E14**). A
+// store write has happened when its future resolves, so awaiting it is the whole of
+// that obligation.
 impl<S: ActorSystem> Handler<StoreRecord> for ReplicaStore<S> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<S>>) -> StoreAck {
-        on_store(&self.io, &self.store, move |store| {
-            store.store_record(
+        self.store
+            .store_record(
                 msg.shard,
                 &msg.entity,
                 msg.after,
                 msg.term,
-                // Rebuilding the outer `Vec` of pointers, not the records: a
-                // `ByteBuf` is a newtype over the same allocation, so each
-                // `into_vec` moves rather than copies.
-                msg.records.into_iter().map(ByteBuf::into_vec).collect(),
+                msg.records,
                 msg.kind,
             )
-        })
-        .await
+            .await
     }
 }
 
-impl<S: ActorSystem> Handler<ReadEntity> for ReplicaStore<S> {
-    async fn handle(&mut self, msg: ReadEntity, _ctx: &Ctx<ReplicaStore<S>>) -> ReadOutcome {
-        on_store(&self.io, &self.store, move |store| {
-            store.prepare(msg.shard, &msg.entity, msg.term)
-        })
-        .await
+impl<S: ActorSystem> Handler<Prepare> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: Prepare, _ctx: &Ctx<ReplicaStore<S>>) -> ReadOutcome {
+        self.store.prepare(msg.shard, &msg.entity, msg.term).await
     }
 }
 
 impl<S: ActorSystem> Handler<StoreSnapshot> for ReplicaStore<S> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<S>>) -> StoreAck {
-        on_store(&self.io, &self.store, move |store| {
-            store.store_snapshot(
+        self.store
+            .store_snapshot(
                 msg.shard,
                 &msg.entity,
                 msg.at,
@@ -334,8 +360,7 @@ impl<S: ActorSystem> Handler<StoreSnapshot> for ReplicaStore<S> {
                 msg.state,
                 msg.kind,
             )
-        })
-        .await
+            .await
     }
 }
 
@@ -343,24 +368,20 @@ impl<S: ActorSystem> Handler<SealRange> for ReplicaStore<S> {
     async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<S>>) {
         // The bound must be durable before this ask resolves, or a majority could
         // report itself sealed while a restart would forget the promise (**E15**).
-        on_store(&self.io, &self.store, move |store| {
-            store.seal_range(msg.shard, msg.from)
-        })
-        .await;
+        self.store.seal_range(msg.shard, msg.from).await;
     }
 }
 
-impl<S: ActorSystem> Handler<StoreBlob> for ReplicaStore<S> {
-    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<S>>) -> BlobAck {
-        on_store(&self.io, &self.store, move |store| {
-            store.put_blob(msg.shard, &msg.entity, msg.id, msg.bytes)
-        })
-        .await
+impl<S: ActorSystem> Handler<PutBlob> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: PutBlob, _ctx: &Ctx<ReplicaStore<S>>) -> BlobAck {
+        self.store
+            .put_blob(msg.shard, &msg.entity, msg.id, msg.bytes)
+            .await
     }
 }
 
-impl<S: ActorSystem> Handler<FetchBlob> for ReplicaStore<S> {
-    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<S>>) -> Option<ByteBuf> {
+impl<S: ActorSystem> Handler<GetBlob> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: GetBlob, _ctx: &Ctx<ReplicaStore<S>>) -> Option<ByteBuf> {
         self.store
             .get_blob(msg.shard, &msg.entity, msg.id)
             .map(ByteBuf::from)
@@ -375,14 +396,14 @@ impl<S: ActorSystem> Handler<HasBlob> for ReplicaStore<S> {
 
 impl<S: ActorSystem> Handler<SweepBlobs> for ReplicaStore<S> {
     async fn handle(&mut self, msg: SweepBlobs, _ctx: &Ctx<ReplicaStore<S>>) {
-        // Offloaded like the writes: a sweep unlinks one file per reclaimed blob, so
-        // an entity that has churned a large disk image makes this thousands of
-        // synchronous unlinks against the same device the durability path needs.
-        on_store(&self.io, &self.store, move |store| match msg.retain {
-            None => store.delete_blobs(msg.shard, &msg.entity),
-            Some(ids) => store.retain_blobs(msg.shard, &msg.entity, &ids.into_iter().collect()),
-        })
-        .await;
+        match msg.retain {
+            None => self.store.delete_blobs(msg.shard, &msg.entity).await,
+            Some(ids) => {
+                self.store
+                    .retain_blobs(msg.shard, &msg.entity, ids.into_iter().collect())
+                    .await
+            }
+        }
     }
 }
 
@@ -398,115 +419,85 @@ impl<S: ActorSystem> Handler<ListBlobs> for ReplicaStore<S> {
     }
 }
 
-/// How the replicator reaches a shard's replica stores (spec §7.2). Object-safe, so
-/// the journal stays generic over just the consensus type `R` and names no system
-/// type at all: the typed [`ReplicaStore`] ref and its receptionist key live behind
-/// this seam, built in `entities_named` where the system is known.
+/// How the replicator reaches a shard's replica stores (spec §7.2): one method per
+/// replica-store message, each sending it to `node`'s store and resolving with its
+/// reply, or a [`CallError`] if no reply arrived `within` the deadline. The methods
+/// are named for the [`EntityStore`](crate::store::EntityStore) call each runs on the
+/// peer. Object-safe, so the journal stays generic over just the consensus type `R`
+/// and names no system type at all: the typed [`ReplicaStore`] ref and its
+/// receptionist key live behind this seam, built in `entities_named` where the
+/// system is known.
 pub trait ReplicaTransport: Send + Sync + 'static {
-    #[allow(clippy::too_many_arguments)]
     fn store_record(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        after: Seq,
-        term: Term,
-        records: Vec<Vec<u8>>,
-        kind: WriteKind,
+        msg: StoreRecord,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
 
-    fn read_entity(
+    fn prepare(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        term: Term,
+        msg: Prepare,
         within: Duration,
     ) -> BoxFuture<'static, Result<ReadOutcome, CallError>>;
 
-    #[allow(clippy::too_many_arguments)]
     fn store_snapshot(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        at: Seq,
-        term: Term,
-        state: Vec<u8>,
-        kind: WriteKind,
+        msg: StoreSnapshot,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
 
-    /// Tighten a replica's per-shard append bound (split/merge seal, §7.7): the
-    /// ask resolving means the bound is durable there.
+    /// The ask resolving means the bound is durable on `node` (**E15**).
     fn seal_range(
         &self,
         node: NodeId,
-        shard: u32,
-        from: u64,
+        msg: SealRange,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>>;
 
-    /// Store one immutable blob on a replica (durable-workspace design): unfenced,
-    /// unordered; the immutable subset of [`store_record`](ReplicaTransport::store_record).
     /// The [`BlobAck`] distinguishes a stored copy from a replica that could not
     /// store it, so only real copies count toward the quorum (**E18**).
-    fn store_blob(
+    fn put_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
-        bytes: Vec<u8>,
+        msg: PutBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<BlobAck, CallError>>;
 
-    /// Fetch one blob's bytes from a replica, or `None` if it lacks it.
-    fn fetch_blob(
+    fn get_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
+        msg: GetBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>>;
 
-    /// Whether a replica holds one blob.
     fn has_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
+        msg: HasBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<bool, CallError>>;
 
-    /// Reclaim an entity's blobs on a replica: `retain = None` drops the area,
-    /// `retain = Some(ids)` keeps only those (the mark-from-roots sweep).
     fn sweep_blobs(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        retain: Option<Vec<BlobId>>,
+        msg: SweepBlobs,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>>;
 
-    /// Enumerate every entity a replica holds under one shard (migration, §7.7).
-    fn list_entities(
+    fn entities(
         &self,
         node: NodeId,
-        shard: u32,
+        msg: ListEntities,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<EntityName>, CallError>>;
 
-    /// Enumerate one entity's blob ids on a replica (migration, §7.7).
-    fn list_blobs(
+    fn blob_ids(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
+        msg: ListBlobs,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>>;
 
@@ -548,7 +539,7 @@ impl<S: ActorSystem> ActorReplicaTransport<S> {
     }
 
     /// Resolve `node`'s replica store and `ask` it, or `Unreachable` if it is not
-    /// discovered: the one shape every [`ReplicaTransport`] method shares (§7.2).
+    /// discovered: every [`ReplicaTransport`] method is this (§7.2).
     fn ask<M>(
         &self,
         node: NodeId,
@@ -570,177 +561,151 @@ impl<S: ActorSystem> ActorReplicaTransport<S> {
 }
 
 impl<S: ActorSystem> ReplicaTransport for ActorReplicaTransport<S> {
-    #[allow(clippy::too_many_arguments)]
     fn store_record(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        after: Seq,
-        term: Term,
-        records: Vec<Vec<u8>>,
-        kind: WriteKind,
+        msg: StoreRecord,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>> {
-        self.ask(
-            node,
-            StoreRecord {
-                shard,
-                entity,
-                after,
-                term,
-                // As in the handler: a move per record, no bytes copied. The
-                // transport's own signature stays `Vec<Vec<u8>>` so the wire type
-                // does not leak into every caller.
-                records: records.into_iter().map(ByteBuf::from).collect(),
-                kind,
-            },
-            within,
-        )
+        self.ask(node, msg, within)
     }
 
-    fn read_entity(
+    fn prepare(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        term: Term,
+        msg: Prepare,
         within: Duration,
     ) -> BoxFuture<'static, Result<ReadOutcome, CallError>> {
-        self.ask(
-            node,
-            ReadEntity {
-                shard,
-                entity,
-                term,
-            },
-            within,
-        )
+        self.ask(node, msg, within)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn store_snapshot(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        at: Seq,
-        term: Term,
-        state: Vec<u8>,
-        kind: WriteKind,
+        msg: StoreSnapshot,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>> {
-        self.ask(
-            node,
-            StoreSnapshot {
-                shard,
-                entity,
-                at,
-                term,
-                state,
-                kind,
-            },
-            within,
-        )
+        self.ask(node, msg, within)
     }
 
     fn seal_range(
         &self,
         node: NodeId,
-        shard: u32,
-        from: u64,
+        msg: SealRange,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>> {
-        self.ask(node, SealRange { shard, from }, within)
+        self.ask(node, msg, within)
     }
 
-    fn store_blob(
+    fn put_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
-        bytes: Vec<u8>,
+        msg: PutBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<BlobAck, CallError>> {
-        self.ask(
-            node,
-            StoreBlob {
-                shard,
-                entity,
-                id,
-                bytes,
-            },
-            within,
-        )
+        self.ask(node, msg, within)
     }
 
-    fn fetch_blob(
+    fn get_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
+        msg: GetBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>> {
-        let reply = self.ask(node, FetchBlob { shard, entity, id }, within);
-        Box::pin(async move {
-            reply
-                .await
-                .map(|found: Option<ByteBuf>| found.map(ByteBuf::into_vec))
-        })
+        let reply = self.ask(node, msg, within);
+        Box::pin(async move { reply.await.map(|found| found.map(ByteBuf::into_vec)) })
     }
 
     fn has_blob(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        id: BlobId,
+        msg: HasBlob,
         within: Duration,
     ) -> BoxFuture<'static, Result<bool, CallError>> {
-        self.ask(node, HasBlob { shard, entity, id }, within)
+        self.ask(node, msg, within)
     }
 
     fn sweep_blobs(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
-        retain: Option<Vec<BlobId>>,
+        msg: SweepBlobs,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>> {
-        self.ask(
-            node,
-            SweepBlobs {
-                shard,
-                entity,
-                retain,
-            },
-            within,
-        )
+        self.ask(node, msg, within)
     }
 
-    fn list_entities(
+    fn entities(
         &self,
         node: NodeId,
-        shard: u32,
+        msg: ListEntities,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<EntityName>, CallError>> {
-        self.ask(node, ListEntities { shard }, within)
+        self.ask(node, msg, within)
     }
 
-    fn list_blobs(
+    fn blob_ids(
         &self,
         node: NodeId,
-        shard: u32,
-        entity: EntityName,
+        msg: ListBlobs,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>> {
-        self.ask(node, ListBlobs { shard, entity }, within)
+        self.ask(node, msg, within)
     }
 
     fn launch(&self, task: BoxFuture<'static, ()>) {
         self.system.launch(task);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actor_serialization::JsonCodec;
+    use actor_serialization::PostcardCodec;
+
+    /// The shape `StoreRecord` had when its field was a list of `ByteBuf`s: the
+    /// encoding `byte_strings` must reproduce byte for byte.
+    #[derive(Serialize)]
+    struct ByteBufRecords {
+        shard: u32,
+        entity: EntityName,
+        after: Seq,
+        term: Term,
+        records: Vec<ByteBuf>,
+        kind: WriteKind,
+    }
+
+    #[test]
+    fn records_travel_as_a_list_of_byte_strings_under_every_codec() {
+        let msg = StoreRecord {
+            shard: 3,
+            entity: EntityName::new("t", "k"),
+            after: Seq::new(1),
+            term: Term::new(2),
+            records: vec![vec![1, 2, 3], Vec::new(), vec![255]],
+            kind: WriteKind::Repair,
+        };
+        let mirror = ByteBufRecords {
+            shard: msg.shard,
+            entity: msg.entity.clone(),
+            after: msg.after,
+            term: msg.term,
+            records: msg.records.iter().cloned().map(ByteBuf::from).collect(),
+            kind: msg.kind,
+        };
+        for codec in [
+            &JsonCodec as &dyn actor_serialization::Codec,
+            &PostcardCodec,
+        ] {
+            let bytes = actor_serialization::encode(codec, &msg).unwrap();
+            assert_eq!(
+                bytes,
+                actor_serialization::encode(codec, &mirror).unwrap(),
+                "{}: the record list changed its encoding",
+                codec.name(),
+            );
+            let back: StoreRecord = actor_serialization::decode(codec, &bytes).unwrap();
+            assert_eq!(back.records, msg.records, "{}", codec.name());
+        }
     }
 }
