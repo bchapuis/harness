@@ -167,7 +167,7 @@ pub trait Model: Send + Sync + 'static {
 
 The seams' methods are written `async fn` here and at the sandbox seam (§5.3); the crate spells them as methods returning `BoxFuture`, because every seam is held as a trait object (`Arc<dyn Model>`, `Arc<dyn SandboxProvider>`, `Arc<dyn Sandbox>`) and `async fn` in a trait is not object-safe.
 
-`ModelRequest` carries the kind's system prompt, model parameters, the toolset's declarations (name, description, input schema), the folded transcript, and `max_tokens`. `ModelResponse` carries the assistant content, zero or more tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
+`ModelRequest` carries the kind's system prompt, its model parameters with `max_tokens` already clamped to the run's remaining budget (§9.1 item 2), the toolset's declarations (name, description, input schema), and the folded transcript. The clamped ceiling is the request's only `max_tokens`, so an adapter cannot send the kind's unclamped one by mistake. `ModelResponse` carries the assistant content, zero or more tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
 
 Like `Transport` (core §7) and `EntityJournal` (entity §7.3), the runtime depends only on the trait. In production `ProtocolModel` implements it over an injected `HttpPost` (§12.1), with `agent-anthropic` and `agent-openai` supplying the protocols; the simulator supplies a **scripted model**, a deterministic function of the request and the seed (§12.2).
 
@@ -395,10 +395,10 @@ let s = h.session("researcher", SESSION_ID)?;      // an EntityRef<Agent>; a loc
                                                    //   §5.4); Err only for a kind this node neither hosts nor
                                                    //   routes, a value since kind names arrive from outside
 let out = s.prompt(Turn { id: TURN_ID, content }).await;   // Submit + await RunCompleted (§7.3):
-                                                   //   Result<Result<Completion, RunError>, EntityError>
+                                                   //   Result<Result<Completion, RunError>, PromptError>
 ```
 
-`SessionRef` is `EntityRef<Agent>` (entity §4.3) with a thin agent-facing surface. `prompt(turn)` is a **blocking convenience at the edge, not a protocol primitive**: it spins an ephemeral local actor as the reply-to, `Submit`s the turn carrying that ref, and awaits the one `RunCompleted`. `prompt` is `prompt_within` at the runtime's `submit_deadline` (30 s by default), handing the whole wait to one `Submit`-and-attach attempt: a lapse surfaces as `EntityError::Call(CallError::Timeout)`, and `prompt` re-`Submit`s the same `TurnId` only when the attempt's mailbox drops without an outcome, re-registering on whatever activation now hosts the session. Delegation's `run_child` (§8.1) is the cadenced form: each attempt attaches for at most one cadence, and every lapse re-`Submit`s the same `TurnId` until the budget-scaled wait expires. A non-blocking caller `Submit`s with its own reply-to (as a parent agent does, §8.1) or follows `tail`. A lapsed attempt leaks no actor: its mailbox stops with it, and a notification racing that stop is an ordinary lost delivery (§7.3).
+`SessionRef` is `EntityRef<Agent>` (entity §4.3) with a thin agent-facing surface. `prompt(turn)` is a **blocking convenience at the edge, not a protocol primitive**: it spins an ephemeral local actor as the reply-to, `Submit`s the turn carrying that ref, and awaits the one `RunCompleted`. `prompt` is `prompt_within` at the runtime's `submit_deadline` (30 s by default), handing the whole wait to one `Submit`-and-attach attempt: a lapse surfaces as `PromptError::Entity(EntityError::Call(CallError::Timeout))`, and `prompt` re-`Submit`s the same `TurnId` only when the attempt's mailbox drops without an outcome, re-registering on whatever activation now hosts the session. Delegation's `run_child` (§8.1) is the cadenced form: each attempt attaches for at most one cadence, and every lapse re-`Submit`s the same `TurnId` until the budget-scaled wait expires. A non-blocking caller `Submit`s with its own reply-to (as a parent agent does, §8.1) or follows `tail`. A lapsed attempt leaks no actor: its mailbox stops with it, and a notification racing that stop is an ordinary lost delivery (§7.3).
 
 `prompt` MUST NOT transparently retry a failed `Submit` (core §1.2, entity §2.2). The entity re-issues a command that provably did not commit (`DeadLetter` from a hibernated stale host, `NotLeader`; entity §4.3, §6), but never an *ambiguous* failure (`Unreachable`/`Timeout`), which may have committed before the ack was lost. The **`TurnId`** makes the caller's own re-submission safe:
 
@@ -410,7 +410,7 @@ let out = s.prompt(Turn { id: TURN_ID, content }).await;   // Submit + await Run
 
 **What the digest is not.** A fast 64-bit content hash guards against *accidental* `TurnId` reuse, not a crafted collision (which would attach rather than conflict): it is a caller-bug detector, not a security boundary, since a caller who can address the session already holds it. A gateway scopes session names by principal for that reason.
 
-**What a mismatch produces.** A re-submission whose turn differs (`SubmitReject::ContentConflict`) or whose `kind` differs from the entity's type (`SubmitReject::KindMismatch`) is a caller bug: rejected as a value, journaling nothing, never a transport `EntityError`, because it must not be retried (§7.3†). The blocking conveniences collapse it into their own error form (`prompt` as `EntityError::Call(CallError::System(…))` with the reject's display text, `run_child` as `ToolError::Delegation`); a caller that `Submit`s with its own reply-to reads the `Err` arm directly.
+**What a mismatch produces.** A re-submission whose turn differs (`SubmitReject::ContentConflict`) or whose `kind` differs from the entity's type (`SubmitReject::KindMismatch`) is a caller bug: rejected as a value, journaling nothing, never a transport `EntityError`, because it must not be retried (§7.3†). `prompt` returns it typed, as `PromptError::Rejected(SubmitReject)`, beside `PromptError::Entity` for a transport failure, so a caller tells "fix the request" from "retry the same `TurnId`" by matching; the gateway answers it with `409 Conflict`. Delegation's `run_child` folds it into the call's `ToolError::Delegation`, the outcome the parent's model reads (§5.4); a caller that `Submit`s with its own reply-to reads the `Err` arm directly.
 
 The **subscriber set** (reply-tos registered for a live run) is ephemeral activation state, like the held tiers and the sandbox: never journaled, rebuilt by callers re-contacting after a resume.
 
@@ -593,8 +593,8 @@ A run with no faults MUST still pass.
 // --- runs in the loop (§8). The tier cap defaults to {Workspace, Native} (§5.3 item 4).
 let researcher = Kind::new("You are a research agent.")
     .model(ModelParams::default())
-    .sandboxed("shell", "Run a command in the workspace", &SHELL_SCHEMA, Tier::Native)
-    .sandboxed("read_file", "Read a file from the workspace", &READ_SCHEMA, Tier::Workspace)
+    .tool("shell", "Run a command in the workspace", &SHELL_SCHEMA, Tier::Native)
+    .tool("read_file", "Read a file from the workspace", &READ_SCHEMA, Tier::Workspace)
     .delegates_to(&["researcher"])          // the built-in `delegate` tool; allowlisted child kinds (§5.2, §8)
     .sandbox(SandboxProfile::image("workspace:base"))
     .entity(EntityConfig {                  // the kind IS an entity type's config (§7.1, entity App. A)
@@ -615,12 +615,16 @@ match s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus on X.")).awai
     Ok(Ok(completion))                  => println!("{}", completion.text()),
     Ok(Err(RunError::BudgetExhausted))  => { /* grant a larger budget, resubmit a new turn */ }
     Ok(Err(run_err))                    => eprintln!("run failed: {run_err:?}"),   // Model | Cancelled
-    Err(EntityError::Unavailable(_))     => { /* shard quorum lost; the run PAUSED, not ended;
-                                                re-submit the SAME TurnId on recovery (§6.4, §7.5) */ }
-    Err(EntityError::NotLeader(_))       => { /* retries exhausted; refresh shard map and retry */ }
-    Err(EntityError::Call(Unreachable | Timeout))
+    Err(PromptError::Rejected(_))       => { /* a caller bug, e.g. the TurnId reused for other
+                                                content: fix the request, never retry (§7.4) */ }
+    Err(PromptError::Entity(EntityError::Unavailable(_)))
+        => { /* shard quorum lost; the run PAUSED, not ended;
+                re-submit the SAME TurnId on recovery (§6.4, §7.5) */ }
+    Err(PromptError::Entity(EntityError::NotLeader(_)))
+        => { /* retries exhausted; refresh shard map and retry */ }
+    Err(PromptError::Entity(EntityError::Call(Unreachable | Timeout)))
         => { /* safe to re-submit the SAME TurnId: A6 dedups or attaches (§7.4) */ }
-    Err(e)                              => eprintln!("call failed: {e:?}"),
+    Err(e)                              => eprintln!("call failed: {e}"),
 }
 ```
 
@@ -673,5 +677,7 @@ agent-standalone/     # the node binary: a cluster member hosting the kinds and 
 agent-tui/            # the terminal client: drives one session over a gateway's HTTP/SSE
                         #   surface and renders the run's records as a transcript
 ```
+
+Every module of `agent` is private except `http` and `testing`, so each public item has one path: the crate root re-exports the client, kind-definition, and seam surface, while `agent::http` alone holds the kit a deployment implements and an adapter is built from (`HttpPost`, `HttpResponse`, `HttpError`, `Protocol`, `ProtocolModel`, `tool_result_text`).
 
 `agent` depends on `entity`, and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, placement function, fence, or resume protocol**; the one durable thing it names is the `Record` type (the entity's event) and its `apply` fold. Test-only pieces (scripted model and sandbox, `a_catalogue()`, the conformance suites) live with the tests, dev-depending on `actor-simulation` and the entity's simulation seam. The continuous checkers are the exception: they ship in `testing.rs` behind the `testing` feature because any consumer's swarm can mount them, as the entity's `testing.rs` does. The crate follows the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

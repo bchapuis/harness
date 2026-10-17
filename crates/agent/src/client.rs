@@ -257,6 +257,38 @@ impl std::fmt::Display for UnknownKind {
 
 impl std::error::Error for UnknownKind {}
 
+/// The error of [`SessionRef::prompt`]: the submit was refused, or it could not
+/// be delivered or committed. The two arms want opposite handling, so they stay
+/// apart: a retry can clear an `Entity` failure, never a `Rejected` one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptError {
+    /// The session refused the turn (§7.4): a reused `TurnId` with different
+    /// content, or a kind that is not the entity's type. A caller bug, and
+    /// permanent: the same submit always rejects the same way.
+    Rejected(SubmitReject),
+    /// Reaching the session or committing the turn failed, or the wait lapsed
+    /// (`Call(Timeout)`). Ambiguous: re-submitting the same `TurnId` is safe
+    /// and re-attaches or returns the recorded outcome (A6).
+    Entity(EntityError),
+}
+
+impl From<EntityError> for PromptError {
+    fn from(e: EntityError) -> Self {
+        PromptError::Entity(e)
+    }
+}
+
+impl std::fmt::Display for PromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptError::Rejected(reject) => write!(f, "turn rejected: {reject}"),
+            PromptError::Entity(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for PromptError {}
+
 /// [`HarnessBuilder`] type-state: no routed kinds yet, so `build` is infallible,
 /// hosting starts no discovery.
 pub struct NoRoutes;
@@ -411,7 +443,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
             let factory_seams = seams.clone();
             let entities = self.entity_node.entities_named::<Agent<S>>(
                 entity_type,
-                def.config.clone(),
+                def.entity.clone(),
                 Arc::new(move || {
                     Agent::new(
                         Arc::clone(&factory_shared),
@@ -480,7 +512,7 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// The deadline bounds this caller's **wait**, never the run: on a lapse it
     /// re-submits the same `TurnId`, which re-attaches or returns the recorded
     /// outcome (A6).
-    pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, EntityError> {
+    pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, PromptError> {
         self.prompt_within(turn, self.config.submit_deadline).await
     }
 
@@ -488,19 +520,20 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// turn carrying an ephemeral reply-to mailbox, await the one
     /// `RunCompleted`, and on a wait lapse re-submit the same `TurnId` to
     /// re-attach. A failed `Submit` is **not** transparently retried (entity
-    /// §2.2): an ambiguous transport failure surfaces as `EntityError`.
-    /// (Delegation submits through [`submit_and_attach`] directly, carrying its
-    /// lineage.)
+    /// §2.2): an ambiguous transport failure surfaces as
+    /// [`PromptError::Entity`], a permanent rejection as
+    /// [`PromptError::Rejected`]. (Delegation submits through
+    /// [`submit_and_attach`] directly, carrying its lineage.)
     pub async fn prompt_within(
         &self,
         turn: Turn,
         within: Duration,
-    ) -> Result<RunOutcome, EntityError> {
+    ) -> Result<RunOutcome, PromptError> {
         let started = self.system.now();
         loop {
             let elapsed = self.system.now().duration_since(started);
             let Some(remaining) = within.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
-                return Err(EntityError::Call(CallError::Timeout));
+                return Err(EntityError::Call(CallError::Timeout).into());
             };
             match submit_and_attach(&self.system, &self.entity, &self.kind, &turn, None, remaining)
                 .await
@@ -508,13 +541,8 @@ impl<S: HarnessSystem> SessionRef<S> {
                 AttachOutcome::Completed(outcome) => return Ok(outcome),
                 // Mailbox dropped or wait lapsed: re-submit the same TurnId.
                 AttachOutcome::Lapsed => continue,
-                // A permanent caller-contract violation, surfaced as a system
-                // failure; not transparently retried (entity §2.2).
-                AttachOutcome::Rejected(reject) => {
-                    return Err(EntityError::Call(CallError::System(reject.to_string())));
-                }
-                // An ambiguous transport failure surfaces as `EntityError`.
-                AttachOutcome::Unreachable(e) => return Err(e),
+                AttachOutcome::Rejected(reject) => return Err(PromptError::Rejected(reject)),
+                AttachOutcome::Unreachable(e) => return Err(e.into()),
             }
         }
     }

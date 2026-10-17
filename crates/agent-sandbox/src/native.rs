@@ -126,7 +126,7 @@ impl NativeTier {
         session: &str,
         stats: TierStats,
     ) -> NativeTier {
-        let digest = agent::session::content_digest(&host_workspace.display().to_string());
+        let digest = crate::fnv64(host_workspace.display().to_string().as_bytes());
         NativeTier {
             host: ContainerHost::new(cli, CONTAINER_PREFIX),
             image,

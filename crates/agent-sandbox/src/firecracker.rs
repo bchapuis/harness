@@ -193,7 +193,7 @@ impl FirecrackerTier {
         host_workspace: &Path,
         stats: TierStats,
     ) -> FirecrackerTier {
-        let digest = agent::session::content_digest(&host_workspace.display().to_string());
+        let digest = crate::fnv64(host_workspace.display().to_string().as_bytes());
         let control_key = format!("{digest:016x}");
         FirecrackerTier {
             config,

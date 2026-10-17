@@ -30,7 +30,9 @@ use crate::session::Entry;
 pub struct ModelParams {
     /// The provider-side model identifier.
     pub model: String,
-    /// The per-call output ceiling, before budget clamping (§9.1 item 2).
+    /// The per-call output ceiling. A kind's value is the unclamped ceiling;
+    /// in a [`ModelRequest`] it is already clamped to the run's remaining
+    /// budget (§9.1 item 2).
     pub max_tokens: u64,
 }
 
@@ -62,13 +64,16 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
-/// One inference request (agent spec §4.1): the kind's system prompt and
-/// tool declarations, the folded transcript, and the budget-clamped output
-/// ceiling. A deterministic function of session state (§10.5), so the exact
-/// request issued at any step is reconstructible from the journal prefix.
+/// One inference request (agent spec §4.1): the kind's system prompt, model
+/// parameters, and tool declarations, and the folded transcript. A
+/// deterministic function of session state (§10.5), so the exact request
+/// issued at any step is reconstructible from the journal prefix.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub system_prompt: String,
+    /// The kind's parameters, with `max_tokens` already clamped to the run's
+    /// remaining token budget (§9.1 item 2): the one output ceiling an
+    /// adapter sends.
     pub params: ModelParams,
     pub tools: Vec<ToolSpec>,
     /// The folded conversation, `Arc`-shared with [`SessionState`] so building a
@@ -76,9 +81,6 @@ pub struct ModelRequest {
     /// (§4.1). Serialized as its inner slice (see [`arc_transcript`](crate::session)).
     #[serde(with = "crate::session::arc_transcript")]
     pub transcript: Arc<Vec<Entry>>,
-    /// `params.max_tokens` clamped to the run's remaining token budget
-    /// (§9.1 item 2).
-    pub max_tokens: u64,
 }
 
 /// One tool call the model requested (agent spec §5.2). The `id` is the

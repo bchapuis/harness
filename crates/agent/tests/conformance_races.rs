@@ -48,7 +48,7 @@ use support::tool_call;
 fn probing_kind() -> Kinds {
     Kinds::new().register(
         "echo",
-        Kind::new("agent").sandboxed(
+        Kind::new("agent").tool(
             "probe",
             "probe the workspace",
             &json!({ "type": "object" }),

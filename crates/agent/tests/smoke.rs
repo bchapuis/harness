@@ -33,7 +33,7 @@ fn prompt_completes_through_a_tool_step() {
     let kinds = Kinds::new().register(
         "researcher",
         Kind::new("You are a researcher.")
-            .sandboxed("shell", "run a command", &schema, Tier::Native)
+            .tool("shell", "run a command", &schema, Tier::Native)
             .sandbox(SandboxProfile::image("base")),
     );
     let harness = agent_on(&sim, kinds, model, sandboxes.clone());

@@ -50,7 +50,7 @@ fn shell_kind() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed(
+            .tool(
                 "shell",
                 "run",
                 &json!({ "type": "object" }),
@@ -240,7 +240,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
     let kinds = Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .tool(ToolDecl {
+            .declare(ToolDecl {
                 name: "slow".to_string(),
                 description: "slow tool".to_string(),
                 input_schema: json!({ "type": "object" }),
@@ -310,13 +310,13 @@ fn tiered_kind() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed(
+            .tool(
                 "read",
                 "read a file",
                 &json!({ "type": "object" }),
                 Tier::Workspace,
             )
-            .sandboxed(
+            .tool(
                 "run",
                 "run guest code",
                 &json!({ "type": "object" }),
@@ -501,7 +501,7 @@ fn a_tool_beyond_the_cap_is_a_registration_error() {
         "worker",
         Kind::new("worker")
             .sandbox(SandboxProfile::default().cap([Tier::Workspace]))
-            .sandboxed(
+            .tool(
                 "run",
                 "run guest code",
                 &json!({ "type": "object" }),

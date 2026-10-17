@@ -253,7 +253,6 @@ mod tests {
             params: ModelParams::default(),
             tools: Vec::new(),
             transcript: Arc::new(Vec::new()),
-            max_tokens: 1,
         }
     }
 

@@ -26,7 +26,7 @@ use serde_json::json;
 /// and the model context it feeds.
 const READ_CAP: usize = 256 * 1024;
 
-/// The workspace tier's tool declarations, ready for [`agent::Kind::tool`]:
+/// The workspace tier's tool declarations, ready for [`agent::Kind::declare`]:
 /// every declaration is `Tier::Workspace`, and every tool is idempotent, so
 /// blind re-execution after a crash is safe (`OnOrphan::Reexecute`,
 /// agent spec §5.5).

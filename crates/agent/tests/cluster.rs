@@ -65,7 +65,7 @@ fn kinds() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed(
+            .tool(
                 "shell",
                 "run",
                 &json!({ "type": "object" }),
@@ -293,7 +293,7 @@ fn mixed_call_model() -> ScriptedModel {
 /// The orphaned-call window (§5.5): the leader crashes after a `ModelResponse`
 /// commits and before either call's outcome does. The successor's first sight
 /// of the journal classifies both calls as orphaned. The declared tool
-/// resolves by its policy (`sandboxed` declares `Interrupt`, so `Interrupted`);
+/// resolves by its policy (`Kind::tool` declares `Interrupt`, so `Interrupted`);
 /// the unknown one, which nothing ever ran, is re-synthesized as `UnknownTool`
 /// (§5.4), never `Interrupted`.
 ///

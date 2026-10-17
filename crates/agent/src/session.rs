@@ -345,7 +345,7 @@ pub(crate) mod arc_transcript {
 /// both uses treat digest equality as content equality as a guard against
 /// *accident* (a reused `TurnId`, a drifted kind), never as a security
 /// boundary (§7.4, §10.5).
-pub fn content_digest(content: &str) -> u64 {
+pub(crate) fn content_digest(content: &str) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = FNV_OFFSET_BASIS;

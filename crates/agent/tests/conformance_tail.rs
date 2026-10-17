@@ -49,7 +49,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     let kinds = Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed(
+            .tool(
                 "shell",
                 "run a command",
                 &json!({ "type": "object" }),

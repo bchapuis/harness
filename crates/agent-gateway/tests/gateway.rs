@@ -332,6 +332,32 @@ async fn a_malformed_body_is_a_structured_bad_request() {
     assert_eq!(body["error"]["code"], "bad_request", "{body}");
 }
 
+/// A turn id reused with different content is the client's permanent mistake
+/// (agent spec §7.4): a structured `409`, never a retryable or upstream status.
+#[tokio::test]
+async fn a_reused_turn_id_with_new_content_is_a_conflict() {
+    let gw = gateway().await;
+    let resp = agent_gateway::http::router(gw.clone())
+        .oneshot(prompt_req(Some("alice"), "demo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/assistant/demo/prompt")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer alice")
+        .body(Body::from(
+            r#"{"turn":"t-1","content":"something else","within_secs":30}"#,
+        ))
+        .unwrap();
+    let resp = agent_gateway::http::router(gw).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "turn_conflict", "{body}");
+}
+
 #[tokio::test]
 async fn health_is_live_and_readiness_reflects_draining() {
     let gw = gateway().await;

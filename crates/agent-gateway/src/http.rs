@@ -45,8 +45,8 @@ use tokio::task::JoinHandle;
 
 use agent::Followed;
 use agent::Follower;
-use agent::EntityError;
 use agent::HarnessSystem;
+use agent::PromptError;
 use agent::Record;
 use agent::RecordBody;
 use agent::RunOutcome;
@@ -216,7 +216,7 @@ async fn prompt<S: HarnessSystem>(
         ));
     }
     // A run that *ran* and failed is a `200` outcome below; only a transport
-    // failure becomes a non-2xx status.
+    // failure or a rejected turn becomes a non-2xx status.
     let turn = Turn::new(TurnId::new(body.turn), body.content);
     let outcome = session_ref
         .prompt_within(turn, Duration::from_secs(body.within_secs))
@@ -301,7 +301,7 @@ fn prompt_stream<S: HarnessSystem>(
     let follower = session_ref.follow(Seq::new(from));
     let turn = body.turn.clone();
     let prompt_ref = session_ref.clone();
-    let prompt: JoinHandle<Result<RunOutcome, EntityError>> = tokio::spawn(async move {
+    let prompt: JoinHandle<Result<RunOutcome, PromptError>> = tokio::spawn(async move {
         let turn = Turn::new(TurnId::new(body.turn), body.content);
         prompt_ref
             .prompt_within(turn, Duration::from_secs(body.within_secs))
@@ -331,7 +331,7 @@ fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tai
 /// task and emits the run's `outcome`.
 enum Tail {
     End,
-    Outcome(JoinHandle<Result<RunOutcome, EntityError>>),
+    Outcome(JoinHandle<Result<RunOutcome, PromptError>>),
 }
 
 /// The SSE stream's state: forwarding records, then the [`Tail`], then done.
@@ -391,8 +391,8 @@ async fn next_event<S: HarnessSystem>(
                 Ok(Ok(outcome)) => Event::default()
                     .event("outcome")
                     .data(serde_json::to_string(&outcome).unwrap_or_default()),
-                // Transport failure reaching/committing the run: the structured
-                // error envelope, same code taxonomy as the HTTP body.
+                // A transport failure or a rejected turn: the structured error
+                // envelope, same code taxonomy as the HTTP body.
                 Ok(Err(e)) => error_event(e),
                 Err(e) => error_event(GatewayError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,

@@ -490,4 +490,6 @@ workflow/                  # the autonomous entity (this spec): an entity that d
     workflow_swarm.rs, conformance_catalogue.rs
 ```
 
+Every module is private except `testing`, and the crate root re-exports the public items, so each has one path; `backoff.rs` and `orphan.rs` export nothing at all.
+
 `workflow` depends on `entity`, and directly on `actor-core` for the system seams it launches and delays through and on `actor-serialization` for the bounds a key and an outcome carry onto the command path. It consumes the journal, fence, placement, and resume from entity (§1) and names no durable type of its own: every record a workflow entity writes is the consumer's `Entity::Event`, and the workflow's own state (claims, backoff, subscribers) is ephemeral (§3.3, §3.4, §7.1). It observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

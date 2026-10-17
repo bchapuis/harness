@@ -253,7 +253,7 @@ impl ComputeTier {
                 bytes.len()
             )));
         }
-        let key = fnv64(bytes);
+        let key = crate::fnv64(bytes);
         let mut cache = self
             .cache
             .lock()
@@ -676,15 +676,4 @@ fn guest_path(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> wasmtim
 /// wasmtime cause chain (`{e:#}`).
 fn sandbox_err(step: &'static str) -> impl Fn(wasmtime::Error) -> ToolError {
     move |e| ToolError::Sandbox(format!("compute: {step}: {e:#}"))
-}
-
-/// FNV-1a 64 over bytes: the module cache key (cf.
-/// `agent::session::content_digest`, which is string-shaped).
-fn fnv64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }

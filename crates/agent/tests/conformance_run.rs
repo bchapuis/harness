@@ -10,17 +10,17 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_core::ActorSystem;
-use actor_core::CallError;
 use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
-use entity::EntityError;
 use agent::Budget;
 use agent::Kind;
 use agent::Kinds;
+use agent::PromptError;
 use agent::Record;
 use agent::RecordBody;
 use agent::SessionId;
+use agent::SubmitReject;
 use agent::Tier;
 use agent::Turn;
 use agent::TurnId;
@@ -39,7 +39,7 @@ fn echo_kind() -> Kinds {
     Kinds::new().register(
         "echo",
         Kind::new("You are a test agent.")
-            .sandboxed(
+            .tool(
                 "shell",
                 "Run a command",
                 &json!({ "type": "object" }),
@@ -173,7 +173,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
                     .await;
                 assert!(matches!(
                     mismatch,
-                    Err(EntityError::Call(CallError::System(_)))
+                    Err(PromptError::Rejected(SubmitReject::ContentConflict { .. }))
                 ));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -224,7 +224,10 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
                     )
                     .await;
                 assert!(
-                    matches!(some_default, Err(EntityError::Call(CallError::System(_)))),
+                    matches!(
+                        some_default,
+                        Err(PromptError::Rejected(SubmitReject::ContentConflict { .. }))
+                    ),
                     "Some(default) is not None (§7.4)"
                 );
                 // An identical literal budget re-attaches and returns the
@@ -244,7 +247,7 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
                     .await;
                 assert!(matches!(
                     changed,
-                    Err(EntityError::Call(CallError::System(_)))
+                    Err(PromptError::Rejected(SubmitReject::ContentConflict { .. }))
                 ));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;

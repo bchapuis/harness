@@ -34,17 +34,18 @@ use crate::tool::ToolRegistry;
 #[derive(Clone, Debug)]
 pub struct Kind {
     pub system_prompt: String,
-    pub params: ModelParams,
+    pub model: ModelParams,
     pub tools: ToolRegistry,
-    pub profile: SandboxProfile,
-    pub default_budget: Budget,
+    pub sandbox: SandboxProfile,
+    /// The budget of a turn that states none (§9.1).
+    pub budget: Budget,
     /// Child kinds this kind may delegate to (§8.1). Non-empty ⇒ the built-in
     /// `delegate` tool is in the model's toolset.
     pub delegates: Vec<KindId>,
     /// The entity type's configuration (§7.1, entity Appendix A): shard count,
     /// replication factor, idle window, snapshot policy. The agent runtime passes it to
     /// `entities_named` when it hosts this kind's entity type.
-    pub config: EntityConfig,
+    pub entity: EntityConfig,
 }
 
 impl Kind {
@@ -55,28 +56,28 @@ impl Kind {
     pub fn new(system_prompt: impl Into<String>) -> Kind {
         Kind {
             system_prompt: system_prompt.into(),
-            params: ModelParams::default(),
+            model: ModelParams::default(),
             tools: ToolRegistry::new(),
-            profile: SandboxProfile::default(),
-            default_budget: Budget::new(100_000, 25),
+            sandbox: SandboxProfile::default(),
+            budget: Budget::new(100_000, 25),
             delegates: Vec::new(),
-            config: EntityConfig::default(),
+            entity: EntityConfig::default(),
         }
     }
 
     /// Set the model parameters.
     pub fn model(mut self, params: ModelParams) -> Kind {
-        self.params = params;
+        self.model = params;
         self
     }
 
     /// Declare a sandboxed tool (§5.2) at its required tier (§5.6), with the
     /// safe orphaned policy (`Interrupt`, §5.5): on a crash-resume boundary the
     /// model, not the agent runtime, decides whether to retry the side effect. An
-    /// idempotent tool opts into blind re-execution via [`Kind::tool`]. The tier
-    /// is explicit, never defaulted: it is digest-covered deployment
+    /// idempotent tool opts into blind re-execution via [`Kind::declare`]. The
+    /// tier is explicit, never defaulted: it is digest-covered deployment
     /// configuration (§7.1).
-    pub fn sandboxed(
+    pub fn tool(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
@@ -95,7 +96,7 @@ impl Kind {
     }
 
     /// Declare a sandboxed tool with full control over its declaration.
-    pub fn tool(mut self, decl: ToolDecl) -> Kind {
+    pub fn declare(mut self, decl: ToolDecl) -> Kind {
         self.tools.declare(decl);
         self
     }
@@ -109,27 +110,27 @@ impl Kind {
 
     /// Set the sandbox profile (§5.3 item 4).
     pub fn sandbox(mut self, profile: SandboxProfile) -> Kind {
-        self.profile = profile;
+        self.sandbox = profile;
         self
     }
 
     /// Set the default run budget (§9.1).
     pub fn budget(mut self, budget: Budget) -> Kind {
-        self.default_budget = budget;
+        self.budget = budget;
         self
     }
 
     /// Set the entity type's shard/replication/idle/snapshot policy (§7.1,
     /// entity Appendix A).
     pub fn entity(mut self, config: EntityConfig) -> Kind {
-        self.config = config;
+        self.entity = config;
         self
     }
 
     /// The effective tier cap (§5.3 item 4): the profile's explicit set, or the
     /// spec default; exactly the tiers the declared tools require.
     pub fn tier_cap(&self) -> BTreeSet<Tier> {
-        self.profile
+        self.sandbox
             .tier_cap
             .clone()
             .unwrap_or_else(|| self.tools.iter().map(|d| d.tier).collect())
@@ -148,8 +149,8 @@ impl Kind {
         let mut canon = String::new();
         let mut frame = |field: &str| crate::session::frame_field(&mut canon, field);
         frame(&self.system_prompt);
-        frame(&self.params.model);
-        frame(&self.params.max_tokens.to_string());
+        frame(&self.model.model);
+        frame(&self.model.max_tokens.to_string());
         frame(&format!("tools={}", self.tools.iter().count()));
         for decl in self.tools.iter() {
             frame(&decl.name);
@@ -166,24 +167,24 @@ impl Kind {
                     .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string()),
             );
         }
-        frame(&self.profile.image);
+        frame(&self.sandbox.image);
         let cap = self.tier_cap();
         frame(&format!("cap={}", cap.len()));
         for tier in cap {
             frame(&format!("{tier:?}"));
         }
-        frame(&format!("egress={}", self.profile.egress.len()));
-        for host in &self.profile.egress {
+        frame(&format!("egress={}", self.sandbox.egress.len()));
+        for host in &self.sandbox.egress {
             frame(host);
         }
-        frame(&self.profile.compute.memory_bytes.to_string());
-        frame(&self.profile.compute.fuel.to_string());
-        frame(&self.default_budget.tokens.to_string());
-        frame(&self.default_budget.steps.to_string());
-        frame(&self.config.shards.to_string());
-        frame(&self.config.replication_factor.to_string());
-        frame(&self.config.snapshot_every.to_string());
-        frame(&self.config.idle_after.as_nanos().to_string());
+        frame(&self.sandbox.compute.memory_bytes.to_string());
+        frame(&self.sandbox.compute.fuel.to_string());
+        frame(&self.budget.tokens.to_string());
+        frame(&self.budget.steps.to_string());
+        frame(&self.entity.shards.to_string());
+        frame(&self.entity.replication_factor.to_string());
+        frame(&self.entity.snapshot_every.to_string());
+        frame(&self.entity.idle_after.as_nanos().to_string());
         frame(&format!("delegates={}", self.delegates.len()));
         for kind in &self.delegates {
             frame(kind.as_str());

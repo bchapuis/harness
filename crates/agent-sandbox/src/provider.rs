@@ -18,7 +18,6 @@ use agent::SessionId;
 use agent::Tier;
 use agent::ToolDecl;
 use agent::ToolError;
-use agent::session::content_digest;
 use serde_json::Value;
 
 /// Observable provider activity, for the S5 accounting tests: every
@@ -246,7 +245,7 @@ impl TieredSandboxes {
     }
 }
 
-/// The `shell` declaration, ready for [`agent::Kind::tool`], in the words of
+/// The `shell` declaration, ready for [`agent::Kind::declare`], in the words of
 /// one native realization: the two realizations share everything but the
 /// description, and the description differs on purpose, so that the digest
 /// keeps a mixed-realization cluster from agreeing silently. Arbitrary
@@ -298,7 +297,7 @@ impl SandboxProvider for TieredSandboxes {
         workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
         let workspace = workspace.to_path_buf();
-        let seed = content_digest(&format!("{:016x}|{}", self.seed, session.as_str()));
+        let seed = crate::fnv64(format!("{:016x}|{}", self.seed, session.as_str()).as_bytes());
         let limits = profile.compute;
         #[cfg(feature = "compute")]
         let modules = Arc::new(self.modules.clone());

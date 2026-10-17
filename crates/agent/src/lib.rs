@@ -19,24 +19,25 @@
 //! let out = s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus.")).await;
 //! ```
 
-pub mod agent;
-pub mod budget;
-pub mod client;
-pub mod config;
+mod agent;
+mod budget;
+mod client;
+mod config;
 /// The desired set, as a pure function of committed state: this runtime's
 /// `Workflow::pending`, and with it the `Effect` type the workflow carries from
 /// `pending` to `perform`.
-pub mod desired;
-pub mod event;
+mod desired;
+mod event;
 pub mod http;
-pub mod kind;
-pub mod model;
-pub mod sandbox;
-pub mod session;
+mod kind;
+mod model;
+mod sandbox;
+mod session;
 #[cfg(feature = "testing")]
 pub mod testing;
-pub mod tool;
+mod tool;
 
+pub use agent::SubmitReject;
 pub use budget::Budget;
 pub use budget::Usage;
 pub use client::Followed;
@@ -46,16 +47,12 @@ pub use client::HarnessBuilder;
 pub use client::HarnessSystem;
 pub use client::HasRoutes;
 pub use client::NoRoutes;
+pub use client::PromptError;
 pub use client::SessionRef;
 pub use client::TAIL_PAGE;
 pub use client::UnknownKind;
 pub use config::HarnessConfig;
 pub use event::AgentEvent;
-pub use http::HttpError;
-pub use http::HttpPost;
-pub use http::HttpResponse;
-pub use http::Protocol;
-pub use http::ProtocolModel;
 pub use kind::Kind;
 pub use kind::Kinds;
 pub use model::Model;
@@ -103,4 +100,3 @@ pub use entity::EntityError;
 pub use entity::EventHistory;
 pub use entity::Seq;
 pub use entity::store::EntityStoreFactory;
-pub use entity::store::FileEntityStore;

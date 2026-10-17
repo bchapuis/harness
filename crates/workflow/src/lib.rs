@@ -65,13 +65,13 @@
 //! the orphan set (§4.4). The workflow re-enters after its own settles by itself,
 //! and arms the backoff timer after one that committed nothing (§3.2 item 3).
 
-pub mod backoff;
-pub mod binding;
-pub mod cycle;
-pub mod event;
-pub mod orphan;
-pub mod settle;
-pub mod subscribers;
+mod backoff;
+mod binding;
+mod cycle;
+mod event;
+mod orphan;
+mod settle;
+mod subscribers;
 #[cfg(feature = "testing")]
 pub mod testing;
 

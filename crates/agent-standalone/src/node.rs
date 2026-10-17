@@ -332,7 +332,7 @@ fn kinds(
     // declarations themselves, so a mixed-mode cluster fails to agree instead
     // of silently splitting confinement.
     let equip = |kind: Kind| -> Kind {
-        let kind = tools.iter().cloned().fold(kind, Kind::tool);
+        let kind = tools.iter().cloned().fold(kind, Kind::declare);
         match &profile {
             Some(profile) => kind.sandbox(profile.clone()),
             None => kind,

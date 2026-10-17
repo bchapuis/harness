@@ -42,7 +42,7 @@ fn worker_kinds() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed(
+            .tool(
                 "fetch",
                 "an idempotent read",
                 &json!({ "type": "object" }),

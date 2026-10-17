@@ -79,7 +79,7 @@ impl Workload for FaultyWorkload {
         let kinds = Kinds::new().register(
             "worker",
             Kind::new("worker")
-                .sandboxed(
+                .tool(
                     "shell",
                     "run",
                     &json!({ "type": "object" }),

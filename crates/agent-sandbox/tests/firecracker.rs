@@ -122,8 +122,20 @@ fn control_dir(workspace: &Path) -> PathBuf {
         .expect("workspace exists")
         .display()
         .to_string();
-    let digest = agent::session::content_digest(&workspace);
+    let digest = fnv64(workspace.as_bytes());
     std::env::temp_dir().join(format!("agent-fc-{digest:016x}"))
+}
+
+/// FNV-1a 64, recomputed here rather than imported: the suite derives the
+/// tier's control-directory name independently, so a change to the tier's
+/// derivation fails this test instead of silently agreeing with it.
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn vm_pids(control: &Path) -> Vec<String> {

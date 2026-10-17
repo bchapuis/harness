@@ -32,6 +32,7 @@ use workflow::Pending;
 
 use crate::config::HarnessConfig;
 use crate::kind::Kind;
+use crate::model::ModelParams;
 use crate::model::ModelRequest;
 use crate::model::ToolSpec;
 use crate::sandbox::Tier;
@@ -87,8 +88,8 @@ pub enum StepKey {
 /// child it started (§9.2), and the outcome the fold can synthesize without
 /// executing anything (§5.4).
 pub enum Effect {
-    /// The model call answering step `step` (§3.1 step 2).
-    Model { step: u32, request: ModelRequest },
+    /// The model call its key names (§3.1 step 2).
+    Model { request: ModelRequest },
     /// The sandboxed tool call `call` names (§3.1 step 4, §5.3).
     Tool {
         call: CallId,
@@ -97,16 +98,15 @@ pub enum Effect {
         input: Value,
         timeout: Duration,
     },
-    /// The delegation `call` names, its `ChildRun` already journaled (§8.1).
+    /// The delegation its key names, its `ChildRun` already journaled (§8.1).
     Delegate {
-        call: CallId,
         turn: TurnId,
         prompt: String,
         child: ChildRef,
         root: SessionId,
     },
     /// A call the fold answers on its own: nothing is executed (§5.4).
-    Fail { call: CallId, error: ToolError },
+    Fail { error: ToolError },
     /// The `Cancel` still owed to `child` (§9.2 item 2): fold state
     /// (`cancels_owed`) until the child's ack journals `CancelDelivered`. Which
     /// delegation owes it is the key's to say ([`StepKey::Cancel`]), so the effect
@@ -166,11 +166,9 @@ pub fn desired(
         // so it belongs here: a run past its budget calls for no further model
         // call, and the tick ends it instead of launching one.
         if live.spend.allows_call(&live.budget, config.budget_floor) {
-            let step = live.spend.own_steps;
             set.push(Pending::reexecute(
-                StepKey::Model(live.turn.clone(), step),
+                StepKey::Model(live.turn.clone(), live.spend.own_steps),
                 Effect::Model {
-                    step,
                     request: build_request(kind, state, live),
                 },
             ));
@@ -198,14 +196,12 @@ pub fn desired(
                 // here is a drifted schema; resolve rather than strand.
                 Err(e) => (
                     Effect::Fail {
-                        call: call.clone(),
                         error: ToolError::InvalidArguments(e.to_string()),
                     },
                     OnOrphan::Reexecute,
                 ),
                 Ok(request) => (
                     Effect::Delegate {
-                        call: call.clone(),
                         turn: live.turn.clone(),
                         prompt: request.prompt,
                         child,
@@ -218,7 +214,6 @@ pub fn desired(
             match kind.tools.get(&pending.name) {
                 None => (
                     Effect::Fail {
-                        call: call.clone(),
                         error: ToolError::UnknownTool {
                             name: pending.name.clone(),
                         },
@@ -227,7 +222,6 @@ pub fn desired(
                 ),
                 Some(_) if !pending.input.is_object() => (
                     Effect::Fail {
-                        call: call.clone(),
                         error: ToolError::InvalidArguments(
                             "tool input must be a JSON object".into(),
                         ),
@@ -268,13 +262,13 @@ pub(crate) fn tier_of(effect: &Effect) -> Option<Tier> {
     }
 }
 
-/// The model request for the run's current step (§4.1), clamping `max_tokens` to
-/// the remaining budget (§9.1 item 2). Part of the pure function: a request is a
-/// projection of the transcript and the kind, and `perform` is given no state to
-/// build one from.
+/// The model request for the run's current step (§4.1), its `max_tokens` the
+/// kind's ceiling clamped to the remaining budget (§9.1 item 2). Part of the pure
+/// function: a request is a projection of the transcript and the kind, and
+/// `perform` is given no state to build one from.
 fn build_request(kind: &Kind, state: &SessionState, live: &LiveRun) -> ModelRequest {
     let max_tokens = kind
-        .params
+        .model
         .max_tokens
         .min(live.spend.remaining_tokens(&live.budget));
     let mut tools: Vec<ToolSpec> = kind.tools.specs();
@@ -283,10 +277,12 @@ fn build_request(kind: &Kind, state: &SessionState, live: &LiveRun) -> ModelRequ
     }
     ModelRequest {
         system_prompt: kind.system_prompt.clone(),
-        params: kind.params.clone(),
+        params: ModelParams {
+            max_tokens,
+            ..kind.model.clone()
+        },
         tools,
         transcript: Arc::clone(&state.transcript),
-        max_tokens,
     }
 }
 

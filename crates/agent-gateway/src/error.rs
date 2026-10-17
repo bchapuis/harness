@@ -1,8 +1,10 @@
 //! The gateway's client-facing error model.
 //!
-//! Two failure layers stay distinct on the wire, exactly as the agent runtime keeps
+//! The failure layers stay distinct on the wire, exactly as the agent runtime keeps
 //! them apart (spec §12/§14): a *transport or durability* failure of reaching or
-//! committing a command (an [`EntityError`]) becomes an HTTP status here; an
+//! committing a command (an [`EntityError`]) becomes a retryable or upstream HTTP
+//! status here; a turn the session *rejected* ([`SubmitReject`], a reused turn id
+//! with different content) is the client's own permanent mistake, a `409`; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is
 //! **not** an error at this layer, it is a `200` whose body carries the outcome.
 //!
@@ -19,12 +21,14 @@ use axum::http::header::WWW_AUTHENTICATE;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use agent::EntityError;
+use agent::PromptError;
+use agent::SubmitReject;
 use serde_json::json;
 
 /// A client-facing gateway error: a stable machine `code`, an HTTP `status`, and
 /// a human `message`. Built from the edge's own validation ([`bad_request`],
-/// [`unauthorized`]) and from an [`EntityError`], never from a run's own
-/// `RunError` (see the module docs).
+/// [`unauthorized`]), from an [`EntityError`], and from a [`PromptError`], never
+/// from a run's own `RunError` (see the module docs).
 ///
 /// [`bad_request`]: GatewayError::bad_request
 /// [`unauthorized`]: GatewayError::unauthorized
@@ -96,6 +100,26 @@ impl From<EntityError> for GatewayError {
     }
 }
 
+impl From<PromptError> for GatewayError {
+    /// A rejected turn is `409 Conflict`: the session holds a different turn
+    /// under that id (`turn_conflict`) or is not of the addressed kind
+    /// (`kind_mismatch`). Permanent, so a client must change the request, not
+    /// retry it (agent spec §7.4). Every other failure maps as an
+    /// [`EntityError`].
+    fn from(e: PromptError) -> GatewayError {
+        match e {
+            PromptError::Rejected(reject) => {
+                let code = match &reject {
+                    SubmitReject::ContentConflict { .. } => "turn_conflict",
+                    SubmitReject::KindMismatch { .. } => "kind_mismatch",
+                };
+                GatewayError::new(StatusCode::CONFLICT, code, reject.to_string())
+            }
+            PromptError::Entity(e) => e.into(),
+        }
+    }
+}
+
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let body = Json(json!({ "error": { "code": self.code, "message": self.message } }));
@@ -133,6 +157,20 @@ mod tests {
         assert_eq!(
             GatewayError::from(EntityError::Call(CallError::Unhandled)).status(),
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn a_rejected_turn_is_a_conflict() {
+        let e = GatewayError::from(PromptError::Rejected(SubmitReject::ContentConflict {
+            turn: agent::TurnId::new("t-1"),
+        }));
+        assert_eq!(e.status(), StatusCode::CONFLICT);
+        assert_eq!(e.code, "turn_conflict");
+        // A transport failure keeps its own mapping through the same conversion.
+        assert_eq!(
+            GatewayError::from(PromptError::Entity(EntityError::Call(CallError::Timeout))).status(),
+            StatusCode::GATEWAY_TIMEOUT
         );
     }
 

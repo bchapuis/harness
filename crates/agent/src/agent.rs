@@ -552,7 +552,7 @@ impl<S: HarnessSystem> Agent<S> {
             ));
         }
         let explicit = turn.budget.is_some();
-        let budget = turn.budget.unwrap_or(kind.default_budget);
+        let budget = turn.budget.unwrap_or(kind.budget);
         batch.push(self.rec(
             ctx,
             RecordBody::TurnSubmitted {
@@ -1049,7 +1049,7 @@ impl<S: HarnessSystem> Agent<S> {
             // just waits for it.
             if act.env.slot.begin_open() {
                 match ctx.ws().dir_path() {
-                    Ok(workspace) => self.launch_open(ctx, kind.profile.clone(), workspace),
+                    Ok(workspace) => self.launch_open(ctx, kind.sandbox.clone(), workspace),
                     // No workspace to run over, so nothing to open: give the
                     // claim back and fail the calls that needed it, the same
                     // batch a failed open produces. The set holds at least one
@@ -1097,7 +1097,7 @@ impl<S: HarnessSystem> Agent<S> {
         };
         let session = Self::session(ctx);
         let (child_session, child_turn) = derive_child(&session, turn, call);
-        let requested = request.budget.unwrap_or(child_def.default_budget);
+        let requested = request.budget.unwrap_or(child_def.budget);
         let budget = live.spend.carve(&live.budget, requested);
         Ok(self.rec(
             ctx,

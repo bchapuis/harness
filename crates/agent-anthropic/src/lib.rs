@@ -15,15 +15,15 @@
 //! replaces this crate entirely (§12.1).
 
 use agent::Entry;
-use agent::HttpResponse;
 use agent::ModelError;
 use agent::ModelRequest;
 use agent::ModelResponse;
 use agent::ToolCall;
 use agent::Usage;
+use agent::WORKSPACE_RESET_NOTICE;
+use agent::http::HttpResponse;
 use agent::http::Protocol;
 use agent::http::ProtocolModel;
-use agent::WORKSPACE_RESET_NOTICE;
 use agent::http::tool_result_text;
 use serde::Deserialize;
 use serde::Serialize;
@@ -129,7 +129,7 @@ fn encode_request(req: &ModelRequest) -> Value {
 
     let mut body = json!({
         "model": req.params.model,
-        "max_tokens": req.max_tokens,
+        "max_tokens": req.params.max_tokens,
         "system": req.system_prompt,
         "messages": messages,
     });
@@ -241,7 +241,6 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::HttpError;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -249,11 +248,12 @@ mod tests {
     use actor_simulation::Simulation;
     use agent::BoxFuture;
     use agent::CallId;
-    use agent::HttpPost;
     use agent::Model;
     use agent::ModelParams;
     use agent::ToolError;
     use agent::ToolSpec;
+    use agent::http::HttpError;
+    use agent::http::HttpPost;
 
     /// A scripted transport: pops the next canned reply per call, asserting the
     /// protocol's path and key header on the way.
@@ -302,7 +302,7 @@ mod tests {
             system_prompt: "be terse".to_string(),
             params: ModelParams {
                 model: "claude-sonnet-4-6".to_string(),
-                max_tokens: 4_096,
+                max_tokens: 1234,
             },
             tools: vec![ToolSpec {
                 name: "shell".to_string(),
@@ -325,7 +325,6 @@ mod tests {
                 },
                 Entry::WorkspaceReset,
             ]),
-            max_tokens: 1234,
         }
     }
 

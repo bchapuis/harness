@@ -73,3 +73,18 @@ pub use provider::TierStats;
 pub use provider::TieredSandboxes;
 #[cfg(feature = "quickjs")]
 pub use provider::quickjs_module;
+
+/// FNV-1a 64 over bytes: the compute module cache key, the per-session guest
+/// seed, and the digest in a session's container name and VM control
+/// directory. Seeds and names are observable outside the process (a guest's
+/// output, a container's name), so the function must stay stable. Fast, not
+/// collision-resistant: no use is a security boundary.
+#[cfg(feature = "workspace")]
+pub(crate) fn fnv64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}

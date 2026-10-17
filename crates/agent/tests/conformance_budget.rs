@@ -108,7 +108,7 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
     let kinds = Kinds::new().register(
         "looper",
         Kind::new("loop forever")
-            .sandboxed(
+            .tool(
                 "shell",
                 "run",
                 &json!({ "type": "object" }),
@@ -149,7 +149,7 @@ fn token_exhaustion_is_enforced_before_the_call() {
     let kinds = Kinds::new().register(
         "looper",
         Kind::new("loop forever")
-            .sandboxed(
+            .tool(
                 "shell",
                 "run",
                 &json!({ "type": "object" }),

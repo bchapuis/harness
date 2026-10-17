@@ -13,9 +13,9 @@
 use std::time::Duration;
 
 use actor_core::BoxFuture;
-use agent::HttpError;
-use agent::HttpPost;
-use agent::HttpResponse;
+use agent::http::HttpError;
+use agent::http::HttpPost;
+use agent::http::HttpResponse;
 use agent_http::Origin;
 
 /// Bound on one whole request, connect to last byte. Generous: a large
