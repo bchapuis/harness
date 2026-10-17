@@ -2,14 +2,15 @@
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event
 //! fold, the [`Alarm`](crate::alarm::Alarm) facet, and an entity's self-driving loop.
 //!
-//! **The durable core is memoization.** A workflow is a re-entrant decision the
-//! entity re-drives after every commit (agent §3). Each **step** runs an external
-//! effect *once*; its result is journaled under the steps tag and folded into a
+//! **The durable core is memoization.** A steps consumer is a re-entrant decision
+//! the entity re-drives after every commit. Each **step** runs an external effect;
+//! its result is journaled under the steps tag and folded into a
 //! `step id → bytes` map. On replay (a later drive, a re-activation, a failover)
-//! a completed step resolves from the map instead of re-running, so effects are
-//! at-most-once across crashes. `sleep` is a step whose effect is a durable
-//! [`Alarm`](crate::alarm::Alarm); `retry` is a step that re-launches after an
-//! alarm-backed backoff.
+//! a completed step resolves from the map instead of re-running. The memo is
+//! write-once, not the effect: a re-activation may re-launch a step whose result
+//! has not committed, and the first committed result wins. `sleep` is a step
+//! whose effect is a durable [`Alarm`](crate::alarm::Alarm); `retry` is a step
+//! that re-launches after an alarm-backed backoff.
 //!
 //! **What the entity still wires.** Launching a step's effect off the command path
 //! and self-`tell`ing its result back is entity-specific (the effect's type is), so
@@ -38,9 +39,9 @@ use crate::facet::decode_payload;
 use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
 
-/// A workflow step's identity: its stable call-site ordinal within the workflow
-/// (spec §7.17). Must be assigned deterministically across re-drives and replay, so
-/// a completed step resolves to the same memoized result every time.
+/// A step's identity: its stable call-site ordinal within the consumer's step
+/// sequence (spec §7.17). Must be assigned deterministically across re-drives and
+/// replay, so a completed step resolves to the same memoized result every time.
 pub type StepId = u32;
 
 /// The steps facet marker (spec §7.17): declare `type Facets = (Steps, Alarm, …)`
@@ -107,7 +108,7 @@ impl Facet for Steps {
     }
 }
 
-/// The handler-facing workflow accessor (spec §7.17), obtained from
+/// The handler-facing step-memo accessor (spec §7.17), obtained from
 /// [`EntityCtx::steps`](crate::EntityCtx::steps).
 pub struct StepsHandle<'a, G: Entity, I>
 where
@@ -118,7 +119,7 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's workflow step memo (spec §7.17). Compiles exactly when the entity
+    /// The entity's step memo (spec §7.17). Compiles exactly when the entity
     /// declares the [`Steps`] facet (`type Facets = (Steps, …)`). Recording is
     /// valid only inside a command handler (§7.12); reads are valid anywhere.
     pub fn steps<I>(&self) -> StepsHandle<'_, G, I>
@@ -224,14 +225,13 @@ where
 }
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
-/// already launched (spec §7.17), the launch-once half of the workflow pattern.
+/// already launched (spec §7.17), the launch-once half of the step pattern.
 /// Never journaled: a re-activation rebuilds it and re-launches any step still
-/// unresolved in the memo (at-most-once holds because the *result*, not the
-/// launch, is the durable fact).
+/// unresolved in the memo (the memo stays write-once because the *result*, not
+/// the launch, is the durable fact).
 ///
-/// `K` is the consumer's step key. The default [`StepId`] fits an ordinal
-/// workflow; an entity whose steps carry richer identity substitutes its own
-/// `Ord` key (the agent keys tool steps by the model's call id).
+/// `K` is the consumer's step key. The default [`StepId`] fits ordinal steps;
+/// an entity whose steps carry richer identity substitutes its own `Ord` key.
 pub struct LaunchGuard<K: Ord = StepId> {
     launched: BTreeSet<K>,
 }

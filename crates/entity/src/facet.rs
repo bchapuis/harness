@@ -409,8 +409,8 @@ pub(crate) mod sealed {
 
 /// One durable storage feature of an entity (spec §7.12). **Sealed**: the built-in
 /// facets are the only implementations (the KV map §7.13, the workspace filesystem
-/// §7.11, the SQL database §7.14, the disk image §7.15); third-party facets are a
-/// deferred policy decision (§16).
+/// §7.11, the SQL database §7.14, the disk image §7.15, the alarm §7.16, the step
+/// memo §7.17); third-party facets are a deferred policy decision (§16).
 ///
 /// The obligations are the facet contract (§7.12): [`fold`](Facet::fold) is
 /// deterministic (**F1**), [`restore`](Facet::restore)-then-replay equals the full

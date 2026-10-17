@@ -6,7 +6,7 @@
 //! reconstructed sequence must equal the committed one (contiguous, in order, no
 //! gap or duplicate) through buffer overflow (a burst writer) and a shard-leader
 //! crash mid-stream (push stops; the re-sync backfill recovers every post-move
-//! record). The collector below is the reference reconciler; `agent::Follower`
+//! record). The collector below is the reference reconciler; `entity::Follower`
 //! implements the same contract.
 
 mod support;

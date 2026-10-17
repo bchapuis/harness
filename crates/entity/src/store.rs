@@ -25,8 +25,7 @@
 
 // The rest of the durable substrate, re-exported so a deployment wiring storage
 // finds it under one name: the journal vocabulary these stores speak, the two
-// stock journals, where blocking store calls run, the committed-record streams
-// read back out, and the commit metrics.
+// stock journals, where blocking store calls run, and the commit metrics.
 pub use crate::blocking::BlockingIo;
 pub use crate::blocking::InlineIo;
 pub use crate::blocking::NodeStore;
@@ -42,12 +41,6 @@ pub use crate::memory::LocalEntityJournal;
 pub use crate::metrics::AtomicEntityMetrics;
 pub use crate::metrics::CommitOutcome;
 pub use crate::metrics::EntityMetrics;
-pub use crate::subscription::RecordBatch;
-pub use crate::subscription::RecordSink;
-pub use crate::subscription::RecordStream;
-pub use crate::subscription::Subscribe;
-pub use crate::subscription::Subscribed;
-pub use crate::subscription::Subscription;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;

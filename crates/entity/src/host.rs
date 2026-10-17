@@ -879,11 +879,8 @@ impl<G: Entity> Host<G> {
     /// and backfills by `load`), so a slow subscriber never blocks a write. Only
     /// enqueues to in-process channels; the cross-node push is in each forwarder.
     fn deliver_records(&mut self, from: Seq, to: Seq, bytes: Vec<Vec<u8>>) {
-        let records: Vec<(u64, Vec<u8>)> = (from.value() + 1..=to.value()).zip(bytes).collect();
-        let batch = Arc::new(RecordBatch {
-            from: from.value(),
-            records,
-        });
+        let records = (from.value() + 1..=to.value()).map(Seq::new).zip(bytes).collect();
+        let batch = Arc::new(RecordBatch { from, records });
         self.sinks
             .retain(|sink| sink.try_send(batch.clone()).is_ok());
     }

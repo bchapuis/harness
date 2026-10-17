@@ -33,7 +33,6 @@ use entity::EntitySystem;
 use entity::EventHistory;
 use entity::Seq;
 use entity::cluster::EntityNode;
-use entity::store::Subscription;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::future::select;
@@ -577,15 +576,11 @@ impl<S: HarnessSystem> SessionRef<S> {
             .await
     }
 
-    /// Follow the session's records live from `from` (entity §7.9). See
-    /// [`Follower`]; caller-driven, pull batches with [`Follower::next`].
+    /// Follow the session's records after `from` live (§10.2): the entity's
+    /// follower over the session (entity §7.9). Caller-driven: pull batches
+    /// with its `next`.
     pub fn follow(&self, from: Seq) -> Follower<S> {
-        Follower {
-            entity: self.entity.clone(),
-            system: self.system.clone(),
-            sub: None,
-            last: from,
-        }
+        self.entity.follow(from)
     }
 }
 
@@ -596,129 +591,14 @@ impl<S: HarnessSystem> SessionRef<S> {
 /// so the clamp here is the API contract, not the safety.)
 pub const TAIL_PAGE: u32 = 1024;
 
-/// Journal page size for a follower's backfill reads.
-const FOLLOW_PAGE: usize = 256;
+/// A live follower over a session's records (§10.2): entity's **E16**
+/// reconciler, yielding the exact committed record sequence, or
+/// `Followed::Truncated` where compaction outran the cursor.
+pub type Follower<S> = entity::Follower<Agent<S>>;
 
-/// How long a caught-up follower waits for a live record before re-checking the
-/// journal. A silent leader move or crash leaves the old sink alive but idle
-/// (the stream never closes and the new leader has no sink), so a periodic
-/// backfill is the liveness net that detects the move and re-subscribes (entity §7.9).
-const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
-
-/// What one [`Follower::next`] yields: the next records, or the one thing that
-/// breaks the exact-sequence contract; snapshot compaction truncating the
-/// journal past the follower's cursor (entity §9).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Followed {
-    /// The next in-order records after the cursor, at least one.
-    Batch(Vec<(Seq, Record)>),
-    /// The journal compacted past the cursor: the records in `(cursor, base]`
-    /// are subsumed by the session's snapshot and can no longer be read, by
-    /// this follower or anyone. The stream resumes after `base`; the signal is
-    /// surfaced (rather than silently jumped) so an observer never mistakes
-    /// truncated history for a complete transcript.
-    Truncated { base: Seq },
-}
-
-/// A live follower over a session's journal (entity §7.9). It rides an entity
-/// record subscription and reconciles by `Seq`: it backfills from the journal on
-/// first attach, on any gap, and after the stream closes (a leader move, a
-/// lag-drop, or hibernation), so [`next`](Self::next) yields the exact committed
-/// sequence, in order, with no gap or duplicate (entity E16); except where
-/// compaction has truncated it, which it reports as [`Followed::Truncated`]
-/// rather than papering over. Push is the fast path; the journal is the
-/// authority.
-pub struct Follower<S: HarnessSystem> {
-    entity: EntityRef<Agent<S>>,
-    /// For the re-sync liveness timer (a silent move leaves the stream open).
-    system: S,
-    /// The live subscription, or `None` before the first attach / after a close.
-    sub: Option<Subscription<Agent<S>>>,
-    /// The highest seq handed to the caller: the reconciliation cursor.
-    last: Seq,
-}
-
-impl<S: HarnessSystem> Follower<S> {
-    /// The next in-order records after the last ones returned (at least one),
-    /// or a [`Followed::Truncated`] when compaction has outrun the cursor.
-    /// Blocks until records are available, attaching, backfilling, and
-    /// re-subscribing transparently. An `EntityError` is a real durability
-    /// outcome (the shard cannot serve right now) the caller may surface and
-    /// retry.
-    pub async fn next(&mut self) -> Result<Followed, EntityError> {
-        loop {
-            // (Re)attach if needed: subscribe registers a sink and returns the
-            // head, so any commit from here on is pushed; the backfill below
-            // closes whatever gap preceded the attach (a late start or a move).
-            if self.sub.is_none() {
-                self.sub = Some(self.entity.subscribe(self.last).await?);
-            }
-            // Backfill straight from the journal (the source of truth) until the
-            // cursor reaches the head; return as soon as a page has records.
-            if let Some(step) = self.backfill().await? {
-                return Ok(step);
-            }
-            // Caught up: race the next live batch against a re-sync timer. Clone
-            // the receiver so no borrow of `self.sub` is held across the await.
-            let rx = self.sub.as_ref().expect("attached").records.clone();
-            let recv = rx.recv();
-            let resync = self.system.sleep(FOLLOW_RESYNC);
-            futures::pin_mut!(recv);
-            match select(recv, resync).await {
-                // A live batch: reconcile by seq.
-                Either::Left((Ok(stream), _)) => {
-                    if stream.from <= self.last {
-                        let fresh: Vec<(Seq, Record)> = stream
-                            .records
-                            .into_iter()
-                            .filter(|(seq, _)| *seq > self.last)
-                            .collect();
-                        if let Some((seq, _)) = fresh.last() {
-                            self.last = *seq;
-                            return Ok(Followed::Batch(fresh));
-                        }
-                    }
-                    // A gap (`from > last`, a lag-drop) or all duplicates (a
-                    // re-subscribe replay): fall through; the loop re-backfills.
-                }
-                // The stream closed (a clean step-down dropped the sink): re-attach.
-                Either::Left((Err(_), _)) => self.sub = None,
-                // The timer won: a silent move/crash leaves the stream open but
-                // dead. If the head advanced anyway, re-subscribe to the current
-                // leader (the old sink is orphaned) and return the backfill; else
-                // we are simply idle; keep the subscription, no churn.
-                Either::Right(_) => {
-                    if let Some(step) = self.backfill().await? {
-                        self.sub = None;
-                        return Ok(step);
-                    }
-                }
-            }
-        }
-    }
-
-    /// One page of records after the cursor, read from the journal (the
-    /// non-activating gateway read, entity §7.5), advancing the cursor. `None`
-    /// when already at the head. A compaction base above the cursor is the
-    /// truncation signal: the cursor jumps to the base and the fetched records
-    /// are dropped; the next call re-reads from the base, so the one-page
-    /// waste buys a caller that always hears about the gap *before* any record
-    /// past it.
-    async fn backfill(&mut self) -> Result<Option<Followed>, EntityError> {
-        let history = self.entity.events(self.last, FOLLOW_PAGE).await?;
-        if history.base > self.last {
-            self.last = history.base;
-            return Ok(Some(Followed::Truncated { base: history.base }));
-        }
-        match history.events.last() {
-            Some((seq, _)) => {
-                self.last = *seq;
-                Ok(Some(Followed::Batch(history.events)))
-            }
-            None => Ok(None),
-        }
-    }
-}
+/// What one `next` on a [`Follower`] yields: the next records, or the
+/// compaction base the cursor jumped to.
+pub type Followed = entity::Followed<Record>;
 
 /// The ephemeral reply-to actor behind `prompt` and delegation (§7.4): it parks
 /// on one [`RunCompleted`] notification, hands its outcome to a one-shot channel,

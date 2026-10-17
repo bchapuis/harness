@@ -26,14 +26,15 @@
 //! atomic tagged batch** in the entity's single journal, snapshot as one
 //! composite, and share one unioned blob root set.
 //!
-//! # Durable alarms and workflows
+//! # Durable alarms and step memos
 //!
 //! The [`Alarm`](facet::Alarm) facet stores a single per-entity deadline; when it passes the
 //! runtime fires [`Entity::on_alarm`] with **no caller present** (spec §7.16). The
-//! [`Steps`](facet::Steps) step memo builds on it: each step's effect runs at most once
-//! across crashes because its result is journaled and memoized. An alarm fires
-//! while its entity is resident and re-arms on re-activation. To fire
-//! with **no access after a node failover or hibernation**, host a type with
+//! [`Steps`](facet::Steps) step memo builds on it: each step's result is journaled
+//! write-once, so a completed step resolves from the memo across crashes instead of
+//! running again. An alarm fires while its entity is resident and re-arms on
+//! re-activation. To fire with **no access after a node failover or hibernation**,
+//! host a type with
 //! [`entities_with_alarms`](EntityExt::entities_with_alarms): each host registers its
 //! deadline in a per-shard [`AlarmIndex`](cluster::AlarmIndex) (an acknowledged registration, which is
 //! what lets an alarmed entity hibernate; an unacked one pins it resident), and a
@@ -149,4 +150,11 @@ pub use event::EntityEvent;
 // authoring vocabulary, not store vocabulary, so it alone of the journal names
 // sits here.
 pub use journal::Seq;
+// What `EntityRef::subscribe` and `EntityRef::follow` hand back: read
+// vocabulary beside `EventHistory`, so a caller following an entity opens no
+// storage namespace.
+pub use subscription::Followed;
+pub use subscription::Follower;
+pub use subscription::RecordStream;
+pub use subscription::Subscription;
 pub use system::EntitySystem;

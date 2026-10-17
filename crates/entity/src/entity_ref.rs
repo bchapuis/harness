@@ -43,6 +43,7 @@ use crate::store::EntityStore;
 use crate::store::MemoryEntityStore;
 use crate::store::NodeStore;
 use crate::subscription::CloseSink;
+use crate::subscription::Follower;
 use crate::subscription::RecordSink;
 use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
@@ -422,7 +423,7 @@ impl<G: Entity> EntityRef<G> {
     /// **E16**): backfill `from`..`head` by reading the journal, then on each
     /// batch close any gap and ignore anything already seen. When the stream
     /// closes (a move, a lag-drop, or hibernation) re-subscribe and backfill
-    /// from the last seq.
+    /// from the last seq. [`follow`](Self::follow) is that reconciliation.
     pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, EntityError> {
         // Resolve BEFORE spawning the sink: a failed resolution must not leave an
         // orphan actor behind; the framework does not reap an actor merely because
@@ -432,10 +433,11 @@ impl<G: Entity> EntityRef<G> {
             .await?;
         let (tx, rx) = async_channel::bounded(SUB_BUFFER);
         let sink = self.system.spawn(RecordSink::<G>::new(tx));
-        match host
-            .ask_timeout(Subscribe::new(from, sink.clone()), DEFAULT_ASK_TIMEOUT)
-            .await
-        {
+        let subscribe = Subscribe {
+            from,
+            sink: sink.clone(),
+        };
+        match host.ask_timeout(subscribe, DEFAULT_ASK_TIMEOUT).await {
             Ok(subscribed) => Ok(Subscription {
                 head: subscribed.head,
                 records: rx,
@@ -447,6 +449,15 @@ impl<G: Entity> EntityRef<G> {
                 Err(EntityError::Call(call))
             }
         }
+    }
+
+    /// Follow the entity's committed events after `from` live (spec §7.9): a
+    /// [`Follower`] whose [`next`](Follower::next) yields them in exact `Seq`
+    /// order, reconciling the [`subscribe`](Self::subscribe) push against
+    /// [`events`](Self::events) reads so the caller need not. Caller-driven
+    /// and lazy: the first `next` attaches.
+    pub fn follow(&self, from: Seq) -> Follower<G> {
+        Follower::new(self.clone(), self.system.clone(), from)
     }
 
     /// Up to `limit` of the entity's committed events after `from` (exclusive),

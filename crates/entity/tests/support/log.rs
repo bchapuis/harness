@@ -6,7 +6,7 @@
 //! maintained second copy of a reconciler drifts into agreeing with whatever the
 //! code does (docs/simulation-testing.md).
 //!
-//! [`collect`] is the contract `agent::Follower` implements: subscribe,
+//! [`collect`] is the contract `entity::Follower` implements: subscribe,
 //! backfill the gap by `load`, take live batches, and re-check the journal when
 //! the stream goes quiet. Everything it does is forced by **E16**: push is a
 //! latency optimization and correctness rests on the journal, so a sink that
@@ -24,7 +24,7 @@ use entity::EntityHandler;
 use entity::EntityRef;
 use entity::EntitySystem;
 use entity::Seq;
-use entity::store::Subscription;
+use entity::Subscription;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -98,7 +98,7 @@ impl EntityHandler<ReadFrom> for LogEntity {
     }
 }
 
-// --- The reference reconciler (the contract `agent::Follower` implements) ----
+// --- The reference reconciler (the contract `entity::Follower` implements) ---
 
 /// Collect the entity's records up to `target` by reconciling a subscription with
 /// journal backfill: subscribe, backfill the gap, take live batches, and on a
