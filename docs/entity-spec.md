@@ -686,7 +686,7 @@ The alarm facet gives an entity a **durable timer**: at most one pending deadlin
 
 - **Storage is a trivially logical facet.** `Set(due)` and `Clear` records fold into a single `Option` deadline (last write wins), the source of truth for whether and when the entity fires. Arming and cancelling stage like a KV write (§7.12); the encoded form is the snapshot contribution; the root set is empty.
 - **Firing goes through the same barrier.** After each commit and on activation the host arms an **epoch-guarded in-activation timer** from the folded deadline; when it elapses the host delivers itself a callerless `AlarmDue` command that runs `on_alarm` through the §6 barrier, so an alarm's effects are as durable and fenced as any command's. The epoch guard makes a superseded timer's late `AlarmDue` a no-op.
-- **Two surfaces are ungated, and both are inert rather than a hole.** `on_alarm` (§4.1) is declared on `Entity` itself, so an entity implementing it without `Facets = (Alarm, …)` compiles and is never called, since only the facet's folded form arms a deadline. Hosting through `entities_with_alarms` is likewise ungated: a type without the facet gains nothing from the index. Gating both is reachable (a `where` clause on two hosting signatures; moving the hook behind `EntityRegistry`, which has the facet set in scope); until then the inertness is stated, not enforced.
+- **One surface is ungated, and it is inert rather than a hole.** `on_alarm` (§4.1) is declared on `Entity` itself, so an entity implementing it without `Facets = (Alarm, …)` compiles and is never called, since only the facet's folded form arms a deadline. Gating it is reachable (moving the hook behind `EntityRegistry`, which has the facet set in scope); until then the inertness is stated, not enforced. The alarm index below is gated: it is a node capability (Appendix A), wired into exactly the hosted types whose facet set declares `Alarm`.
 - **Consume-on-fire (E21).** The fired deadline's `Clear` joins `on_alarm`'s own batch, so the alarm clears atomically with its effects unless the handler re-arms (last write wins): a re-arming handler chains, a consumed alarm stops, and a failed commit leaves the deadline pending to fire again. One arm commits **at most one** effect; the bound is on committed effects, not handler invocations.
 - **A pending alarm vetoes hibernation until the index acknowledges it.** An entity owing a wake MUST stay resident, where its timer fires on time, unless something else will wake it: the per-shard **alarm index**, one small index entity per (entity type, shard) holding an `EntityName → due` map updated on every alarm change. The alarm **driver** sweeps the index for the shards its node leads and re-activates each entity owing a wake, which re-arms its own timer (**E3**). This covers **failover** and **voluntary hibernation**, but the host may hibernate an alarmed entity only once the *current* deadline is **acked-registered**: registration is an `ask` answered after the index entity's commit (§6), retried on the idle tick, never awaited on the command path; until it acks, the entity stays resident. The index is a *hint* and the entity's facet the truth, so a stale entry costs at worst a spurious wake, never a lost or double fire.
 
@@ -731,7 +731,7 @@ Entity **data** is off consensus entirely: a per-entity quorum append carrying t
 
 ### 8.3 Failover
 
-**A planned departure SHOULD hand leadership off rather than drop it.** A node shut down deliberately (rolling upgrade, scale-in, drain) SHOULD hand each shard it leads to another replica before stopping, using the leadership transfer of actor §9.4.3 item 8. Skipping this costs availability, not correctness: a node leading *S* shards otherwise imposes *S* simultaneous failover windows, each ending in the rehydration of every active entity on the shard (§9) while the replacement starts cold. The handoff is best-effort, since it can target only a replica caught up to the leader's last entry; a shard with lagging or unreachable peers falls back to the unplanned path below, and a departing node MUST NOT block its shutdown waiting for one.
+**A planned departure SHOULD hand leadership off rather than drop it.** A node shut down deliberately (rolling upgrade, scale-in, drain) SHOULD hand each shard it leads to another replica before stopping, using the leadership transfer of actor §9.4.3 item 8. Skipping this costs availability, not correctness: a node leading *S* shards otherwise imposes *S* simultaneous failover windows, each ending in the rehydration of every active entity on the shard (§9) while the replacement starts cold. The handoff is best-effort, since it can target only a replica caught up to the leader's last entry; a shard with lagging or unreachable peers falls back to the unplanned path below, and a departing node MUST NOT block its shutdown waiting for one. The node hosting handle hands off every type hosted through it in one call, `EntityNode::hand_off_leadership` (Appendix A), so a deployment cannot leave a type out.
 
 On an unplanned loss, the shard's replicas elect a new leader by ordinary Raft, raising the term. The new leader holds the shard at once but not yet the entities' records: it recovers each entity's head and tail lazily on first access (§8, §9, §10). Between the old leader's loss and the election lies the shard's **failover window**, during which calls fail fast (`NotLeader` then a retry, or `Unavailable`, §11) rather than block. No acknowledged write is lost (invariant **E14**).
 
@@ -932,7 +932,7 @@ match acct.ask(Withdraw { cents: 500 }).await {
 }
 ```
 
-**What is *not* in this config, and why.** `EntityConfig` is per entity type, so the two **node** capabilities (§7.4, §13), the blocking-I/O pool bounding the node's device work and the metrics sink describing its health, hang off a node hosting handle instead, set once for every type:
+**What is *not* in this config, and why.** `EntityConfig` is per entity type, so the three **node** capabilities (§7.4, §7.16, §13), the blocking-I/O pool bounding the node's device work, the metrics sink describing its health, and the alarm index waking its alarmed entities across hibernation and failover, hang off a node hosting handle instead, set once for every type:
 
 ```rust
 let node = system
@@ -940,13 +940,20 @@ let node = system
     .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))   // §7.4; default: inline
     .metrics(Arc::clone(&metrics));                          // §13; default: discarded
 
+let alarms: Entities<AlarmIndex<_>> = node.entities(config_alarms);
+let node = node.alarm_index(alarms);                         // §7.16; default: none
+
 let accounts: Entities<Account> = node.entities(config_accounts);
-let orders:   Entities<Order>   = node.entities(config_orders); // one pool, one sink
+let orders:   Entities<Order>   = node.entities(config_orders); // one pool, one sink, one index
+
+let still_led: usize = node.hand_off_leadership().await;    // §8.3, at a graceful stop
 ```
 
-A production node over real storage makes all three node-scoped choices in one call, `EntityNode::durable(system, data)`, which returns the node with a thread pool, a metrics registry, and the durable store factory every hosted type shares.
+A production node over real storage makes its storage choices in one call, `EntityNode::durable(system, data)`, which returns the node with a thread pool and a metrics registry, beside the durable store factory every hosted type shares.
 
-Hosting straight off the system (`system.entities(config)`, above) defaults both (inline I/O, discarded measurements), the `Local` tier's shape and what simulation requires (§14). Per-type fields would be wrong in a way nothing catches: a config that omitted the pool would silently get a *second*, inline one, invisible until a stalled device blocks the executor the pool exists to protect.
+The index reaches exactly the types hosted after it whose facet set declares `Alarm`: an alarmed type cannot be left without it, and a type without the facet pays for no driver. The node also keeps every type hosted through it, and `hand_off_leadership` hands off all their led shards concurrently, returning how many kept their leader.
+
+Hosting straight off the system (`system.entities(config)`, above) defaults all three (inline I/O, discarded measurements, no alarm index), the `Local` tier's shape and what simulation requires (§14), and leaves the type out of every node's handoff. Per-type fields would be wrong in a way nothing catches: a config that omitted the pool would silently get a *second*, inline one, invisible until a stalled device blocks the executor the pool exists to protect.
 
 **Hosting one entity under many type names (`entities_named`).** `entities(config)` hosts a type under its own `ENTITY_TYPE`, built by `G::default` per activation. To host **one Rust entity as several distinct entity types at runtime**, the node hosting handle's `entities_named` adds two extension points:
 
@@ -992,7 +999,8 @@ entity/                 # the entity runtime, built on actor-core + actor-cluste
   system.rs              # the EntitySystem capability seam + name→shard/group hashing (§5.1, §7)
   event.rs               # EntityEvent observability stream (§13)
   config.rs              # EntityConfig (Appendix A)
-  node.rs                # the node's hosting handle: the shared BlockingIo pool (§7.4) and metrics sink (§13)
+  node.rs                # the node's hosting handle: the shared BlockingIo pool (§7.4), metrics sink (§13),
+                         #   and alarm index (§7.16), and the leadership handoff of its types (§8.3)
   blocking.rs            # the BlockingIo seam (§7.4): inline by default, a thread pool on real storage;
                          #   and NodeStore, the store handle whose writes run on it
   metrics.rs             # the operator-facing metrics sink (§13): a closed vocabulary of

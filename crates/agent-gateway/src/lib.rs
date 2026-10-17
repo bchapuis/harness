@@ -8,7 +8,7 @@
 //! control protocol, no per-node listener, no forwarding hop.
 //!
 //! The gateway joins the actor transport as a non-voting, routing-only **member**
-//! (`Harness::client(system, roster)` /
+//! (`Harness::client(system, kinds)` /
 //! [`entities_client`](entity::EntityExt::entities_client)): a full local actor
 //! system that hosts no entities but is still a member; it holds `EntityRef`s
 //! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
@@ -31,7 +31,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use entity::Entity;
-use entity::EntityConfig;
 use entity::EntityName;
 use entity::Entities;
 use entity::EntityExt;
@@ -179,24 +178,20 @@ impl<S: HarnessSystem> Gateway<S> {
 
 /// Join the cluster as a client and build the [`Gateway`]: poll until both the
 /// kinds' and the directory's host gateways have gossiped into this client's
-/// receptionist, then assemble the shared state. The directory rides the entity
-/// default shard count on both sides (the nodes host it with `EntityConfig`'s
-/// default, and there is no flag for it either side), so a name hashes to the
-/// same shard here as there. Errors if discovery does not complete within
-/// `timeout`.
+/// receptionist, then assemble the shared state. Errors if discovery does not
+/// complete within `timeout`.
 pub async fn connect<S: HarnessSystem>(
     system: S,
-    roster: &[(String, usize)],
+    kinds: &[String],
     tokens: Arc<dyn TokenVerifier>,
     limits: Limits,
     timeout: Duration,
 ) -> Result<Arc<Gateway<S>>, String> {
     let directory_type = <Directory<S> as Entity>::ENTITY_TYPE;
-    let directory_shards = EntityConfig::default().shards;
     let deadline = system.now() + timeout;
     loop {
-        let harness = Harness::client(system.clone(), roster);
-        let directory = system.entities_client::<Directory<S>>(directory_type, directory_shards);
+        let harness = Harness::client(system.clone(), kinds);
+        let directory = system.entities_client::<Directory<S>>(directory_type);
         if let (Some(harness), Some(directory)) = (harness, directory) {
             return Ok(Gateway::new(harness, directory, tokens, limits));
         }

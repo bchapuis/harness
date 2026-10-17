@@ -22,7 +22,6 @@ use actor_core::NodeId;
 use actor_runtime::Encryption;
 use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use agent::EntityConfig;
 use agent::HarnessSystem;
 use agent_gateway::Gateway;
 use agent_gateway::Limits;
@@ -49,11 +48,10 @@ options (defaults in parentheses):
   --advertise-host <a>  host the nodes dial the gateway back at (default
                         --bind-host); must match the nodes' --client <host>
   --port-base <p>       node/client i's transport port = p+i-1     (7401)
-  --kind <name[:shards]> a kind the nodes host, with its EntityConfig.shards;
-                        repeat per kind. MUST match the nodes' deployment: an
-                        unknown name fails discovery, a wrong shard count
-                        misroutes sessions.  (assistant:4 worker:4, matching
-                        agent-standalone's default kinds)
+  --kind <name>         a kind the nodes host; repeat per kind. MUST match the
+                        nodes' deployment: an unknown name fails discovery.
+                        (assistant worker, matching agent-standalone's default
+                        kinds)
   --auth-tokens <path>  tenants file (`<principal> <token>` per line). Without it
                         the gateway runs INSECURE: the bearer token IS the tenant.
                         Reloaded on SIGHUP (rotate tokens without a restart).
@@ -89,7 +87,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     let mut advertise_host: Option<String> = None;
     let mut port_base: u16 = 7401;
     let mut auth_tokens: Option<PathBuf> = None;
-    let mut roster: Vec<(String, usize)> = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
     let mut limits = Limits::default();
 
     let mut i = 0;
@@ -114,14 +112,10 @@ async fn run(args: &[String]) -> Result<(), String> {
             "--port-base" => port_base = parse(flag, value)?,
             "--auth-tokens" => auth_tokens = Some(PathBuf::from(value)),
             "--kind" => {
-                let (name, shards) = match value.split_once(':') {
-                    Some((name, shards)) => (name, parse("--kind <name:shards>", shards)?),
-                    None => (value.as_str(), EntityConfig::default().shards),
-                };
-                if name.is_empty() {
-                    return Err(format!("--kind expects <name[:shards]>, got {value}"));
+                if value.is_empty() {
+                    return Err("--kind expects a kind name".to_string());
                 }
-                roster.push((name.to_string(), shards));
+                kinds.push(value.clone());
             }
             "--max-within-secs" => limits.max_within_secs = parse(flag, value)?,
             "--max-body-bytes" => limits.max_body_bytes = parse(flag, value)?,
@@ -192,15 +186,14 @@ async fn run(args: &[String]) -> Result<(), String> {
     eprintln!("[gateway {node}] joined the cluster (client of nodes 1..={nodes})");
 
     // Discover the host gateways and assemble the routing-only state.
-    if roster.is_empty() {
+    if kinds.is_empty() {
         // The dev default, matching `agent-standalone`'s default kinds; a
-        // real deployment states its roster explicitly, next to the nodes'.
-        let shards = EntityConfig::default().shards;
-        roster = vec![("assistant".into(), shards), ("worker".into(), shards)];
+        // real deployment states its kinds explicitly, next to the nodes'.
+        kinds = vec!["assistant".into(), "worker".into()];
     }
     let gateway = agent_gateway::connect(
         system,
-        &roster,
+        &kinds,
         tokens,
         limits,
         Duration::from_secs(30),

@@ -153,8 +153,8 @@ impl<S: HarnessSystem> Harness<S> {
     /// let h = Harness::builder(system, &kinds).host_all(model, sandbox).build();
     /// ```
     ///
-    /// A routing-only gateway tier (the Orleans cluster-client) states its
-    /// `(name, shards)` roster instead; see [`Harness::client`].
+    /// A routing-only gateway tier (the Orleans cluster-client) names the kinds
+    /// it routes instead; see [`Harness::client`].
     pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
         HarnessBuilder {
             entity_node: system.entity_node(),
@@ -185,17 +185,14 @@ impl<S: HarnessSystem> Harness<S> {
 
     /// Build a routing-only **client** harness (the Orleans cluster-client): it
     /// hosts no entities, it only *addresses* sessions hosted elsewhere on the
-    /// cluster. `roster` pairs each kind's name with its `EntityConfig.shards`
-    /// on the hosting nodes: the two facts a router needs (a session name must
-    /// hash to the same shard here as there), and the only two it may know;
-    /// prompts, tools, and model params stay the hosts' concern. Both MUST
-    /// match the hosts' deployment. Returns `None` until every kind's host
-    /// gateway has gossiped into this node's receptionist: the caller polls,
-    /// as a node waits for its peers.
-    pub fn client(system: S, roster: &[(String, usize)]) -> Option<Harness<S>> {
+    /// cluster. `kinds` names the kinds it routes to, the one fact a router needs;
+    /// prompts, tools, model params, and shard counts stay the hosts' concern.
+    /// Returns `None` until every kind's host gateway has gossiped into this
+    /// node's receptionist: the caller polls, as a node waits for its peers.
+    pub fn client(system: S, kinds: &[String]) -> Option<Harness<S>> {
         let mut builder = Harness::builder(system, &Kinds::new()).into_has_routes();
-        for (kind, shards) in roster {
-            builder = builder.route_kind(kind, *shards);
+        for kind in kinds {
+            builder = builder.route_kind(kind);
         }
         builder.build()
     }
@@ -217,20 +214,6 @@ impl<S: HarnessSystem> Harness<S> {
             system: self.system.clone(),
             config: self.shared.config.clone(),
         })
-    }
-
-    /// Hand every shard this node leads, across every kind it hosts, to another
-    /// replica before the node departs (entity spec §8.3): the sum of each kind's
-    /// [`Entities::hand_off_leadership`], so `0` means every led shard moved. Same
-    /// terms as the per-kind call (best-effort and bounded, a non-zero return is
-    /// information for the operator rather than an error), and a no-op for a
-    /// routing-only client, which leads nothing.
-    pub async fn hand_off_leadership(&self) -> usize {
-        let mut outstanding = 0;
-        for entity in self.shared.hosts().values() {
-            outstanding += entity.hand_off_leadership().await;
-        }
-        outstanding
     }
 }
 
@@ -310,7 +293,7 @@ pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     kinds: Kinds,
     config: HarnessConfig,
     hosted: Vec<(KindId, Arc<Kind>, Seams)>,
-    routed: Vec<(KindId, usize)>,
+    routed: Vec<KindId>,
     _state: PhantomData<R>,
 }
 
@@ -320,7 +303,9 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// own (inline I/O and discarded metrics) which is what the simulation wants.
     ///
     /// A deployment on real storage sets it once here rather than per kind, since a
-    /// pool exists to bound *the node's* concurrent device work.
+    /// pool exists to bound *the node's* concurrent device work. The node also
+    /// records each kind hosted through it, so a deployment that stops gracefully
+    /// passes the node it will call [`EntityNode::hand_off_leadership`] on.
     pub fn entity_node(mut self, node: EntityNode<S>) -> Self {
         self.entity_node = node;
         self
@@ -368,13 +353,11 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     }
 
     /// Route to a host of the kind named `kind` instead of hosting it (the
-    /// Orleans cluster-client path). `shards` is the kind's `EntityConfig.shards`
-    /// on the hosting nodes, so a session name hashes to the same shard here as
-    /// there. Moves the builder to the `HasRoutes` type-state, so `build` then
-    /// returns `Option`.
-    pub fn route_kind(self, kind: &str, shards: usize) -> HarnessBuilder<S, HasRoutes> {
+    /// Orleans cluster-client path). Moves the builder to the `HasRoutes`
+    /// type-state, so `build` then returns `Option`.
+    pub fn route_kind(self, kind: &str) -> HarnessBuilder<S, HasRoutes> {
         let mut builder = self.into_has_routes();
-        builder.routed.push((KindId::new(kind), shards.max(1)));
+        builder.routed.push(KindId::new(kind));
         builder
     }
 
@@ -407,7 +390,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
             .hosted
             .iter()
             .map(|(id, _, _)| id)
-            .chain(self.routed.iter().map(|(id, _)| id))
+            .chain(&self.routed)
             .collect();
         for (id, def, _) in &self.hosted {
             for child in &def.delegates {
@@ -418,11 +401,9 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
             }
         }
         let mut hosts: BTreeMap<KindId, Entities<Agent<S>>> = BTreeMap::new();
-        for (id, shards) in &self.routed {
+        for id in &self.routed {
             let entity_type = leak_entity_type(id);
-            let entities = self
-                .system
-                .entities_client::<Agent<S>>(entity_type, *shards)?;
+            let entities = self.system.entities_client::<Agent<S>>(entity_type)?;
             hosts.insert(id.clone(), entities);
         }
         let shared = Arc::new(Shared {

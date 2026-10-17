@@ -140,7 +140,7 @@ fn a_non_hosting_client_routes_to_a_cluster_entity() {
     let client_entities = {
         let mut found = None;
         for _ in 0..20 {
-            if let Some(entity) = client.entities_client::<Counter>("client.Counter", 2) {
+            if let Some(entity) = client.entities_client::<Counter>("client.Counter") {
                 found = Some(entity);
                 break;
             }

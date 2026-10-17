@@ -163,10 +163,6 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 /// slow start is absorbed rather than reported as a fault.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Two SWIM rounds at this node's `probe_interval`, the departure's gossip
-/// window; see [`actor_runtime::depart`].
-const LEAVE_GRACE: Duration = Duration::from_secs(4);
-
 /// Boot the node, open its doors, and host machines until SIGTERM or SIGINT,
 /// then stop gracefully: hand off every shard this node leads (entity spec
 /// §8.3), announce the departure, and release the transport.
@@ -266,20 +262,21 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         data_dir: Some(opts.data.join("facets")),
         ..EntityConfig::default()
     };
-    // The shared alarm index (entity §16). The machine's checkpoint alarm is
-    // also its session lease (machine §4, M5), and a lease that only fired
-    // while the entity happened to be awake would not bound anything: the index
-    // is what re-activates a due machine after hibernation or failover.
+    // The node's alarm index (entity §7.16), which every type hosted after it
+    // that declares the `Alarm` facet fires through. The machine's checkpoint
+    // alarm is also its session lease (machine §4, M5), and a lease that only
+    // fired while the entity happened to be awake would not bound anything: the
+    // index is what re-activates a due machine after hibernation or failover.
     let alarms: Entities<AlarmIndex<TcpCluster>> = entity_node.entities(EntityConfig {
         entity_store: Some(entity_store),
         shards: opts.shards,
         ..EntityConfig::default()
     });
-    let machines: Entities<NodeMachine> = entity_node.entities_named_with_alarms(
+    let entity_node = entity_node.alarm_index(alarms);
+    let machines: Entities<NodeMachine> = entity_node.entities_named(
         MACHINE_TYPE,
         config,
         Arc::new(move || Machine::new(Arc::clone(&provider))),
-        alarms.clone(),
     );
 
     // The grade, not just the flag: what confinement a machine actually gets is
@@ -347,13 +344,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     actor_runtime::shutdown_signal().await;
     // Skipping the handoff is safe but turns a rolling restart into one failover
     // per led shard, and here a failover deposes the activation owning a guest.
-    actor_runtime::depart(
-        &system,
-        async { machines.hand_off_leadership().await + alarms.hand_off_leadership().await },
-        actor_runtime::HANDOFF_TIMEOUT,
-        LEAVE_GRACE,
-    )
-    .await;
+    actor_runtime::depart(&system, entity_node.hand_off_leadership()).await;
     Ok(())
 }
 

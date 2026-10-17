@@ -25,6 +25,7 @@ use entity::Entities;
 use entity::EntityConfig;
 use entity::EntityExt;
 use entity::EntityHandler;
+use entity::cluster::EntityNode;
 
 use super::FANOUT_TYPE;
 use super::Fanout;
@@ -49,21 +50,27 @@ pub fn config() -> EntityConfig {
 
 /// Host `Fanout` on `node` under `config`, every activation sharing `seam`.
 pub fn host_with(node: &SimNode, seam: &Seam, config: EntityConfig) -> Entities<Fanout<SimNode>> {
+    host_on(&node.entity_node(), seam, config)
+}
+
+/// Host `Fanout` through `node` under `config`, every activation sharing `seam`:
+/// the form whose node a scenario keeps, to hand its shards off (entity §8.3).
+pub fn host_on(
+    node: &EntityNode<SimNode>,
+    seam: &Seam,
+    config: EntityConfig,
+) -> Entities<Fanout<SimNode>> {
     let seam = seam.clone();
-    node.entity_node().entities_named::<Fanout<SimNode>>(
+    node.entities_named::<Fanout<SimNode>>(
         FANOUT_TYPE,
         config,
         Arc::new(move || Fanout::new(seam.clone())),
     )
 }
 
-/// Host `Fanout` on `node` under the scenario config.
-pub fn host(node: &SimNode, seam: &Seam) -> Entities<Fanout<SimNode>> {
-    host_with(node, seam, config())
-}
-
-/// A cluster the suites drive: the network (for faults), its nodes, and one
-/// `Entities` handle per node, with every node's events on the recorder.
+/// A cluster the suites drive: the network (for faults), its nodes, and per node
+/// the `EntityNode` that hosts `Fanout` and its `Entities` handle, with every
+/// node's events on the recorder.
 ///
 /// The first node is the anchor: every call is issued through its handle and it
 /// is never restarted; the rule the swarm runner applies to its own nemesis
@@ -72,6 +79,7 @@ pub fn host(node: &SimNode, seam: &Seam) -> Entities<Fanout<SimNode>> {
 pub struct Cluster {
     pub net: SimNetwork,
     pub nodes: Vec<SimNode>,
+    pub entity_nodes: Vec<EntityNode<SimNode>>,
     pub hosts: Vec<Entities<Fanout<SimNode>>>,
 }
 
@@ -88,9 +96,18 @@ pub fn cluster(sim: &Simulation, recorder: &Recorder, seam: &Seam) -> Cluster {
         .with_events(sink);
     let nodes = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let hosts: Vec<_> = nodes.iter().map(|n| host(n, seam)).collect();
+    let entity_nodes: Vec<_> = nodes.iter().map(|n| n.entity_node()).collect();
+    let hosts: Vec<_> = entity_nodes
+        .iter()
+        .map(|n| host_on(n, seam, config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
-    Cluster { net, nodes, hosts }
+    Cluster {
+        net,
+        nodes,
+        entity_nodes,
+        hosts,
+    }
 }
 
 impl Cluster {
@@ -127,7 +144,9 @@ impl Cluster {
             .position(|n| n.node() == leader)
             .expect("the leader is one of ours");
         let fresh = self.net.restart(leader);
-        self.hosts[index] = host(&fresh, seam);
+        let entity_node = fresh.entity_node();
+        self.hosts[index] = host_on(&entity_node, seam, config());
+        self.entity_nodes[index] = entity_node;
         self.nodes[index] = fresh;
         leader
     }

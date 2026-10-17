@@ -187,7 +187,8 @@ pub(crate) struct HostCache<G: Entity> {
     system: G::System,
     entity_type: &'static str,
     /// The founding shard count: the [`resolve_shard`] fallback while the map
-    /// bootstraps (and the only resolution a routing-only client ever has).
+    /// bootstraps. `1` on a routing-only client, where no answer depends on the
+    /// shard a name resolves to (see [`EntityExt::entities_client`]).
     shards: usize,
     /// The committed partition (§5.1), the authority on name→shard once ranges
     /// have committed (a split/merge moves names between shards).
@@ -798,8 +799,9 @@ impl<G: Entity> Entities<G> {
     }
 
     /// The node that currently leads the shard an entity key maps to, where that
-    /// entity activates (§5.2), or `None` during a shard election. A routing
-    /// observation, not a guarantee: leadership can move immediately after.
+    /// entity activates (§5.2), or `None` while the shard elects and on a node
+    /// outside the shard's group (as a clustered routing-only client always is). A
+    /// routing observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
         let name = EntityName::new(self.cache.entity_type, key);
         self.cache.system.shard_leader(self.cache.shard_of(&name))
@@ -833,31 +835,11 @@ impl<G: Entity> Entities<G> {
         self.cache.shard_map.request_merge(left);
     }
 
-    /// Hand every shard this node leads to another of its replicas before the node
-    /// departs (spec §8.3), returning how many were still led when the attempt gave
-    /// up: `0` when they all moved.
-    ///
-    /// Call this from a graceful shutdown, after the node stops accepting new work
-    /// and before the process exits. Skipping it is *safe* but expensive: each shard
-    /// this node led then waits a full leader-election timeout before its replicas
-    /// elect, and every entity on those shards rehydrates on the new leader. A node
-    /// leading many shards therefore turns an ordinary rolling restart into that many
-    /// simultaneous failovers.
-    ///
-    /// Best-effort: a shard whose other replicas are all lagging or unreachable keeps
-    /// its leader here and fails over the slow way. A non-zero return is information
-    /// for the operator, not an error to retry: the node is leaving regardless.
-    ///
-    /// A no-op on the `Local` tier (there are no other replicas) and on a
-    /// routing-only client (it leads nothing).
-    pub async fn hand_off_leadership(&self) -> usize {
-        self.cache.shard_map.hand_off_leadership().await
-    }
-
     /// The nodes that replicate the shard an entity key maps to (spec §7.6): the
     /// only nodes that hold its data and can lead it. Read live from the
     /// consensus-agreed shard map, so it reflects the latest committed allocation,
-    /// not a `entities()`-time snapshot.
+    /// not a `entities()`-time snapshot. Empty on a routing-only client, which holds
+    /// no map.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
         let name = EntityName::new(self.cache.entity_type, key);
         let index = self.cache.shard_of(&name).index;
@@ -870,13 +852,15 @@ impl<G: Entity> Entities<G> {
 /// returns an [`Entities`] handle.
 pub trait EntityExt: EntitySystem {
     /// This node's entity hosting, carrying the capabilities every type it hosts
-    /// shares (spec §7.4, §13): the blocking-I/O pool and the metrics registry.
+    /// shares (spec §7.4, §7.16, §13): the blocking-I/O pool, the metrics registry,
+    /// and the alarm index.
     ///
-    /// Both are properties of the *node*, not of an entity type, so a deployment sets
-    /// them once here and hosts every type through the returned handle. Hosting
-    /// straight off the system (`system.entities(..)`) is the same call with both
-    /// defaulted (inline I/O, discarded metrics), which is what the `Local` tier and
-    /// the deterministic simulation want.
+    /// All three are properties of the *node*, not of an entity type, so a deployment
+    /// sets them once here and hosts every type through the returned handle, which
+    /// also hands off every hosted type's led shards at a graceful stop. Hosting
+    /// straight off the system (`system.entities(..)`) is the same call with every
+    /// capability defaulted (inline I/O, discarded metrics, no alarm index), which is
+    /// what the `Local` tier and the deterministic simulation want.
     ///
     /// Named for what it returns rather than `node`, which on an
     /// [`ActorSystem`](actor_core::ActorSystem) is already this node's
@@ -905,14 +889,14 @@ pub trait EntityExt: EntitySystem {
     ///
     /// Returns `None` until at least one host's gateway for `entity_type` has
     /// gossiped into this client's receptionist: the caller polls, exactly as a
-    /// node waits for its peers before serving. `shards` MUST match the hosts'
-    /// `EntityConfig.shards` (so a name hashes to the same shard); the client
-    /// never reads the shard map on the data path, so it is left empty.
-    fn entities_client<G>(&self, entity_type: &'static str, shards: usize) -> Option<Entities<G>>
+    /// node waits for its peers before serving. The client needs no shard count:
+    /// a node that replicates none of the type's shards can never know a shard's
+    /// leader, so every name it has not cached resolves through a host's gateway,
+    /// which maps it from its own committed partition (§5.4).
+    fn entities_client<G>(&self, entity_type: &'static str) -> Option<Entities<G>>
     where
         G: Entity<System = Self>,
     {
-        let shards = shards.max(1);
         let gateway = self
             .receptionist()
             .lookup(gateway_key::<G>(entity_type))
@@ -923,37 +907,19 @@ pub trait EntityExt: EntitySystem {
             gateway,
             // A routing-only client has no `EntityConfig` to read, so it takes the
             // default bound, and it is the path that most needs one: a long-lived
-            // gateway client addresses every tenant's names.
+            // gateway client addresses every tenant's names. One founding shard,
+            // because no answer here depends on which shard a name resolves to: a
+            // clustered client is in none of the type's groups, so `shard_leader`
+            // is `None` for every shard (the `Local` tier leads every shard), and
+            // the empty map lists no replicas for any.
             cache: HostCache::new(
                 self.clone(),
                 entity_type,
-                shards,
+                1,
                 Arc::new(EmptyShardMap),
                 EntityConfig::default().host_cache_capacity,
             ),
         })
-    }
-
-    /// Host entities of type `G` **with durable-alarm firing across hibernation and
-    /// failover** (spec §7.16). Like [`entities`](EntityExt::entities), but each host
-    /// registers its pending [`Alarm`](crate::alarm::Alarm) deadline with the
-    /// per-shard `index`, and a background driver re-activates due entities on the
-    /// shards this node leads. The caller starts **one** shared `AlarmIndex`
-    /// entity and passes its handle to every alarm-bearing type; a type without
-    /// the [`Alarm`](crate::alarm::Alarm) facet gains nothing from wiring it.
-    ///
-    /// An explicit runtime type name or activation factory (spec §5.1, Appendix
-    /// A) is the node's form:
-    /// [`EntityNode::entities_named_with_alarms`](crate::node::EntityNode::entities_named_with_alarms).
-    fn entities_with_alarms<G>(
-        &self,
-        config: EntityConfig,
-        index: Entities<AlarmIndex<Self>>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = Self> + Default,
-    {
-        self.entity_node().entities_with_alarms(config, index)
     }
 }
 
@@ -966,9 +932,10 @@ const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Build the node-local hosting for an entity type (spec §7.4, Appendix A): the
 /// durable store, replica store, shard map, and gateway, plus the type's alarm
-/// driver (§7.16, the callerless-activation seam) when an `alarm_index` is wired.
+/// driver (§7.16, the callerless-activation seam) when the node has an
+/// `alarm_index` and the type declares the [`Alarm`](crate::alarm::Alarm) facet.
 /// The one constructor behind every [`EntityNode`](crate::node::EntityNode) hosting
-/// method.
+/// method, which keeps the returned shard map for its leadership handoff (§8.3).
 pub(crate) fn build_entities<S, G>(
     system: &S,
     entity_type: &'static str,
@@ -976,11 +943,14 @@ pub(crate) fn build_entities<S, G>(
     capabilities: &crate::node::NodeCapabilities,
     factory: Arc<dyn Fn() -> G + Send + Sync>,
     alarm_index: Option<Entities<AlarmIndex<S>>>,
-) -> Entities<G>
+) -> (Entities<G>, Arc<dyn ShardMapSource>)
 where
     S: EntitySystem,
     G: Entity<System = S>,
 {
+    // Only a type that can hold a deadline gets the index: any other would pay a
+    // driver sweep and an index ask per activation for nothing.
+    let alarm_index = alarm_index.filter(|_| crate::alarm::declares_alarm::<G>());
     let shards = config.shards.max(1);
     let replicas = config.replication_factor.max(1);
     // This node's durable entity store (§7.4): the injected factory if a deployment
@@ -1041,7 +1011,7 @@ where
             system.clone(),
             entity_type,
             shards,
-            shard_map,
+            Arc::clone(&shard_map),
             host_cache_capacity,
         ),
     };
@@ -1052,7 +1022,7 @@ where
             index,
         )));
     }
-    handle
+    (handle, shard_map)
 }
 
 /// The per-type alarm driver (spec §7.16): the callerless-activation seam that makes a

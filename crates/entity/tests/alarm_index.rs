@@ -1,9 +1,9 @@
-//! Per-shard alarm index + driver tests (entity §16): the callerless-across-
+//! Per-shard alarm index + driver tests (entity §7.16): the callerless-across-
 //! failover half of durable alarms.
 //!
 //! Covers the mechanisms that compose it: the [`AlarmIndex`] entity's
 //! register/clear/query behaviour, a host **registering** its pending deadline in
-//! the index as it arms (`entities_with_alarms`), the per-type **driver**
+//! the index as it arms (`EntityNode::alarm_index`), the per-type **driver**
 //! re-activating an indexed entity that is no longer resident (what a new leader
 //! does after a failover, exercised here on the `Local` tier by letting an entity
 //! hibernate and driving the sweep), and **alarm hibernation**: an alarmed entity
@@ -36,6 +36,7 @@ use entity::cluster::alarm_index::AlarmSync;
 use entity::cluster::alarm_index::AllPending;
 use entity::cluster::alarm_index::index_key;
 use entity::cluster::shard_for;
+use entity::facet::Alarm;
 use entity::store::StoreAck;
 use entity::store::Term;
 use entity::testing::StaticEntityStore;
@@ -56,6 +57,8 @@ const SHARDS: usize = 4;
 
 // --- A plain entity the driver can re-activate from the index ------------------
 
+/// Declares the `Alarm` facet without ever arming it: the node wires its index only
+/// into a type that can hold a deadline, and the driver sweeps only such a type.
 #[derive(Default)]
 struct Poke;
 
@@ -63,7 +66,7 @@ impl Entity for Poke {
     type System = SimSystem;
     type State = TimerState;
     type Event = TimerEvent;
-    type Facets = ();
+    type Facets = (Alarm,);
     const ENTITY_TYPE: &'static str = "test.Poke";
 
     fn apply(_s: &mut TimerState, _e: &TimerEvent) {}
@@ -197,13 +200,13 @@ fn host_registers_pending_alarm_in_the_index() {
         shards: SHARDS,
         ..EntityConfig::default()
     });
-    let timers = system.entities_with_alarms::<Timer>(
-        EntityConfig {
+    let timers = system
+        .entity_node()
+        .alarm_index(index.clone())
+        .entities::<Timer>(EntityConfig {
             shards: SHARDS,
             ..EntityConfig::default()
-        },
-        index.clone(),
-    );
+        });
 
     // Arm a far-future alarm; the host registers it in the index as it arms.
     ask(&sim, timers.entity("t/0"), Arm { after_ms: 10_000 });
@@ -235,14 +238,14 @@ fn driver_reactivates_an_indexed_entity() {
     });
     // A short idle window so the entity hibernates once touched, standing in for the
     // deactivation a failover forces. The driver must bring it back from the index.
-    let pokes = system.entities_with_alarms::<Poke>(
-        EntityConfig {
+    let pokes = system
+        .entity_node()
+        .alarm_index(index.clone())
+        .entities::<Poke>(EntityConfig {
             shards: SHARDS,
             idle_after: Duration::from_millis(10),
             ..EntityConfig::default()
-        },
-        index.clone(),
-    );
+        });
 
     // Activate then let it hibernate.
     ask(&sim, pokes.entity("p/0"), Touch);
@@ -292,14 +295,14 @@ fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it()
         shards: SHARDS,
         ..EntityConfig::default()
     });
-    let timers = system.entities_with_alarms::<Timer>(
-        EntityConfig {
+    let timers = system
+        .entity_node()
+        .alarm_index(index.clone())
+        .entities::<Timer>(EntityConfig {
             shards: SHARDS,
             idle_after: Duration::from_millis(50),
             ..EntityConfig::default()
-        },
-        index.clone(),
-    );
+        });
 
     // Arm a 5s alarm; the host registers the deadline and the index acks it.
     ask(&sim, timers.entity("t/1"), Arm { after_ms: 5_000 });
@@ -351,14 +354,14 @@ fn unacked_registration_keeps_an_alarmed_entity_resident() {
         )))),
         ..EntityConfig::default()
     });
-    let timers = system.entities_with_alarms::<Timer>(
-        EntityConfig {
+    let timers = system
+        .entity_node()
+        .alarm_index(index)
+        .entities::<Timer>(EntityConfig {
             shards: SHARDS,
             idle_after: Duration::from_millis(50),
             ..EntityConfig::default()
-        },
-        index,
-    );
+        });
 
     // Arm far beyond the run below, then idle across many eviction windows.
     ask(&sim, timers.entity("t/2"), Arm { after_ms: 60_000 });

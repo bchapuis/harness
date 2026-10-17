@@ -201,12 +201,8 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
         .iter()
         .position(|n| n.node() == old_leader)
         .expect("the leader is one of ours");
-    let entity = cluster.hosts[leading].clone();
-    cluster::drive(
-        &sim,
-        CALL,
-        async move { entity.hand_off_leadership().await },
-    );
+    let node = cluster.entity_nodes[leading].clone();
+    cluster::drive(&sim, CALL, async move { node.hand_off_leadership().await });
     sim.run_for(Duration::from_secs(2));
     let successor = cluster.leader_of(key);
     assert_ne!(successor, old_leader, "leadership moved");

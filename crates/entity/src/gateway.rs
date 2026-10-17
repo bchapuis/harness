@@ -256,7 +256,7 @@ pub(crate) struct Gateway<G: Entity> {
     /// the entity, the user supplies no value per `EntityName`.
     factory: Arc<dyn Fn() -> G + Send + Sync>,
     /// The per-shard alarm index handed to each host it activates (spec §7.16), or
-    /// `None` when alarm-index wiring is off. Set by `entities_with_alarms`.
+    /// `None` when the node has none or the type declares no `Alarm` facet.
     alarm_index: Option<Entities<AlarmIndex<G::System>>>,
 }
 

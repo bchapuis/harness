@@ -61,7 +61,7 @@ fn config() -> EntityConfig {
 type Indexes = Vec<Entities<AlarmIndex<SimNode>>>;
 
 /// Bring up a 3-node leader cluster hosting the shared `AlarmIndex` and the `Timer`
-/// type wired to it (`entities_with_alarms`) on every node.
+/// type wired to it (`EntityNode::alarm_index`) on every node.
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Entities<Timer>>, Indexes) {
     let net = SimNetwork::new(sim).with_leader(
         swim_config(),
@@ -77,7 +77,11 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Entities<Timer>>, Indexes) {
     let timers: Vec<Entities<Timer>> = systems
         .iter()
         .zip(&indexes)
-        .map(|(s, idx)| s.entities_with_alarms::<Timer>(config(), idx.clone()))
+        .map(|(s, idx)| {
+            s.entity_node()
+                .alarm_index(idx.clone())
+                .entities::<Timer>(config())
+        })
         .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, timers, indexes)
@@ -212,7 +216,11 @@ fn an_alarm_fires_after_a_split_moves_its_entity() {
     let timers: Vec<Entities<Timer>> = systems
         .iter()
         .zip(&indexes)
-        .map(|(s, idx)| s.entities_with_alarms::<Timer>(cfg.clone(), idx.clone()))
+        .map(|(s, idx)| {
+            s.entity_node()
+                .alarm_index(idx.clone())
+                .entities::<Timer>(cfg.clone())
+        })
         .collect();
     sim.run_for(Duration::from_secs(3));
 

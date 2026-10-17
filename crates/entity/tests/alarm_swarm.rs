@@ -244,7 +244,11 @@ impl ClusterWorkload for AlarmSwarm {
             let timers: Vec<Entities<Timer>> = nodes
                 .iter()
                 .zip(&indexes)
-                .map(|(s, idx)| s.entities_with_alarms::<Timer>(config(), idx.clone()))
+                .map(|(s, idx)| {
+                    s.entity_node()
+                        .alarm_index(idx.clone())
+                        .entities::<Timer>(config())
+                })
                 .collect();
             let clock = nodes[0].clock().clone();
             // Let the control-plane and shard groups elect before traffic.
@@ -414,7 +418,11 @@ fn one_arm_fires_exactly_once_without_faults() {
     let timers: Vec<Entities<Timer>> = systems
         .iter()
         .zip(&indexes)
-        .map(|(s, idx)| s.entities_with_alarms::<Timer>(config(), idx.clone()))
+        .map(|(s, idx)| {
+            s.entity_node()
+                .alarm_index(idx.clone())
+                .entities::<Timer>(config())
+        })
         .collect();
     sim.run_for(Duration::from_secs(3));
 

@@ -120,14 +120,9 @@ async fn gateway() -> Arc<agent_gateway::Gateway<Sys>> {
     // The gateway joins as a client over the same system. On a single LocalSystem
     // the host gateways are in the receptionist immediately, so discovery returns
     // at once.
-    let shards = EntityConfig::default().shards;
-    let roster = vec![
-        ("assistant".to_string(), shards),
-        ("worker".to_string(), shards),
-    ];
     agent_gateway::connect(
         system,
-        &roster,
+        &["assistant".to_string(), "worker".to_string()],
         Arc::new(InsecureTokens),
         agent_gateway::Limits::default(),
         Duration::from_secs(5),

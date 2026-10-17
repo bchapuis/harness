@@ -1,22 +1,31 @@
 //! The capabilities a **node** provides to every entity type it hosts (spec §7.4,
-//! §13), as distinct from the per-type settings in [`EntityConfig`].
+//! §7.16, §13), as distinct from the per-type settings in [`EntityConfig`].
 //!
-//! Two things in this crate are scoped to the node rather than to an entity type: the
-//! blocking-I/O pool, which bounds *this node's* concurrent device work, and the
-//! metrics registry, which an operator reads to judge *this node's* health. Per-type
-//! copies would give a node hosting three types three pools, and a type that omitted
-//! one an inline pool rather than the node's, which stays invisible until a stalled
-//! device blocks the executor the pool was added to protect.
+//! Three things in this crate are scoped to the node rather than to an entity type:
+//! the blocking-I/O pool, which bounds *this node's* concurrent device work, the
+//! metrics registry, which an operator reads to judge *this node's* health, and the
+//! alarm index, which wakes this node's alarmed entities across hibernation and
+//! failover. Per-type copies would give a node hosting three types three pools, and
+//! a type that omitted one an inline pool rather than the node's, which stays
+//! invisible until a stalled device blocks the executor the pool was added to
+//! protect. The index fails the same silent way per type: a type with the `Alarm`
+//! facet hosted without it never fires across hibernation or failover, and a type
+//! without the facet given it runs a driver sweep for nothing. Set once on the node,
+//! it reaches exactly the types whose facet set declares `Alarm`.
 //!
 //! A deployment builds one [`EntityNode`], sets what it has, and hosts every type
-//! through it; the handles are resolved once, when the node is built.
+//! through it; the handles are resolved once, when the node is built. The node also
+//! remembers each type it hosted, so a graceful stop hands off every led shard in
+//! one call ([`EntityNode::hand_off_leadership`]).
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::alarm_index::AlarmIndex;
 use crate::config::EntityConfig;
 use crate::entity::Entity;
 use crate::entity_ref::Entities;
+use crate::shardmap::ShardMapSource;
 use crate::system::EntitySystem;
 
 /// The node-scoped handles every entity type on a node shares.
@@ -55,7 +64,7 @@ impl NodeCapabilities {
 }
 
 /// A node's entity hosting, carrying the capabilities every type it hosts shares
-/// (spec §7.4, §13).
+/// (spec §7.4, §7.16, §13).
 ///
 /// Obtained from [`EntityExt::entity_node`](crate::EntityExt::entity_node),
 /// configured once, and then used in place of the `system.entities(..)` calls:
@@ -67,7 +76,11 @@ impl NodeCapabilities {
 ///     .metrics(Arc::clone(&metrics));
 ///
 /// let alarms: Entities<AlarmIndex<_>> = node.entities(alarm_config);
-/// let machines: Entities<Machine> = node.entities_named_with_alarms(..., alarms);
+/// let node = node.alarm_index(alarms);
+/// let machines: Entities<Machine> = node.entities_named(..., factory);
+///
+/// // At the graceful stop: every type hosted above, in one call.
+/// node.hand_off_leadership().await;
 /// ```
 ///
 /// Hosting a type straight off the system (`system.entities(..)`) still works and takes
@@ -76,6 +89,13 @@ impl NodeCapabilities {
 pub struct EntityNode<S: EntitySystem> {
     system: S,
     capabilities: NodeCapabilities,
+    /// The per-shard alarm index (§7.16) wired into every type hosted from here on
+    /// whose facet set declares the `Alarm` facet.
+    alarm_index: Option<Entities<AlarmIndex<S>>>,
+    /// The shard map of every type hosted through this node, shared by every clone
+    /// and every builder-method result, so the one registry
+    /// [`hand_off_leadership`](EntityNode::hand_off_leadership) reads sees them all.
+    hosted: Arc<Mutex<Vec<Arc<dyn ShardMapSource>>>>,
 }
 
 impl<S: EntitySystem> EntityNode<S> {
@@ -83,6 +103,8 @@ impl<S: EntitySystem> EntityNode<S> {
         EntityNode {
             system,
             capabilities: NodeCapabilities::default(),
+            alarm_index: None,
+            hosted: Arc::default(),
         }
     }
 
@@ -140,6 +162,23 @@ impl<S: EntitySystem> EntityNode<S> {
         self
     }
 
+    /// The per-shard alarm index this node's alarmed entities fire through (spec
+    /// §7.16): host one [`AlarmIndex`] type and hand its handle here, before hosting
+    /// the types that alarm.
+    ///
+    /// Wired into exactly the types hosted afterwards whose facet set declares the
+    /// [`Alarm`](crate::facet::Alarm) facet: each of their hosts registers its
+    /// pending deadline with the index, and a per-type driver re-activates due
+    /// entities on the shards this node leads, so an alarm fires across hibernation
+    /// and failover rather than only while its entity is resident. A type without
+    /// the facet gets neither. Without an index an alarm still fires, but its
+    /// pending deadline pins the entity resident.
+    #[must_use]
+    pub fn alarm_index(mut self, index: Entities<AlarmIndex<S>>) -> EntityNode<S> {
+        self.alarm_index = Some(index);
+        self
+    }
+
     /// Host entities of type `G` under its own `G::ENTITY_TYPE`, building each
     /// activation with `G::default`: this node's form of
     /// [`EntityExt::entities`](crate::EntityExt::entities).
@@ -171,50 +210,52 @@ impl<S: EntitySystem> EntityNode<S> {
     where
         G: Entity<System = S>,
     {
-        crate::entity_ref::build_entities::<S, G>(
+        let (entities, shard_map) = crate::entity_ref::build_entities::<S, G>(
             &self.system,
             entity_type,
             config,
             &self.capabilities,
             factory,
-            None,
-        )
+            self.alarm_index.clone(),
+        );
+        self.hosted
+            .lock()
+            .expect("hosted-types mutex poisoned")
+            .push(shard_map);
+        entities
     }
 
-    /// Host entities of type `G` with durable-alarm firing: this node's form of
-    /// [`EntityExt::entities_with_alarms`](crate::EntityExt::entities_with_alarms).
-    pub fn entities_with_alarms<G>(
-        &self,
-        config: EntityConfig,
-        index: Entities<AlarmIndex<S>>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = S> + Default,
-    {
-        self.entities_named_with_alarms(G::ENTITY_TYPE, config, Arc::new(G::default), index)
-    }
-
-    /// [`entities_named`](EntityNode::entities_named) with durable-alarm firing
-    /// (spec §7.16): each host registers its pending deadline with the per-shard
-    /// `index`, and a background driver re-activates due entities on the shards
-    /// this node leads. See [`EntityExt::entities_with_alarms`](crate::EntityExt::entities_with_alarms).
-    pub fn entities_named_with_alarms<G>(
-        &self,
-        entity_type: &'static str,
-        config: EntityConfig,
-        factory: Arc<dyn Fn() -> G + Send + Sync>,
-        index: Entities<AlarmIndex<S>>,
-    ) -> Entities<G>
-    where
-        G: Entity<System = S>,
-    {
-        crate::entity_ref::build_entities::<S, G>(
-            &self.system,
-            entity_type,
-            config,
-            &self.capabilities,
-            factory,
-            Some(index),
-        )
+    /// Hand every shard this node leads, across every type hosted through it, to
+    /// another of that shard's replicas before the node departs (spec §8.3),
+    /// returning how many were still led when the attempt gave up: `0` when they all
+    /// moved.
+    ///
+    /// Call this from a graceful shutdown, after the node stops accepting new work
+    /// and before the process exits. Skipping it is *safe* but expensive: each shard
+    /// this node led then waits a full leader-election timeout before its replicas
+    /// elect, and every entity on those shards rehydrates on the new leader, so a
+    /// rolling restart becomes one failover per led shard. The types hand off
+    /// concurrently, each bounded on its own.
+    ///
+    /// Best-effort: a shard whose other replicas are all lagging or unreachable keeps
+    /// its leader here and fails over the slow way. A non-zero return is information
+    /// for the operator, not an error to retry: the node is leaving regardless. A
+    /// no-op on the `Local` tier, which has no other replicas.
+    ///
+    /// Covers the types hosted through this node and its clones, and no others: a
+    /// type hosted straight off the system (`system.entities(..)`) goes through a
+    /// node of its own that nothing keeps, so a deployment that hands off hosts every
+    /// type through one `EntityNode`.
+    pub async fn hand_off_leadership(&self) -> usize {
+        // Copied out so no handoff runs under the lock.
+        let hosted = self
+            .hosted
+            .lock()
+            .expect("hosted-types mutex poisoned")
+            .clone();
+        futures::future::join_all(hosted.iter().map(|map| map.hand_off_leadership()))
+            .await
+            .into_iter()
+            .sum()
     }
 }

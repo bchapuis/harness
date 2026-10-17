@@ -34,11 +34,12 @@
 //! write-once, so a completed step resolves from the memo across crashes instead of
 //! running again. An alarm fires while its entity is resident and re-arms on
 //! re-activation. To fire with **no access after a node failover or hibernation**,
-//! host a type with
-//! [`entities_with_alarms`](EntityExt::entities_with_alarms): each host registers its
-//! deadline in a per-shard [`AlarmIndex`](cluster::AlarmIndex) (an acknowledged registration, which is
-//! what lets an alarmed entity hibernate; an unacked one pins it resident), and a
-//! driver re-activates due entities on the shards this node leads.
+//! give the node an alarm index
+//! ([`EntityNode::alarm_index`](cluster::EntityNode::alarm_index)) and host the type
+//! through it: each host registers its deadline in a per-shard
+//! [`AlarmIndex`](cluster::AlarmIndex) (an acknowledged registration, which is what
+//! lets an alarmed entity hibernate; an unacked one pins it resident), and a driver
+//! re-activates due entities on the shards this node leads.
 //!
 //! # Scope: two durability tiers, one model
 //!

@@ -44,6 +44,7 @@ use entity::EntityCtx;
 use entity::EntityError;
 use entity::EntityExt;
 use entity::EntityHandler;
+use entity::cluster::EntityNode;
 use serde::Deserialize;
 use serde::Serialize;
 use support::drive;
@@ -359,7 +360,18 @@ fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
     // simultaneous failovers, each followed by the rehydration of every entity on
     // that shard.
     let sim = Simulation::new(11);
-    let (_net, systems, hosts) = cluster(&sim);
+    // Hosted through one `EntityNode` per node rather than `cluster`'s
+    // `system.entities`: the handoff covers the types a node hosted, and a type
+    // hosted straight off the system belongs to no node that is kept.
+    let net = leader_net(&sim);
+    let systems = [net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
+    let nodes: Vec<EntityNode<SimNode>> = systems.iter().map(|s| s.entity_node()).collect();
+    let hosts: Vec<Entities<Account>> = nodes
+        .iter()
+        .map(|node| node.entities::<Account>(config()))
+        .collect();
+    sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     let key = "account/handoff";
 
     // Commit through the shard's leader so the followers' match indexes are real:
@@ -373,13 +385,13 @@ fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
     assert_eq!(committed, Ok(640));
 
     let before = hosts[0].leader(key).expect("the shard elected a leader");
-    // The handle that lives ON the leader node: `leader(key)` is a routing
-    // observation any replica answers, so it does not identify the local node.
+    // The leader's own node: `leader(key)` is a routing observation any replica
+    // answers, so it does not identify the local node.
     let departing = systems
         .iter()
         .position(|s| s.node() == before)
-        .map(|i| hosts[i].clone())
-        .expect("an entity on the shard leader");
+        .map(|i| nodes[i].clone())
+        .expect("the shard leader is one of ours");
 
     // Hand off, then advance far LESS than an election timeout: any leadership
     // change observed after this can only have come from the handoff.

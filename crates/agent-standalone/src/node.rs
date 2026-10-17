@@ -159,10 +159,6 @@ impl Default for NodeOptions {
     }
 }
 
-/// Two SWIM rounds at the default probe interval, the departure's gossip
-/// window; see [`actor_runtime::depart`].
-const LEAVE_GRACE: Duration = Duration::from_secs(2);
-
 /// Boot the node and host its entities until SIGTERM or SIGINT, then stop
 /// gracefully: hand off every shard this node leads (entity spec §8.3),
 /// announce the departure, and release the transport.
@@ -272,10 +268,11 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     let tools = sandboxes.tools();
     let has_shell = sandboxes.has_shell();
     let sandboxes: Arc<dyn SandboxProvider> = Arc::new(sandboxes);
-    // The handle is bound for the node's life to keep the gateway actors alive,
-    // like `directory` below; both hand off their shards at the stop.
+    // Every kind is hosted through `entity_node`, like `directory` below, so the
+    // node's handoff at the stop covers them all. Nothing reads either handle
+    // after boot: the gateways they started serve on their own.
     let node_kinds = kinds(&opts, &tools, profile, has_shell, entity_store.clone());
-    let harness = Harness::builder(system.clone(), &node_kinds)
+    let _harness = Harness::builder(system.clone(), &node_kinds)
         .entity_node(entity_node.clone())
         .config(harness_config())
         .host_all(model, sandboxes)
@@ -283,7 +280,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // Host the tenancy ownership-index entity type (one entity per principal) so the
     // gateway's client `Entities<Directory>` can route `Record`/`List` to it. The
     // node only hosts it; the recording on each prompt happens at the gateway edge.
-    let directory: Entities<Directory<TcpCluster>> = entity_node.entities(EntityConfig {
+    let _directory: Entities<Directory<TcpCluster>> = entity_node.entities(EntityConfig {
         entity_store: Some(entity_store),
         ..EntityConfig::default()
     });
@@ -301,13 +298,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
          No client-facing listener on this node."
     );
     actor_runtime::shutdown_signal().await;
-    actor_runtime::depart(
-        &system,
-        async { harness.hand_off_leadership().await + directory.hand_off_leadership().await },
-        actor_runtime::HANDOFF_TIMEOUT,
-        LEAVE_GRACE,
-    )
-    .await;
+    actor_runtime::depart(&system, entity_node.hand_off_leadership()).await;
     Ok(())
 }
 

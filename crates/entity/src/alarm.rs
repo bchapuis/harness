@@ -36,6 +36,7 @@ use crate::facet::Facet;
 use crate::facet::FacetCell;
 use crate::facet::FacetEnv;
 use crate::facet::FacetError;
+use crate::facet::FacetSet;
 use crate::facet::HasFacet;
 use crate::facet::decode_payload;
 use crate::facet::encode_payload;
@@ -49,6 +50,13 @@ use actor_core::ActorSystem;
 pub struct Alarm;
 
 impl Sealed for Alarm {}
+
+/// Whether `G`'s facet set declares the [`Alarm`] facet: the only way an entity of
+/// the type can hold a deadline, and so the condition under which hosting wires the
+/// node's alarm index into the type (spec §7.16).
+pub(crate) fn declares_alarm<G: Entity>() -> bool {
+    <G::Facets as FacetSet>::TAGS.contains(&<Alarm as Facet>::TAG)
+}
 
 /// One alarm record (spec §7.16): the unit of durable change under the alarm tag.
 #[derive(Serialize, Deserialize)]

@@ -18,9 +18,9 @@
 //!
 //! **The differential is controlled.** Both arms host the `AlarmIndex` entity, so
 //! the Raft group count is identical; both run the same `Timer`, the same seeds,
-//! and the same [`FaultPolicy`]. Only the timer's wiring differs:
-//! `entities_with_alarms` against plain `entity`, which is `Some(index)` to the
-//! host plus the driver loop.
+//! and the same [`FaultPolicy`]. Only the timer's wiring differs: hosted through
+//! a node given the index (`EntityNode::alarm_index`) against one without it,
+//! which is `Some(index)` to the host plus the driver loop.
 //!
 //! **What is asserted is the relationship, not a rate.** Frame loss makes any
 //! given `ask` failable in both arms, so "the alarm arm committed less often" is
@@ -97,10 +97,10 @@ fn lossy(one_in: u64) -> FaultPolicy {
 /// Whether this arm wires the timer to the alarm index: the one variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Wiring {
-    /// `entities_with_alarms`: the host registers deadlines in the index and the
+    /// A node with the alarm index: the host registers deadlines in it and the
     /// per-type driver sweeps the shards this node leads (§7.16).
     Alarms,
-    /// Plain `entity`: the same entity, no index registration, no driver.
+    /// A node without one: the same entity, no index registration, no driver.
     Plain,
 }
 
@@ -123,8 +123,11 @@ fn cluster(sim: &Simulation, wiring: Wiring, one_in: u64) -> Vec<Entities<Timer>
         .iter()
         .zip(&indexes)
         .map(|(s, idx)| match wiring {
-            Wiring::Alarms => s.entities_with_alarms::<Timer>(config(), idx.clone()),
-            Wiring::Plain => s.entities::<Timer>(config()),
+            Wiring::Alarms => s
+                .entity_node()
+                .alarm_index(idx.clone())
+                .entities::<Timer>(config()),
+            Wiring::Plain => s.entity_node().entities::<Timer>(config()),
         })
         .collect();
     sim.run_for(SETTLE);

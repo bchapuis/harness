@@ -834,8 +834,8 @@ impl<G: Entity> Host<G> {
     /// Register (or clear) this entity's pending deadline in its shard's alarm index
     /// (spec §7.16), so a node that later leads the shard (or this node's own
     /// driver, once the entity hibernates) can re-activate it with no caller. A
-    /// no-op unless `entities_with_alarms` wired an index; the entity's own alarm
-    /// facet, not the index, is the source of truth.
+    /// no-op unless the node wired its alarm index into this type; the entity's own
+    /// alarm facet, not the index, is the source of truth.
     ///
     /// Acknowledged, not fire-and-forget: the launched `ask`'s reply releases only
     /// after the index entity's commit (output gate, **E5**), so

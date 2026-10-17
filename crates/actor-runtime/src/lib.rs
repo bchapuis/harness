@@ -45,7 +45,6 @@ pub use entropy::OsEntropy;
 pub use join::JoinOptions;
 pub use join::join;
 pub use join::wait_for_cluster;
-pub use lifecycle::HANDOFF_TIMEOUT;
 pub use lifecycle::depart;
 pub use lifecycle::shutdown_signal;
 pub use spawner::TokioSpawner;

@@ -262,7 +262,7 @@ The **gateway** (`agent-gateway`) takes its own set:
 | `--bind-host <addr>`    | `127.0.0.1`        | interface the *transport* binds; `0.0.0.0` in a container |
 | `--advertise-host <a>`  | `--bind-host`      | the host the nodes dial it back at; must match their `--client <host>` |
 | `--port-base <p>`       | `7401`             | node/client *i*'s transport = p+i−1 |
-| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment: an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `agent-standalone`'s default kinds |
+| `--kind <name>`         | `assistant worker` | a kind the nodes host; repeat per kind. Must match the nodes' deployment: an unknown name fails discovery. The default mirrors `agent-standalone`'s default kinds |
 | `--auth-tokens <path>`  | none                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
 | `--max-within-secs <n>` | `3600`             | ceiling on a prompt's `within_secs` |
 | `--max-body-bytes <n>`  | `1048576`          | max request body size |
