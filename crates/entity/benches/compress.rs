@@ -34,7 +34,7 @@
 //!
 //! Saying which form a payload carries needs a tag a peer will not read as blob
 //! content and fail the content hash on: a wire-format change, which every peer
-//! takes at once (compatibility §3.1). That is a format decision rather than a
+//! takes at once (compatibility §3.3). That is a format decision rather than a
 //! measurement, which is why this file does not take it.
 //!
 //! Run with `cargo bench -p entity --bench compress`. If a `machine-data/` or
@@ -55,7 +55,7 @@ fn main() {
     divan::main();
 }
 
-/// The disk facet's block size (spec §7.15): the unit a machine create ships.
+/// The disk facet's block size (spec facets §4.4): the unit a machine create ships.
 const BLOCK: usize = 1 << 20;
 
 /// The workspace root, from this crate's manifest directory.

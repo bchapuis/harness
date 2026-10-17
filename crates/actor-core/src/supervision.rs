@@ -1,10 +1,10 @@
-//! Supervision (spec §11).
+//! Supervision (spec §2.4).
 //!
 //! Supervision governs what happens when a **local** actor faults: a handler
 //! panics, or [`started`](crate::Actor::started) fails. An actor declares its
 //! strategy by overriding [`Actor::supervision`](crate::Actor::supervision); the
 //! executor catches the fault and applies the resulting
-//! [`SupervisionDirective`] (spec §11.2). The default is [`Stop`].
+//! [`SupervisionDirective`] (spec §2.4). The default is [`Stop`].
 //!
 //! [`Stop`]: SupervisionDirective::Stop
 
@@ -12,18 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Why an actor faulted, so a decider can choose a directive per cause (spec
-/// §11.2).
+/// §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
     /// `started` returned `Err`.
     Started,
     /// A message handler panicked.
     Message,
-    /// A child actor escalated its failure to this (parent) actor (spec §11.1).
+    /// A child actor escalated its failure to this (parent) actor (spec §2.4).
     Escalation,
 }
 
-/// Delay between restarts (spec §11.2). Exponential with a cap is RECOMMENDED to
+/// Delay between restarts (spec §2.4). Exponential with a cap is RECOMMENDED to
 /// avoid hot-restart loops; the executor adds equal-jitter to whatever delay this
 /// returns (`host::jittered`).
 #[derive(Clone, Copy, Debug)]
@@ -47,14 +47,14 @@ impl Backoff {
     }
 }
 
-/// What to do when an actor faults (spec §11.2).
+/// What to do when an actor faults (spec §2.4).
 #[derive(Clone, Copy, Debug)]
 pub enum SupervisionDirective {
-    /// Terminate the actor; notify watchers (spec §12). The default.
+    /// Terminate the actor; notify watchers (spec §2.5). The default.
     Stop,
     /// Keep state, drop the failed message, and carry on (use sparingly). A
     /// failed `started` has no message to drop, so for it this degrades to
-    /// [`Stop`]: an actor never runs before its start succeeded (spec §3.1.1).
+    /// [`Stop`]: an actor never runs before its start succeeded (spec §2.1).
     ///
     /// [`Stop`]: SupervisionDirective::Stop
     Resume,
@@ -68,20 +68,20 @@ pub enum SupervisionDirective {
         backoff: Backoff,
     },
     /// Fail the parent, propagating the fault up the supervision hierarchy
-    /// (spec §11.1): the actor stops with `Failed` and its parent is faulted with
+    /// (spec §2.4): the actor stops with `Failed` and its parent is faulted with
     /// [`Fault::Escalation`], which then applies the parent's own strategy.
     Escalate,
 }
 
 /// A per-actor supervision strategy: a decider mapping a [`Fault`] to a
-/// [`SupervisionDirective`] (spec §11.2).
+/// [`SupervisionDirective`] (spec §2.4).
 #[derive(Clone)]
 pub struct Supervision {
     decider: Arc<dyn Fn(Fault) -> SupervisionDirective + Send + Sync>,
 }
 
 impl Supervision {
-    /// Always stop (the default, spec §11.2).
+    /// Always stop (the default, spec §2.4).
     pub fn stop() -> Supervision {
         Supervision::with(|_| SupervisionDirective::Stop)
     }

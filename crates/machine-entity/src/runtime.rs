@@ -1,4 +1,4 @@
-//! The machine's runtime binding seam (machine §1, §2.1): how the entity
+//! The machine's runtime binding seam (machine §1, §2.3): how the entity
 //! reaches its live guest.
 //!
 //! The activation *is* a running guest (machine §1), but that guest is one of
@@ -9,7 +9,7 @@
 //! simulation binds [`fake::FakeRuntimeProvider`]; production binds
 //! [`hosted::HostedRuntimeProvider`], which holds its guest through
 //! `machine_host::MachineHost`: a Firecracker microVM, or a container holding
-//! the same rootfs on a host with no KVM (machine §2.1). Which mechanism is the
+//! the same rootfs on a host with no KVM (machine §2.3). Which mechanism is the
 //! node's configuration, not this seam's concern.
 //!
 //! Named `runtime`, not `vm`: half the implementations are containers, and a
@@ -57,14 +57,14 @@ impl From<std::io::Error> for RuntimeError {
 #[derive(Clone, Debug)]
 pub struct BootSpec {
     /// The disk facet's materialized image (`ctx.disk().path()`), the guest's
-    /// backing drive. The guest writes it in place between captures (entity
-    /// §7.15's one departure).
+    /// backing drive. The guest writes it in place between captures (facets
+    /// §4.4's one departure).
     pub image: PathBuf,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// The machine this guest belongs to: the attribution key (machine §5.2).
+    /// The machine this guest belongs to: the attribution key (machine §2.6).
     pub machine: EntityName,
-    /// The machine's journaled egress policy (machine §5.2, M6): what the guest
+    /// The machine's journaled egress policy (machine §2.6, M6): what the guest
     /// may reach out to. The provider realizes exactly what it grants; the fake
     /// provider ignores it.
     pub egress: EgressPolicy,
@@ -76,7 +76,7 @@ pub trait MachineRuntime: Send + Sync + 'static {
     /// Pause the guest at a quiescent point (machine §4): once resolved, the
     /// guest issues no further writes to the image until
     /// [`resume`](MachineRuntime::resume), so a capture's scan sees a stable
-    /// image (entity §7.15's capture seam).
+    /// image (facets §4.4's capture seam).
     fn pause(&self) -> BoxFuture<'_, Result<(), RuntimeError>>;
 
     /// Resume a paused guest.
@@ -103,11 +103,11 @@ pub trait MachineRuntime: Send + Sync + 'static {
     fn pull_ws(&self, ws: PathBuf) -> BoxFuture<'_, Result<(), RuntimeError>>;
 }
 
-/// Boots a machine's guest. One per node, injected into the entity factory
+/// Boots a machine's guest (machine §2.2). One per node, injected into the entity factory
 /// (`entities_named`), so each activation binds its node's mechanism.
 pub trait MachineRuntimeProvider: Send + Sync + 'static {
     /// Boot a guest against `spec.image`. The image was rehydrated by the disk
-    /// facet before the first command (entity §7.15), so the boot reads the
+    /// facet before the first command (facets §4.4), so the boot reads the
     /// committed rootfs.
     fn boot(
         &self,
@@ -115,7 +115,7 @@ pub trait MachineRuntimeProvider: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<Arc<dyn MachineRuntime>, RuntimeError>>;
 }
 
-/// The simulation's runtime (machine §7): a "guest" whose activity is a
+/// The simulation's runtime (machine §6): a "guest" whose activity is a
 /// deterministic, seed-stable stream of block writes into the image file, so
 /// captures have real dirty blocks and one seed reproduces a whole
 /// attach–crash–failover–reconnect narrative byte-identically.

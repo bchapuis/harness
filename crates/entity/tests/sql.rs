@@ -1,4 +1,4 @@
-//! End-to-end SQL facet tests on the `Local` tier (spec §7.14): WAL-frame
+//! End-to-end SQL facet tests on the `Local` tier (spec facets §4.3): WAL-frame
 //! records committing atomically with the command, zero-record reads, physical
 //! replay of nondeterministic SQL, and the checkpoint/rehydration round-trip.
 #![cfg(feature = "sql")]
@@ -37,7 +37,7 @@ use support::ledger::ensure_schema;
 
 // --- Suite-specific messages over the shared `Ledger` fixture ----------------
 
-/// Probe the handler-surface guards (spec §7.14): a `select` returns its column
+/// Probe the handler-surface guards (spec facets §4.3): a `select` returns its column
 /// names alongside the rows, and the connection authorizer denies `ATTACH` and
 /// `PRAGMA` on a handler statement while the facet's own machinery (the schema
 /// DDL and the insert above it) runs unrestricted.
@@ -77,7 +77,7 @@ impl EntityHandler<Probe> for Ledger {
     }
 }
 
-/// A command that never touches SQL, the lazy-transaction probe (spec §7.14):
+/// A command that never touches SQL, the lazy-transaction probe (spec facets §4.3):
 /// it must open neither a connection nor a transaction and commit no record.
 #[derive(Clone, Serialize, Deserialize)]
 struct Noop;
@@ -91,7 +91,7 @@ impl EntityHandler<Noop> for Ledger {
     }
 }
 
-/// Run the full authorizer denial matrix on a handler statement (spec §7.14)
+/// Run the full authorizer denial matrix on a handler statement (spec facets §4.3)
 /// (every file-write, pragma, and transaction-control verb) then write again.
 /// Replies with the misbehaviors (a verb that ran, or failed for a reason other
 /// than authorization); empty means every verb was denied *by the authorizer*
@@ -173,7 +173,7 @@ impl EntityHandler<CountNamed> for Ledger {
     }
 }
 
-/// Probe the [`MAX_QUERY_ROWS`] cap (spec §7.14): bulk-insert one row past the
+/// Probe the [`MAX_QUERY_ROWS`] cap (spec facets §4.3): bulk-insert one row past the
 /// cap, then reply with the over-cap `select` error, the row count `select`
 /// returns at exactly the cap, and the over-cap `query` error.
 #[derive(Clone, Serialize, Deserialize)]
@@ -256,7 +256,7 @@ impl EntityHandler<QueryOneProbe> for Ledger {
 /// An event that refuses to encode, forcing the host's step-2 serialization
 /// failure: the command is abandoned *after* the handler ran its SQL, leaving
 /// the facet's transaction open for the next command's clean-slate rollback
-/// (spec §7.14; an abandoned command never reaches `seal`).
+/// (spec facets §4.3; an abandoned command never reaches `seal`).
 #[derive(Clone, Debug)]
 struct Unencodable;
 
@@ -375,7 +375,7 @@ fn db_file_count(dir: &std::path::Path) -> usize {
 
 #[test]
 fn a_command_that_runs_no_sql_opens_no_connection_and_commits_nothing() {
-    // The lazy-transaction contract (spec §7.14): an entity that carries the facet
+    // The lazy-transaction contract (spec facets §4.3): an entity that carries the facet
     // but whose command never touches SQL pays nothing, no connection (so no
     // database file materializes), no BEGIN, no record, no `Committed`.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -400,7 +400,7 @@ fn a_command_that_runs_no_sql_opens_no_connection_and_commits_nothing() {
     assert_eq!(
         db_file_count(dir.path()),
         0,
-        "a no-SQL command must not even open the connection (§7.14)"
+        "a no-SQL command must not even open the connection (facets §4.3)"
     );
 
     // The Active → Open transition still works after a no-SQL command: the next
@@ -428,7 +428,7 @@ fn a_command_that_runs_no_sql_opens_no_connection_and_commits_nothing() {
 
 #[test]
 fn the_authorizer_denies_every_escape_verb_and_the_transaction_survives() {
-    // The full denial matrix (spec §7.14): ATTACH/DETACH (file escape), PRAGMA
+    // The full denial matrix (spec facets §4.3): ATTACH/DETACH (file escape), PRAGMA
     // (facet-fixed modes), and BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE (the
     // facet owns the transaction boundary). Each must fail *as an authorization
     // denial*, and the command's own transaction must stay usable and commit.
@@ -457,7 +457,7 @@ fn the_authorizer_denies_every_escape_verb_and_the_transaction_survives() {
                 .await
                 .expect("read back"),
             2,
-            "writes around the denied statements commit (§7.14)"
+            "writes around the denied statements commit (facets §4.3)"
         );
     });
 }
@@ -477,18 +477,18 @@ fn select_errors_past_the_row_cap_instead_of_truncating() {
         sim.block_on(async move { entity.ask(BulkSelect).await.expect("bulk probe") });
     assert!(
         over.contains("more than"),
-        "one row past the cap is an error, never a silent truncation (§7.14): {over}"
+        "one row past the cap is an error, never a silent truncation (facets §4.3): {over}"
     );
     assert_eq!(at_cap, MAX_QUERY_ROWS, "exactly the cap succeeds");
     assert!(
         over_query.contains("more than"),
-        "`query` enforces the same cap as `select` (§7.14): {over_query}"
+        "`query` enforces the same cap as `select` (facets §4.3): {over_query}"
     );
 }
 
 #[test]
 fn an_abandoned_command_rolls_back_its_transaction_before_the_next_one() {
-    // The clean-slate guard (spec §7.14): a command abandoned after its SQL ran
+    // The clean-slate guard (spec facets §4.3): a command abandoned after its SQL ran
     // (here: its event fails to encode, so the host abandons the stage without
     // sealing) leaves an open transaction; the next command's `begin` must roll
     // it back (the un-journaled insert is invisible), and the facet must be
@@ -521,7 +521,7 @@ fn an_abandoned_command_rolls_back_its_transaction_before_the_next_one() {
         assert_eq!(
             entity.ask(FlakyCount).await.expect("count after abandon"),
             1,
-            "the abandoned command's insert was rolled back, never journaled (§7.14/E20)"
+            "the abandoned command's insert was rolled back, never journaled (facets §4.3/E20)"
         );
         entity
             .ask(FlakyInsert { fail: false })
@@ -574,11 +574,11 @@ fn select_names_columns_and_the_authorizer_denies_dangerous_statements() {
     assert!(rows >= 1, "select returns the inserted row");
     assert!(
         attach_denied,
-        "the authorizer denies ATTACH on a handler statement (§7.14)"
+        "the authorizer denies ATTACH on a handler statement (facets §4.3)"
     );
     assert!(
         pragma_denied,
-        "the authorizer denies PRAGMA on a handler statement (§7.14)"
+        "the authorizer denies PRAGMA on a handler statement (facets §4.3)"
     );
 }
 
@@ -627,7 +627,7 @@ fn sql_writes_survive_hibernation_and_reads_commit_nothing() {
             "reads see all committed writes",
         );
 
-        // A pure read commits nothing: no frames, no record (§7.5/§7.14).
+        // A pure read commits nothing: no frames, no record (§6/facets §4.3).
         let before = entity.ask(Total).await.expect("total");
         let _ = entity.ask(Total).await.expect("total");
         assert_eq!(before, 750 + random_value);

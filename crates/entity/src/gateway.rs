@@ -1,7 +1,7 @@
-//! The per-entity-type gateway: routing and the activation table (spec §5.3, §5.4).
+//! The per-entity-type gateway: routing and the activation table (spec §4.3, §4.4).
 //!
 //! Each node runs one gateway actor per entity *type*, registered in the
-//! receptionist (actor §13) under a single well-known key for that type: one
+//! receptionist (actor §2.6) under a single well-known key for that type: one
 //! gateway entry per node ([`gateway_key`]). It owns the activation table mapping
 //! `EntityName → Host` for shards this node leads, and getting-or-activating a name
 //! is its one serial critical section: because the gateway is a serial actor, two
@@ -9,20 +9,20 @@
 //! first activates the host, the second finds it), so activation is
 //! **exactly-once per node by construction**, with no lock (invariant **E6**).
 //!
-//! The gateway is also the **router** (§5.4), but **single-shot**: resolving a
+//! The gateway is also the **router** (§4.4), but **single-shot**: resolving a
 //! name is two levels: name→shard by the committed key-range partition (the
-//! shard map, §5.1; the founding [`shard_for`](crate::system::shard_for) while it
+//! shard map, §4.1; the founding [`shard_for`](crate::system::shard_for) while it
 //! bootstraps), shard→leader from the system (`leads_shard`/`shard_leader`). When
 //! this node leads the shard it activates the host locally and returns the handle;
-//! otherwise it returns `NotLeader(hint)` *immediately* (§5.4 step 4). The bounded
+//! otherwise it returns `NotLeader(hint)` *immediately* (§4.4 step 4). The bounded
 //! redirect (following the hint, waiting out an election) is the **caller's**
 //! job, driven by [`EntityRef`](crate::EntityRef) and bounded by the caller's own
 //! deadline, so a slow resolution never blocks another entity's activation on this
 //! node.
 //!
 //! Beside routing, the gateway serves the **non-activating read** ([`ReadEvents`],
-//! §7.5): one bounded page of an entity's committed events straight from the
-//! shard's journal, so observation never wakes a hibernated entity (§10).
+//! §6): one bounded page of an entity's committed events straight from the
+//! shard's journal, so observation never wakes a hibernated entity (§7).
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -65,10 +65,10 @@ use crate::system::EntitySystem;
 use crate::system::ShardId;
 
 /// The receptionist key the gateway for an entity type registers under (spec
-/// §5.3): one well-known key per type, one entry per node. Routing looks the
+/// §4.3): one well-known key per type, one entry per node. Routing looks the
 /// leader node's gateway up here.
 ///
-/// `entity_type` is the runtime type name (spec §5.1), `G::ENTITY_TYPE` by default
+/// `entity_type` is the runtime type name (spec §4.1), `G::ENTITY_TYPE` by default
 /// but a caller-supplied name when one Rust entity is hosted under several type
 /// names ([`entities_named`](crate::cluster::EntityNode::entities_named)): two such names
 /// register distinct keys even though both are `Key<Gateway<G>>`.
@@ -76,7 +76,7 @@ pub(crate) fn gateway_key<G: Entity>(entity_type: &'static str) -> Key<Gateway<G
     Key::new(entity_type)
 }
 
-/// Get-or-activate the host for a name and return a handle to it (spec §5.4). The
+/// Get-or-activate the host for a name and return a handle to it (spec §4.4). The
 /// reply is the live `Host` activation, on this node when it leads the name's
 /// shard, otherwise the activation on the leader node. The caller then sends the
 /// command straight to it, keeping the serial gateway off the steady-state hot
@@ -85,7 +85,7 @@ pub(crate) fn gateway_key<G: Entity>(entity_type: &'static str) -> Key<Gateway<G
 /// Registered for network dispatch (see [`Gateway::register`]) so a caller on
 /// another node can drive a remote activation; the returned `ActorRef<Host<G>>`
 /// rebinds on the caller's node (the framework decodes replies under the local
-/// system, actor §4.4).
+/// system, actor §2.10).
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub(crate) struct Activate<G: Entity> {
@@ -108,21 +108,21 @@ impl<G: Entity> Message for Activate<G> {
     const MANIFEST: Manifest = Manifest::new("entity.Activate");
 }
 
-/// Server-side bound on one [`ReadEvents`] page (spec §7.5): the most journal
+/// Server-side bound on one [`ReadEvents`] page (spec §6): the most journal
 /// **records** one ask scans. It caps both the reply and the time the serial
 /// gateway spends serving a read, so no caller can hold activations behind one
 /// huge scan; a caller wanting more re-asks from the returned cursor.
 pub(crate) const READ_PAGE: usize = 1024;
 
 /// Read one page of an entity's committed events straight from the shard's
-/// journal (spec §7.5), the **non-activating read**: the gateway serves it from
+/// journal (spec §6), the **non-activating read**: the gateway serves it from
 /// `EntityJournal::load` without get-or-activating the entity, so polling a
-/// hibernated entity leaves it hibernated (§10). Like [`Activate`], it is
-/// answered only on the shard's leader (read-your-leader, §7.5); elsewhere it
-/// returns `NotLeader(hint)` for the caller's bounded redirect (§5.4).
+/// hibernated entity leaves it hibernated (§7). Like [`Activate`], it is
+/// answered only on the shard's leader (read-your-leader, §6); elsewhere it
+/// returns `NotLeader(hint)` for the caller's bounded redirect (§4.4).
 ///
 /// `limit` bounds the **records scanned** (clamped to [`READ_PAGE`]), which
-/// upper-bounds the events returned: facet records (§7.12) among the scanned
+/// upper-bounds the events returned: facet records (facets §3) among the scanned
 /// page are skipped, not surfaced. The events come back as their undecoded
 /// payload bytes at the journal's real slots; the caller decodes with its own
 /// codec ([`EntityRef::events`](crate::EntityRef::events)), so the serial gateway
@@ -160,7 +160,7 @@ pub(crate) enum ReadReply {
     Page(EventPage),
     /// The gateway is still establishing the entity's committed-head floor: a
     /// spawned per-leadership `head` recovery for a hibernated name, or a
-    /// resident activation mid-rehydration (§7.5). Transient by construction:
+    /// resident activation mid-rehydration (§6). Transient by construction:
     /// the caller retries after a short backoff, bounded by its own deadline.
     Warming,
 }
@@ -171,7 +171,7 @@ pub(crate) enum ReadReply {
 /// the scan reached the end of what this leader may serve (the journal's head,
 /// or its committed-head floor), the explicit form of the "short page only at
 /// head" contract a filtered page cannot carry on its own. `base` is the
-/// store's compaction base when the page was served (§9): slots at
+/// store's compaction base when the page was served (storage §8): slots at
 /// `Seq <= base` are subsumed by the entity's snapshot and no longer readable.
 /// Every page carries it because compaction is not bounded by any reader's
 /// cursor: a snapshot at the head can outrun a slow pager mid-read.
@@ -183,7 +183,7 @@ pub(crate) struct EventPage {
     pub(crate) base: Seq,
 }
 
-/// The gateway's note-to-self completing a spawned floor recovery (§7.5): a
+/// The gateway's note-to-self completing a spawned floor recovery (§6): a
 /// **local-only** tell from the task [`Gateway::warm`] launched, never accepted
 /// off the wire (absent from [`Gateway::register`]), like any internal
 /// self-drive. `head` is `None` when the recovery failed or leadership lapsed
@@ -208,18 +208,18 @@ impl Message for Recovered {
     const MANIFEST: Manifest = Manifest::new("entity.GatewayRecovered");
 }
 
-/// The node-local gateway for entity type `G` (spec §5.3).
+/// The node-local gateway for entity type `G` (spec §4.3).
 pub(crate) struct Gateway<G: Entity> {
     /// Names this node currently hosts, each with the shard index it activated
     /// under and the activation's published committed head ([`CommittedCell`]):
-    /// the resident floor of the non-activating read (§7.5). The serial actor is
+    /// the resident floor of the non-activating read (§6). The serial actor is
     /// the only writer, so no lock guards it (**E6**). The stored index guards
-    /// against a stale entry after a split/merge (§7.7).
+    /// against a stale entry after a split/merge (storage §7).
     table: HashMap<EntityName, (u32, ActorRef<Host<G>>, CommittedCell)>,
-    /// Committed-head floors for **non-resident** names (§7.5), each stamped with
+    /// Committed-head floors for **non-resident** names (§6), each stamped with
     /// the shard index and shard term its `head` recovery ran under: valid while
     /// that exact leadership persists; leadership regained is a higher term
-    /// (§8), and a split/merge changes the shard index (§7.7, indexes are never
+    /// (storage §5), and a split/merge changes the shard index (storage §7, indexes are never
     /// reused), so neither can alias, and no activation has started since
     /// ([`get_or_activate`](Gateway::get_or_activate) removes the entry).
     /// Bounded by `host_cache_capacity`: on overflow one arbitrary entry is
@@ -238,24 +238,24 @@ pub(crate) struct Gateway<G: Entity> {
     /// Allocator for the per-name `warming` tokens: bumped once per spawn and
     /// once per invalidation, never compared globally.
     warm_epoch: u64,
-    /// The runtime type name (spec §5.1), as passed to [`gateway_key`]. Used to
+    /// The runtime type name (spec §4.1), as passed to [`gateway_key`]. Used to
     /// map a name to its shard.
     entity_type: &'static str,
-    /// The shard map (§7.6): which nodes replicate each shard and this node's local
+    /// The shard map (storage §6): which nodes replicate each shard and this node's local
     /// store for the shards it replicates, read live as the consensus allocation
     /// commits.
     shard_map: Arc<dyn ShardMapSource>,
-    /// How many shards the type's namespace is partitioned into (§7.1).
+    /// How many shards the type's namespace is partitioned into (storage §3.1).
     shards: usize,
     config: EntityConfig,
-    /// What this **node** provides to every type it hosts (§7.4, §13), as opposed to
+    /// What this **node** provides to every type it hosts (storage §2.2, entity §10), as opposed to
     /// the per-type `config` above. Carried here so each activation gets the node's
     /// handles rather than rebuilding a default pair per host.
     capabilities: crate::node::NodeCapabilities,
     /// How a fresh activation's behavior value is built: the runtime instantiates
     /// the entity, the user supplies no value per `EntityName`.
     factory: Arc<dyn Fn() -> G + Send + Sync>,
-    /// The per-shard alarm index handed to each host it activates (spec §7.16), or
+    /// The per-shard alarm index handed to each host it activates (spec facets §4.5), or
     /// `None` when the node has none or the type declares no `Alarm` facet.
     alarm_index: Option<Entities<AlarmIndex<G::System>>>,
 }
@@ -300,9 +300,9 @@ impl<G: Entity> Gateway<G> {
     ) -> ActorRef<Host<G>> {
         // Reuse the cached host only if it is still alive AND still activated
         // under the shard the name currently resolves to. The liveness check
-        // closes the eviction race (§10): a host that hibernated before its
+        // closes the eviction race (§7): a host that hibernated before its
         // `Terminated` pruned the table must not be handed back. The shard check
-        // closes the split/merge race (§7.7): a host activated over the old
+        // closes the split/merge race (storage §7): a host activated over the old
         // shard's journal must not serve the name once the partition moved it.
         if let Some((activated_shard, host, _)) = self.table.get(&name) {
             if *activated_shard == shard.index
@@ -313,7 +313,7 @@ impl<G: Entity> Gateway<G> {
             self.table.remove(&name);
         }
         // The activation may append, so a non-resident read floor recorded for
-        // the name is stale from here on (§7.5): the resident cell replaces it.
+        // the name is stale from here on (§6): the resident cell replaces it.
         // Rotating the name's warming token likewise retires any floor recovery
         // still in flight for it: its measured head predates whatever this
         // activation commits. Per-name, so recoveries of other names survive.
@@ -324,7 +324,7 @@ impl<G: Entity> Gateway<G> {
         }
 
         // Otherwise spawn a restartable host that rehydrates from its shard's
-        // journal (§9).
+        // journal (storage §8).
         let config = self.config.clone();
         let capabilities = self.capabilities.clone();
         let factory = Arc::clone(&self.factory);
@@ -333,7 +333,7 @@ impl<G: Entity> Gateway<G> {
         let entity_type = self.entity_type;
         let alarm_index = self.alarm_index.clone();
         let shard_index = shard.index;
-        // The activation's published committed head (§7.5): unpublished until its
+        // The activation's published committed head (§6): unpublished until its
         // rehydration recovers the entity's head.
         let committed: CommittedCell = Arc::new(AtomicU64::new(HEAD_UNPUBLISHED));
         let cell = Arc::clone(&committed);
@@ -357,14 +357,14 @@ impl<G: Entity> Gateway<G> {
                 Arc::clone(&cell),
             )
         });
-        // Prune the table when the host stops: idle hibernation or fault (§10).
+        // Prune the table when the host stops: idle hibernation or fault (§7).
         ctx.watch(&host);
         self.table
             .insert(name, (shard.index, host.clone(), committed));
         host
     }
 
-    /// The shard a name resolves to right now (spec §5.1): the committed shard
+    /// The shard a name resolves to right now (spec §4.1): the committed shard
     /// map's key-range lookup, with the founding-partition fallback while the
     /// map bootstraps ([`resolve_shard`]).
     fn shard_of(&self, key: &str) -> ShardId {
@@ -372,7 +372,7 @@ impl<G: Entity> Gateway<G> {
     }
 
     /// The shard's journal if this node replicates **and** currently leads it,
-    /// else `NotLeader(hint)` for the caller's redirect loop (§5.4): the one
+    /// else `NotLeader(hint)` for the caller's redirect loop (§4.4): the one
     /// leads-this-shard gate both network handlers pass through.
     fn leading_journal(
         &self,
@@ -389,8 +389,8 @@ impl<G: Entity> Gateway<G> {
 impl<G: Entity> Actor for Gateway<G> {
     type System = G::System;
 
-    /// Accept [`Activate`] and [`ReadEvents`] over the network (spec §5.4,
-    /// §7.5). This is the gateway's whole network surface: a typed command
+    /// Accept [`Activate`] and [`ReadEvents`] over the network (spec §4.4,
+    /// §6). This is the gateway's whole network surface: a typed command
     /// then travels straight to the host (`RunTyped`, registered on [`Host`]),
     /// while the non-activating read is answered here, touching no host.
     fn register(registry: &mut HandlerRegistry<Gateway<G>>) {
@@ -400,7 +400,7 @@ impl<G: Entity> Actor for Gateway<G> {
 }
 
 impl<G: Entity> Handler<Activate<G>> for Gateway<G> {
-    /// Single-shot (§5.4): if this node replicates and leads the name's shard,
+    /// Single-shot (§4.4): if this node replicates and leads the name's shard,
     /// get-or-activate the host and return it; otherwise return `NotLeader(hint)`
     /// at once, leaving the redirect loop to the caller.
     async fn handle(
@@ -416,14 +416,14 @@ impl<G: Entity> Handler<Activate<G>> for Gateway<G> {
 
 impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
     /// Serve one page of the entity's committed events from the shard's journal
-    /// (spec §7.5), **without** get-or-activating the entity: a poll against a
-    /// hibernated name leaves it hibernated (§10). Single-shot like
+    /// (spec §6), **without** get-or-activating the entity: a poll against a
+    /// hibernated name leaves it hibernated (§7). Single-shot like
     /// [`Activate`]: a non-leader answers `NotLeader(hint)` at once.
     ///
     /// The local store alone cannot tell a committed record from a tentative
-    /// one: a leader writes its own replica before the quorum resolves (§7.2),
+    /// one: a leader writes its own replica before the quorum resolves (storage §4),
     /// and a fresh leader's store may hold undecided records (or miss committed
-    /// ones) until a `head` recovery read-repairs it (§8). So every page is
+    /// ones) until a `head` recovery read-repairs it (storage §5). So every page is
     /// bounded by the entity's **committed-head floor**: the resident
     /// activation's published head, or, for a hibernated name, a floor recovered
     /// once per leadership by [`warm`](Gateway::warm), which also backfills the
@@ -431,7 +431,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
     /// not served yet; no observer sees an unacknowledged write (**E5**).
     ///
     /// The await below never leaves this node: `load` is a local, fence-free
-    /// read of the leader's own store (§7.3), resolved from memory on both
+    /// read of the leader's own store (storage §2.1), resolved from memory on both
     /// tiers, and the clamp bounds it to one page, so the serial gateway is
     /// held for a bounded local copy, not for I/O. The recovery, which *is*
     /// I/O, runs on a spawned task with the caller retrying ([`ReadReply::Warming`]).
@@ -455,7 +455,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
                 Seq::new(published)
             }
             // Hibernated (or never activated here): a recovered floor, valid
-            // while the leadership it ran under persists (§8, regaining is a
+            // while the leadership it ran under persists (storage §5, regaining is a
             // higher term) and no activation started since (`get_or_activate`
             // removes it).
             _ => {
@@ -482,7 +482,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
             .load(&msg.name, msg.from, limit)
             .await
             .map_err(|e| EntityError::Unavailable(e.to_string()))?;
-        // Serve only the committed prefix (`committed_prefix` states the §7.5
+        // Serve only the committed prefix (`committed_prefix` states the §6
         // contract this encodes).
         let (base, records, at_head) = crate::entity::committed_prefix(page, floor, limit);
         let cursor = records.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
@@ -500,7 +500,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
 
 impl<G: Entity> Gateway<G> {
     /// Launch the once-per-leadership floor recovery for a non-resident name
-    /// (§7.5): `journal.head`, on the `Quorum` tier the §8 quorum read-repair,
+    /// (§6): `journal.head`, on the `Quorum` tier the storage §5 quorum read-repair,
     /// which both decides the committed head and backfills this leader's store;
     /// on the `Local` tier a local read. Runs on a spawned task so the serial
     /// gateway never awaits it; the result comes back as a local [`Recovered`]
@@ -524,7 +524,7 @@ impl<G: Entity> Gateway<G> {
             let head = journal.head(&name).await.ok();
             // Leadership must have held for the whole recovery: a term still
             // equal afterwards proves no other node could have appended while
-            // it ran (§8). The serial handler re-checks on arrival, closing the
+            // it ran (storage §5). The serial handler re-checks on arrival, closing the
             // gap between this check and delivery.
             let head = head.filter(|_| journal.term() == Some(term));
             let _ = gateway
@@ -541,17 +541,17 @@ impl<G: Entity> Gateway<G> {
 }
 
 impl<G: Entity> Handler<Recovered> for Gateway<G> {
-    /// Land a spawned floor recovery (§7.5). The floor is recorded only if it is
+    /// Land a spawned floor recovery (§6). The floor is recorded only if it is
     /// still trustworthy on arrival: no activation of **this name** was spawned
     /// since it started (the rotated warming token; an activation's appends
     /// move the head, even if it already hibernated again; the check is
     /// per-name so activations of unrelated names cannot starve this read), no
     /// host activated under this shard is resident (its cell is the floor
     /// then; a **stale-shard** entry left by a split/merge must not block the
-    /// recovered floor, or reads of the moved name would warm forever, §7.7),
-    /// the name still resolves to the shard it was recovered under (§7.7), and
+    /// recovered floor, or reads of the moved name would warm forever, storage §7),
+    /// the name still resolves to the shard it was recovered under (storage §7), and
     /// that shard's term is unchanged (no other leadership could have
-    /// appended, §8).
+    /// appended, storage §5).
     async fn handle(&mut self, msg: Recovered, _ctx: &Ctx<Gateway<G>>) {
         let token = self.warming.remove(&msg.name);
         let Some(head) = msg.head else { return };
@@ -568,7 +568,7 @@ impl<G: Entity> Handler<Recovered> for Gateway<G> {
         if shard.index != msg.shard || current != Some(msg.term) {
             return;
         }
-        // Bounded by the same knob as the host cache (§5.4). Overflow evicts
+        // Bounded by the same knob as the host cache (§4.4). Overflow evicts
         // one arbitrary entry, not the map: a full map means many hibernated
         // names are being polled, and clearing would send every poller into a
         // simultaneous fresh quorum recovery; one eviction costs one name one
@@ -583,14 +583,14 @@ impl<G: Entity> Handler<Recovered> for Gateway<G> {
 }
 
 impl<G: Entity> Gateway<G> {
-    /// The node a non-leading gateway redirects the caller to (§5.4). The believed
+    /// The node a non-leading gateway redirects the caller to (§4.4). The believed
     /// leader when known **and still plausible against the committed map**;
     /// otherwise a replica from the consensus-agreed shard map, so the caller
     /// reaches a node that can serve or name the real leader. A replica
     /// mid-election (or a not-yet-committed map) hints itself, so the caller backs
     /// off and retries here until the shard settles.
     ///
-    /// The plausibility check matters after a rebalance (§7.7): a node evicted
+    /// The plausibility check matters after a rebalance (storage §7): a node evicted
     /// from the shard keeps its last local Raft view (often naming *itself*
     /// leader) since the reconfigured group no longer heartbeats it. Trusting
     /// that stale view would pin every caller in a redirect loop back to this
@@ -614,7 +614,7 @@ impl<G: Entity> Gateway<G> {
 
 impl<G: Entity> Handler<Terminated> for Gateway<G> {
     async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Gateway<G>>) {
-        // The next message for that name re-activates it (§10).
+        // The next message for that name re-activates it (§7).
         self.table.retain(|_, (_, host, _)| *host.id() != signal.id);
     }
 }

@@ -1,4 +1,4 @@
-//! Cluster lifecycle and the nemesis vocabulary (spec §9.3, §18.3).
+//! Cluster lifecycle and the nemesis vocabulary (spec §6.3, §10).
 //!
 //! The wire half of [`SimNetwork`] (routing, seeded
 //! loss/duplication/latency) lives in [`transport`](crate::transport). This is
@@ -22,7 +22,7 @@ use crate::transport::Process;
 use crate::transport::SimNode;
 
 /// A node's process was replaced by [`SimNetwork::restart`]: emitted on the
-/// event stream (actor §16) just before the old system is shut down.
+/// event stream (actor §2.7) just before the old system is shut down.
 ///
 /// A successor process assigns actor *paths* from zero, so `node-2//user/0`
 /// names one actor before the restart and a different one after; without the
@@ -38,7 +38,7 @@ pub struct NodeRestarted {
 
 impl SimNetwork {
     /// Bring up a node's system on the network, registering it for routing.
-    /// `joining` selects founding (`Up`) vs joiner (`Joining`) startup (spec §9.3).
+    /// `joining` selects founding (`Up`) vs joiner (`Joining`) startup (spec §6.3).
     fn bring_up(&self, node: NodeId, joining: bool) -> SimNode {
         // A fresh scheduler domain per incarnation, not per node: `restart` needs
         // to retire the outgoing process's tasks while leaving its successor's
@@ -65,7 +65,7 @@ impl SimNetwork {
             self.entropy.clone(),
             // Every task this system spawns carries its incarnation's domain, so
             // the process can be frozen by `pause` or ended by `restart` as a
-            // unit (spec §18.3); child tasks inherit the tag.
+            // unit (docs/simulation-testing.md); child tasks inherit the tag.
             spawner,
             transport,
             rx,
@@ -82,7 +82,7 @@ impl SimNetwork {
     }
 
     /// Bring up a founding node, wiring it into every existing node's roster as
-    /// a full `Up` member (spec §9.3 join, pre-wired: for when the whole roster
+    /// a full `Up` member (spec §6.3 join, pre-wired: for when the whole roster
     /// is known up front).
     pub fn join(&self, node: NodeId) -> SimNode {
         let system = self.bring_up(node, false);
@@ -94,7 +94,7 @@ impl SimNetwork {
         system
     }
 
-    /// Bring up a node as a *joiner* (spec §9.3): it starts `Joining` and is told
+    /// Bring up a node as a *joiner* (spec §6.3): it starts `Joining` and is told
     /// only its `seeds`, which it contacts to gossip itself into the cluster.
     /// The leader then admits it to `Up`. No pre-wiring, so this exercises the
     /// real join protocol.
@@ -106,7 +106,7 @@ impl SimNetwork {
         system
     }
 
-    /// Restart `node` (spec §18.3, §9.4.3 item 2): stop its current system (an
+    /// Restart `node` (spec §6.4.3 item 2; docs/simulation-testing.md): stop its current system (an
     /// **abrupt** stop, not a graceful leave) and bring up a fresh one under the
     /// same identity and mode. Volatile state is lost exactly as a process death
     /// loses it (actors, the membership view, Raft's role and commit index);
@@ -157,7 +157,7 @@ impl SimNetwork {
         self.join(node)
     }
 
-    /// Sever communication between two groups of nodes (spec §18.3): frames on
+    /// Sever communication between two groups of nodes (docs/simulation-testing.md): frames on
     /// any cross pair are dropped, in both directions.
     pub fn partition(&self, side_a: &[NodeId], side_b: &[NodeId]) {
         let mut inner = self.inner.lock().expect("network mutex poisoned");
@@ -169,7 +169,7 @@ impl SimNetwork {
         }
     }
 
-    /// Sever communication in **one direction only** (spec §18.3): frames from any
+    /// Sever communication in **one direction only** (docs/simulation-testing.md): frames from any
     /// node in `from` to any node in `to` are dropped, but the reverse direction
     /// keeps flowing. The asymmetric ("one-way" / half-open) partition, and the
     /// source of zombie leaders. `heal` clears it.
@@ -182,7 +182,7 @@ impl SimNetwork {
         }
     }
 
-    /// Isolate a node from every peer (spec §18.3), a crash, as seen by the
+    /// Isolate a node from every peer (docs/simulation-testing.md), a crash, as seen by the
     /// rest of the cluster: its frames are dropped in both directions.
     pub fn crash(&self, node: NodeId) {
         let others: Vec<NodeId> = self
@@ -199,8 +199,8 @@ impl SimNetwork {
 
     /// Inject a raw frame directly into a node's inbound queue, bypassing
     /// routing, for negative tests that feed hostile or corrupt frames a
-    /// well-behaved peer would never send (spec §5.4, and §7 on framing). A no-op if the
-    /// target node is unknown.
+    /// well-behaved peer would never send (spec §2.11 rule 4, and §2.13 on framing).
+    /// A no-op if the target node is unknown.
     pub fn inject(&self, from: NodeId, to: NodeId, frame: Frame) {
         let sender = {
             let inner = self.inner.lock().expect("network mutex poisoned");
@@ -211,12 +211,12 @@ impl SimNetwork {
         }
     }
 
-    /// **Freeze a node** (spec §18.3): its tasks stop being polled, so it makes no
+    /// **Freeze a node** (docs/simulation-testing.md): its tasks stop being polled, so it makes no
     /// progress at all (a process pause, VM freeze, or long GC stall). Unlike
     /// `crash`, the node keeps its state and its inbound frames queue up, to be
     /// processed when it resumes. Virtual time is global and keeps advancing, but
     /// while frozen no task code runs: a paused leader does not climb its term, so
-    /// when it wakes it is cleanly behind and discovers it is deposed (§8.1).
+    /// when it wakes it is cleanly behind and discovers it is deposed (§5.1).
     pub fn pause(&self, node: NodeId) {
         if let Some(domain) = self.domain_of(node) {
             self.spawner.set_paused(domain, true);
@@ -237,14 +237,14 @@ impl SimNetwork {
     }
 
     /// Thaw a node frozen by [`pause`](SimNetwork::pause): its queued inbound frames
-    /// drain and its overdue timers fire, so it rejoins and reconciles (spec §18.3).
+    /// drain and its overdue timers fire, so it rejoins and reconciles (docs/simulation-testing.md).
     pub fn resume(&self, node: NodeId) {
         if let Some(domain) = self.domain_of(node) {
             self.spawner.set_paused(domain, false);
         }
     }
 
-    /// Clear all partitions and crashes (spec §9.2).
+    /// Clear all partitions and crashes (spec §6.2).
     ///
     /// This clears *blocks* only: seeded loss, duplication, and latency keep
     /// running, because the nemesis heals between rounds and a heal that retired
@@ -260,7 +260,7 @@ impl SimNetwork {
 
     /// Stop injecting transport faults: from here on frames are neither dropped,
     /// duplicated, nor jittered (the fixed base latency stays; it is not a
-    /// fault, spec §18.2).
+    /// fault, spec §2.12.2).
     ///
     /// Reaching a **converged** cluster needs this, not just
     /// [`heal`](SimNetwork::heal). A healed network that still loses a seeded
@@ -268,9 +268,9 @@ impl SimNetwork {
     /// flip to `suspect` and on to `unreachable`, and every node's serving set
     /// (utilities spec §2.1) keeps changing under it, so an at-quiescence
     /// assertion that presumes convergence (the singleton's exactly-one,
-    /// utilities spec §4 item 3) has no ground to stand on.
+    /// utilities spec §2.3 item 3) has no ground to stand on.
     ///
-    /// Faults already tallied stay counted, so a coverage assertion (spec §18.3)
+    /// Faults already tallied stay counted, so a coverage assertion (docs/simulation-testing.md)
     /// still sees what the run exercised.
     pub fn quiesce(&self) {
         *self.faults.lock().expect("fault policy mutex poisoned") = crate::FaultPolicy::default();

@@ -1,13 +1,13 @@
-//! The model seam (agent spec §4): one inference request, one response.
+//! The model seam (agent spec §2.1): one inference request, one response.
 //!
 //! The agent runtime core depends only on the [`Model`] trait: in production
 //! `agent-anthropic` implements it over the Anthropic Messages API and
 //! `agent-openai` over OpenAI-compatible Chat Completions, and the simulator
 //! supplies a scripted model; a deterministic function of the request and the
-//! run's seed (§12.2). A completion request is side-effect-free, so an
+//! run's seed. A completion request is side-effect-free, so an
 //! implementation MAY retry internally with backoff from `Clock`/`Entropy`
-//! without violating the core no-transparent-retry rule (core spec §1.2); a
-//! failure that survives the policy ends the run as `RunError::Model` (§4.3),
+//! without violating the core no-transparent-retry rule (core spec §1.1); a
+//! failure that survives the policy ends the run as `RunError::Model` (§2.1),
 //! never silently.
 //!
 //! The trait returns a [`BoxFuture`] rather than using `async fn` so it stays
@@ -24,7 +24,7 @@ use crate::budget::Usage;
 use crate::session::CallId;
 use crate::session::Entry;
 
-/// Model parameters of a kind (agent spec §7.1): deployment configuration
+/// Model parameters of a kind (agent spec §5.1): deployment configuration
 /// the agent runtime stores and transmits, not interprets.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelParams {
@@ -32,7 +32,7 @@ pub struct ModelParams {
     pub model: String,
     /// The per-call output ceiling. A kind's value is the unclamped ceiling;
     /// in a [`ModelRequest`] it is already clamped to the run's remaining
-    /// budget (§9.1 item 2).
+    /// budget (§7.1 item 2).
     pub max_tokens: u64,
 }
 
@@ -52,9 +52,9 @@ impl Default for ModelParams {
     }
 }
 
-/// One declared tool as the model sees it (agent spec §4.1): name,
+/// One declared tool as the model sees it (agent spec §2.1): name,
 /// description, input schema; the interface half of a [`ToolDecl`]
-/// (§5.2), without the agent runtime-side recovery policy.
+/// (§2.4), without the agent runtime-side recovery policy.
 ///
 /// [`ToolDecl`]: crate::tool::ToolDecl
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -64,28 +64,28 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
-/// One inference request (agent spec §4.1): the kind's system prompt, model
+/// One inference request (agent spec §2.1): the kind's system prompt, model
 /// parameters, and tool declarations, and the folded transcript. A
-/// deterministic function of session state (§10.5), so the exact request
+/// deterministic function of session state (§8.4), so the exact request
 /// issued at any step is reconstructible from the journal prefix.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub system_prompt: String,
     /// The kind's parameters, with `max_tokens` already clamped to the run's
-    /// remaining token budget (§9.1 item 2): the one output ceiling an
+    /// remaining token budget (§7.1 item 2): the one output ceiling an
     /// adapter sends.
     pub params: ModelParams,
     pub tools: Vec<ToolSpec>,
     /// The folded conversation, `Arc`-shared with [`SessionState`](crate::session::SessionState) so building a
     /// request is a pointer clone, not a deep copy of the whole conversation
-    /// (§4.1). Serialized as its inner slice (see [`arc_transcript`](crate::session)).
+    /// (§2.1). Serialized as its inner slice (see [`arc_transcript`](crate::session)).
     #[serde(with = "crate::session::arc_transcript")]
     pub transcript: Arc<Vec<Entry>>,
 }
 
-/// One tool call the model requested (agent spec §5.2). The `id` is the
+/// One tool call the model requested (agent spec §2.4). The `id` is the
 /// model API's tool-use id, or one the agent runtime assigned on receipt; it is the
-/// key orphaned-call resolution (§5.5) and child derivation (§8.1) match by.
+/// key orphaned-call resolution (§4.4) and child derivation (§6.1) match by.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: CallId,
@@ -93,9 +93,9 @@ pub struct ToolCall {
     pub input: Value,
 }
 
-/// One inference response (agent spec §4.1): assistant content, zero or
+/// One inference response (agent spec §2.1): assistant content, zero or
 /// more requested tool calls, and the reported usage that feeds budget
-/// accounting (§9.1).
+/// accounting (§7.1).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelResponse {
     pub content: String,
@@ -103,14 +103,14 @@ pub struct ModelResponse {
     pub usage: Usage,
 }
 
-/// A model failure (agent spec §4.3). Serializable because an unabsorbed
+/// A model failure (agent spec §2.1). Serializable because an unabsorbed
 /// failure travels inside the run's terminal outcome (`RunError::Model`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelError {
     RateLimited,
     Overloaded,
     /// The transcript exceeds the model's context window; fails the run
-    /// explicitly: compaction is future work (§1.1, §13).
+    /// explicitly: compaction is future work (§1.1, §11).
     ContextOverflow,
     InvalidRequest(String),
     Api(String),
@@ -129,7 +129,7 @@ impl std::fmt::Display for ModelError {
 }
 
 /// Inference: one request, one response; no streaming in v1 (agent spec
-/// §13). The first agent-runtime seam.
+/// §11). The first agent-runtime seam.
 pub trait Model: Send + Sync + 'static {
     fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>>;
 }

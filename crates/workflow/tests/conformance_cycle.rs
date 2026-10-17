@@ -1,7 +1,7 @@
 //! The workflow cycle end to end (workflow spec §3, §5, §6): W1, W2, W4, W7.
 //!
 //! Every test here runs the **real entity host, gateway, and journal** under one
-//! seed (§10): the workflow cycle is the only new code on the simulated path. The
+//! seed: the workflow cycle is the only new code on the simulated path. The
 //! assertions are about the four claims the cycle makes: that the desired set is
 //! a pure function of committed state, that everything in it eventually launches,
 //! that nothing launches before the record that wanted it committed, and that the
@@ -190,7 +190,7 @@ fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
     );
     assert!(
         announced_quiescence(&recorder.events()),
-        "and must have announced quiescence first (§8)"
+        "and must have announced quiescence first (§2.8)"
     );
 
     // A second request on the re-activated entity: the fold carries the first
@@ -236,7 +236,7 @@ fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
 
 #[test]
 fn a_failing_effect_is_a_value_and_the_run_still_finishes() {
-    // §4.3: a failing effect does not fail the entity. The consumer folds the
+    // §4.2: a failing effect does not fail the entity. The consumer folds the
     // failure as an answer, the key leaves the desired set, and the entity
     // reaches quiescence exactly as it would on success.
     let sim = Simulation::new(23);
@@ -272,7 +272,7 @@ fn a_failing_effect_is_a_value_and_the_run_still_finishes() {
     assert!(
         matches!(&done[&2], Answer::Failed(why) if why.contains("panicked")),
         "a panic inside `perform` is caught at the task boundary and settled \
-         as Failed (§4.3), never left as a lost claim: {:?}",
+         as Failed (§4.2), never left as a lost claim: {:?}",
         done[&2]
     );
 }
@@ -331,7 +331,7 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     // §6's at-rest clause. §3.4 imposes no attempt bound, so without it one
     // permanently unproductive effect would veto eviction forever and pin an
     // activation whose only remaining work is a timer: strictly worse than what
-    // the agent runtime does (agent §9.2 item 3).
+    // the agent runtime does (agent §7.2 item 3).
     let sim = Simulation::new(31);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);

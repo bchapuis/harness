@@ -1,5 +1,5 @@
-//! Invariants of the **production** transport under real concurrency (spec §6,
-//! §7, §9, §12). The deterministic simulator proves these about the protocol;
+//! Invariants of the **production** transport under real concurrency (spec §3.3,
+//! §2.13, §6, §2.5). The deterministic simulator proves these about the protocol;
 //! these tests run the same properties over the real `TcpTransport` + tokio seam
 //! on loopback sockets, where races, hangs, and leaks the simulator can't see
 //! would surface. They use a multi-thread runtime and generous timeouts; they are
@@ -49,7 +49,7 @@ use tokio::net::TcpStream;
 use support::Greet;
 use support::Greeter;
 
-// --- §7.2 / no silent loss: every ask terminates under concurrency -----------
+// --- §4 / no silent loss: every ask terminates under concurrency -----------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_asks_all_terminate() {
@@ -78,7 +78,7 @@ async fn concurrent_asks_all_terminate() {
     }
 }
 
-// --- §6 / per-pair FIFO: ordered tells arrive in order over the wire ----------
+// --- §3.3 / per-pair FIFO: ordered tells arrive in order over the wire ----------
 
 #[derive(Serialize, Deserialize)]
 struct Seq(u64);
@@ -124,7 +124,7 @@ async fn tells_preserve_per_pair_order() {
     assert_eq!(*log.lock().unwrap(), (0..100).collect::<Vec<_>>());
 }
 
-// --- §12 / watch-exactly-once across the wire on a graceful stop --------------
+// --- §2.5 / watch-exactly-once across the wire on a graceful stop --------------
 
 #[derive(Serialize, Deserialize)]
 struct StopNow;
@@ -186,14 +186,14 @@ async fn remote_watch_fires_exactly_once_on_graceful_stop() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-// --- §7 / §10: the detector keeps running over a dead peer (connect no-hang) --
+// --- §2.13 / §7: the detector keeps running over a dead peer (connect no-hang) --
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn swim_marks_an_unreachable_peer_without_stalling() {
     // A single live node that knows one peer at a refused address. SWIM must
     // probe it, fail, and mark it unreachable, proving the failure detector
-    // runs over the real transport and a dead dial never wedges it (spec §7,
-    // §10). Conservative downing keeps it unreachable, not down (#16).
+    // runs over the real transport and a dead dial never wedges it (spec §2.13,
+    // §7). Conservative downing keeps it unreachable, not down (#16).
     let (la, addr_a) = support::bind_local().await;
     // A port nothing listens on: bind then drop, so dials are refused.
     let (dead, dead_addr) = support::bind_local().await;
@@ -227,7 +227,7 @@ async fn swim_marks_an_unreachable_peer_without_stalling() {
     );
 }
 
-// --- §9.3 graceful shutdown: a stopped node frees its port and is seen down ---
+// --- §6.3 graceful shutdown: a stopped node frees its port and is seen down ---
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stopped_node_releases_its_port_and_is_seen_unreachable() {
@@ -278,7 +278,7 @@ async fn a_stopped_node_releases_its_port_and_is_seen_unreachable() {
     );
 }
 
-// --- §7/§15 regression: a silent peer is dropped at the handshake timeout -----
+// --- §2.13/§9 regression: a silent peer is dropped at the handshake timeout -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_silent_peer_is_dropped_at_the_handshake_timeout() {
@@ -303,7 +303,7 @@ async fn a_silent_peer_is_dropped_at_the_handshake_timeout() {
     );
 }
 
-// --- §7 #3: a malformed frame tears down the association, not the node -------
+// --- §2.13 #3: a malformed frame tears down the association, not the node -------
 
 /// Write one length-delimited record the way `wire.rs` frames every message: a
 /// `u32` big-endian length, then the bytes. Spelled out here because the test's
@@ -325,7 +325,7 @@ async fn read_record(sock: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Dial `addr` as node `node` and complete the §7.1 handshake by hand: the JSON
+/// Dial `addr` as node `node` and complete the §2.14 handshake by hand: the JSON
 /// `Hello` preamble (announcing the wire version, identity, codec, and cluster
 /// secret), then the node's own `Hello` back. What returns is an established
 /// association, over which the caller can write whatever it likes.
@@ -362,8 +362,8 @@ async fn assert_torn_down(sock: &mut TcpStream, what: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_malformed_frame_tears_down_its_association_not_the_node() {
-    // The §7 requirement over real wire bytes, which the simulator cannot carry:
-    // its frames are structured, so only the payload is ever encoded (§18.2).
+    // The §2.13 requirement over real wire bytes, which the simulator cannot carry:
+    // its frames are structured, so only the payload is ever encoded (§2.12.2).
     // Two peers handshake for real and then write what no writer of this
     // protocol would: a payload that does not decode, and a length past the
     // 16 MiB cap. Each association must die alone, with the node serving its

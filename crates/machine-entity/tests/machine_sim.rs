@@ -1,9 +1,9 @@
 //! Machine lifecycle under deterministic simulation, `Local` tier (machine
-//! §4, §6): provision from a base image, attach boots the fake VM, the
+//! §4, §5): provision from a base image, attach boots the fake VM, the
 //! checkpoint alarm captures mid-session (M3's cadence), detach schedules the
 //! final capture (M2's graceful boundary), hibernation finds a clean disk, and
 //! reactivation reproduces the image byte-identically. Front-door death folds
-//! `Detached { FrontDoorLost }` (machine §5.1). Crash/partition behavior (M3
+//! `Detached { FrontDoorLost }` (machine §2.5). Crash/partition behavior (M3
 //! rewind, M5 self-fence) is `tests/machine_swarm.rs`'s job.
 
 use std::sync::Arc;
@@ -41,7 +41,7 @@ use serde::Serialize;
 
 type SimMachine = Machine<SimSystem>;
 
-/// A stand-in for the front-door member holding an attachment (machine §5.1):
+/// A stand-in for the front-door member holding an attachment (machine §2.5):
 /// the machine death-watches this actor's id.
 #[derive(Default)]
 struct DoorStub;
@@ -421,7 +421,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
 /// own 32-byte ed25519 seed from the system's entropy stream (so no two
 /// machines share an SSH identity), and the seed is folded state, so
 /// rehydration returns the same identity and the client's `known_hosts` pin
-/// survives hibernation (machine §5.1). Read through [`DoorPolicy`], the
+/// survives hibernation (machine §2.5). Read through [`DoorPolicy`], the
 /// command the front door itself presents the key from.
 #[test]
 fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
@@ -528,7 +528,7 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
         );
 
         // The front-door member dies without detaching: the death watch folds
-        // `Detached { FrontDoorLost }` (machine §5.1) and the final capture
+        // `Detached { FrontDoorLost }` (machine §2.5) and the final capture
         // releases the pin.
         door.tell(Die).await.expect("die");
         sys.sleep(Duration::from_millis(50)).await;

@@ -14,6 +14,13 @@
 //! bearer token as the tenant, so the default `--token anonymous` simply acts as
 //! tenant "anonymous". Against an authenticated gateway, pass the opaque API
 //! token instead.
+//!
+//! It implements no seam and consumes one: the edge's HTTP/SSE surface,
+//! specified by `docs/edge-spec.md`, and the agent runtime's `Record` vocabulary
+//! the streamed batches carry. `client` speaks that surface over the shared
+//! `agent-http` substrate (one connection per request, the SSE body read
+//! incrementally); `app` folds the streamed records into the chat state, and
+//! `ui` renders it.
 
 mod app;
 mod client;
@@ -90,7 +97,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let client = GatewayClient::new(&url, token)?;
 
     // A per-process nonce for turn ids (see `App::turn_id`). The pid changes across
-    // restarts and needs no wall clock, which actor §18.1 forbids reading here.
+    // restarts and needs no wall clock, which actor §2.12.2 forbids reading here.
     let nonce = u64::from(std::process::id());
 
     let (tx, mut rx) = mpsc::unbounded_channel();

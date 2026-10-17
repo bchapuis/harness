@@ -1,4 +1,4 @@
-//! Alarm wiring costs an entity no commit progress under frame loss (§7.16).
+//! Alarm wiring costs an entity no commit progress under frame loss (facets §4.5).
 //!
 //! **What this settled.** A commit on this branch, `932ebca`, recorded that an
 //! alarm-wired entity does not commit *at all* under plain frame loss (no
@@ -98,7 +98,7 @@ fn lossy(one_in: u64) -> FaultPolicy {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Wiring {
     /// A node with the alarm index: the host registers deadlines in it and the
-    /// per-type driver sweeps the shards this node leads (§7.16).
+    /// per-type driver sweeps the shards this node leads (facets §4.5).
     Alarms,
     /// A node without one: the same entity, no index registration, no driver.
     Plain,

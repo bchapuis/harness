@@ -1,27 +1,27 @@
-//! Cluster singleton (utilities spec §4).
+//! Cluster singleton (utilities spec §2.3).
 //!
 //! One logical instance of an actor cluster-wide. Every hosting node runs a
 //! **manager** per singleton name: a tick loop that observes only the local
 //! membership view and spawns the instance iff this node is the **anchor**;
 //! the rendezvous owner of the singleton's name over the serving set
-//! (utilities spec §2). The anchor is a pure function of the view, so converged
+//! (utilities spec §2.1). The anchor is a pure function of the view, so converged
 //! nodes agree on it in every control-plane mode; no coordination is added.
 //!
 //! The activated instance registers under the singleton's receptionist key, so
 //! discovery, draining filters, and pruning-on-termination all ride the
-//! existing receptionist machinery (core spec §13). When the view stops naming this node
+//! existing receptionist machinery (core spec §2.6). When the view stops naming this node
 //! anchor, the manager hands off by delivering the user-supplied **stop
 //! message** (there is deliberately no external kill: the actor winds down
 //! through its own handler, which SHOULD call `ctx.stop()` promptly).
 //!
-//! **Guarantee honesty (utilities spec §4 item 3):** at most one activation per
+//! **Guarantee honesty (utilities spec §2.3 item 3):** at most one activation per
 //! *converged* view. While views diverge (a partition, detector lag) two
 //! nodes MAY each believe they are anchor and both run an instance; once views
 //! converge the surplus manager stops its instance. The singleton is *not* a
 //! mutual-exclusion primitive; callers needing exclusivity must fence. Calls
 //! through a proxy during a handoff gap fail fast (`DeadLetter`, or
 //! `Unreachable`/`Timeout` on a stale entry) and are never buffered (core spec
-//! §14.2).
+//! §8.2).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -48,7 +48,7 @@ where
     S: Spawner,
     T: Transport,
 {
-    /// Host a cluster singleton on this node (utilities spec §4): run a manager
+    /// Host a cluster singleton on this node (utilities spec §2.3): run a manager
     /// for `name`, activating `factory`'s actor whenever this node's view names
     /// it anchor and handing off with `stop` when it no longer does. Every node
     /// that may host the singleton calls this with the same arguments; nodes
@@ -68,7 +68,7 @@ where
         self.singleton_proxy(name)
     }
 
-    /// A client-only handle to the singleton `name` (utilities spec §4): no
+    /// A client-only handle to the singleton `name` (utilities spec §2.3): no
     /// manager runs, this node never hosts.
     pub fn singleton_proxy<A>(&self, name: &'static str) -> SingletonProxy<A>
     where
@@ -91,10 +91,10 @@ enum State<A: Actor> {
     Stopping(ActorRef<A>),
 }
 
-/// One singleton manager (utilities spec §4): a tick loop on the SWIM probe
+/// One singleton manager (utilities spec §2.3): a tick loop on the SWIM probe
 /// cadence, evaluating the anchor against the local view only. Launched
 /// per `singleton()` call, so systems that host no singleton run no loop
-/// (core spec §18.1).
+/// (core spec §2.12.2).
 async fn manager<C, E, S, T, A, M, F>(
     system: ClusterSystem<C, E, S, T>,
     name: &'static str,
@@ -159,7 +159,7 @@ async fn manager<C, E, S, T, A, M, F>(
     }
 }
 
-/// A typed handle to a cluster singleton (utilities spec §4): a view over the
+/// A typed handle to a cluster singleton (utilities spec §2.3): a view over the
 /// singleton's receptionist listing that re-resolves on every call, following
 /// the instance across handoffs.
 pub struct SingletonProxy<A: Actor> {

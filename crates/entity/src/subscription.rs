@@ -1,21 +1,21 @@
-//! Record subscriptions: the journal follower (spec §7.9).
+//! Record subscriptions: the journal follower (spec §6.3).
 //!
 //! A subscription is a live, best-effort push of an entity's committed records to
-//! a sink, layered over the durable `load` (§7.3): off the write path, bounded,
+//! a sink, layered over the durable `load` (storage §2.1): off the write path, bounded,
 //! and never authoritative. The host delivers each committed batch at the same
-//! point it emits `Committed` (§13), after the fold and the output gate (§6
+//! point it emits `Committed` (§10), after the fold and the output gate (§5
 //! step 4), so delivery cannot affect a write's outcome (**E5**).
 //!
-//! The contract is **reconcile by `Seq`** (§7.9, **E16**): a batch carries the
+//! The contract is **reconcile by `Seq`** (§6.3, **E16**): a batch carries the
 //! `from` it begins after; a subscriber closes any gap with `load` and ignores
-//! anything at or below what it has seen. At-most-once delivery (actor §7.2) may
+//! anything at or below what it has seen. At-most-once delivery (actor §4) may
 //! drop, duplicate, or (across a re-subscribe) reorder; seq reconciliation
 //! absorbs all three, so correctness rests on the journal, not on delivery.
 //! [`Follower`] is that reconciliation, so a caller that wants the committed
 //! sequence pulls it from [`EntityRef::follow`] instead of writing its own.
 //!
 //! The wire batch ([`RecordBatch`]) carries opaque **tagged** record bytes:
-//! exactly what the host appended (§7.12), so the always-on subscribe path
+//! exactly what the host appended (facets §3), so the always-on subscribe path
 //! imposes no `Clone` bound on an entity's `Event`. The sink ([`RecordSink`]) is
 //! the entity's **event projection**: it decodes facet-0 records to the typed
 //! `Event` and skips other facets' records, whose seqs appear as gaps the
@@ -43,7 +43,7 @@ use crate::error::EntityError;
 use crate::journal::Seq;
 
 /// Delivery buffer depth, on both legs (host→forwarder and sink→subscriber).
-/// On overflow the producing side drops rather than blocks (§7.9): a slow
+/// On overflow the producing side drops rather than blocks (§6.3): a slow
 /// subscriber loses its place and backfills by `load`, never stalling a write.
 pub(crate) const SUB_BUFFER: usize = 128;
 
@@ -53,12 +53,12 @@ const FOLLOW_PAGE: usize = 256;
 /// How long a caught-up follower waits for a live record before re-checking the
 /// journal. A silent leader move or crash leaves the old sink alive but idle
 /// (the stream never closes and the new leader has no sink), so a periodic
-/// backfill is the liveness net that detects the move and re-subscribes (§7.9).
+/// backfill is the liveness net that detects the move and re-subscribes (§6.3).
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
-/// One pushed batch on the wire (spec §7.9): the seqs just committed, as opaque
+/// One pushed batch on the wire (spec §6.3): the seqs just committed, as opaque
 /// tagged record bytes, beginning after `from`. The bytes are the records as
-/// the journal stores them (§7.12); [`RecordSink`] decodes the event-tagged
+/// the journal stores them (facets §3); [`RecordSink`] decodes the event-tagged
 /// ones and skips the rest.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RecordBatch {
@@ -75,15 +75,15 @@ impl Message for RecordBatch {
 
 /// The reply to [`Subscribe`]: the entity's committed head at registration time,
 /// so the subscriber knows how far to backfill (`from`..`head`) before live
-/// batches take over (§7.9).
+/// batches take over (§6.3).
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Subscribed {
     pub(crate) head: Seq,
 }
 
-/// Register a record sink with an entity (spec §7.9). A framework built-in
+/// Register a record sink with an entity (spec §6.3). A framework built-in
 /// dispatched to the host for *any* entity type (it never appears in the entity's
-/// `register` allowlist, §5.5): the push analogue of `head`/`load`.
+/// `register` allowlist, §4.5): the push analogue of `head`/`load`.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub(crate) struct Subscribe<G: Entity> {
@@ -100,7 +100,7 @@ impl<G: Entity> Message for Subscribe<G> {
     const MANIFEST: Manifest = Manifest::new("entity.Subscribe");
 }
 
-/// Stop a [`RecordSink`] (spec §7.9), closing the subscriber's stream. Two
+/// Stop a [`RecordSink`] (spec §6.3), closing the subscriber's stream. Two
 /// senders: the `subscribe` error path, for a sink spawned but never registered
 /// (so the actor does not linger until system shutdown), and the host's
 /// forwarder, once the host has dropped the sink (a lag-drop, hibernation, a
@@ -116,7 +116,7 @@ impl Message for CloseSink {
 }
 
 /// A decoded batch handed to the subscriber over the subscription channel: the
-/// typed events and the `from` they begin after (§7.9).
+/// typed events and the `from` they begin after (§6.3).
 pub struct RecordStream<E> {
     /// The exclusive lower bound: a `from` above the subscriber's last seq is a
     /// gap it closes by reading the journal.
@@ -127,7 +127,7 @@ pub struct RecordStream<E> {
 
 /// What [`EntityRef::subscribe`] returns: the head at registration, and the
 /// live record stream. The subscriber backfills `from`..`head` by `load`
-/// (§7.3), then reconciles live batches by `Seq` (§7.9, **E16**); when the
+/// (storage §2.1), then reconciles live batches by `Seq` (§6.3, **E16**); when the
 /// stream closes (a move, a lag-drop, hibernation) it re-subscribes and
 /// backfills from its last seq.
 pub struct Subscription<G: Entity> {
@@ -135,7 +135,7 @@ pub struct Subscription<G: Entity> {
     pub records: async_channel::Receiver<RecordStream<G::Event>>,
 }
 
-/// The sink actor a subscriber spawns and hands to the host (spec §7.9). It
+/// The sink actor a subscriber spawns and hands to the host (spec §6.3). It
 /// receives wire [`RecordBatch`]es (possibly from another node), decodes them to
 /// the entity's typed `Event`, and forwards them on a bounded channel to the
 /// subscriber. A concrete actor type, since `ActorRef` is typed (no erased
@@ -154,9 +154,9 @@ impl<G: Entity> Actor for RecordSink<G> {
     type System = G::System;
 
     /// Accept pushed batches, and the close, over the network: the host that
-    /// leads the entity's shard may be another node (§5.2), so these are the
+    /// leads the entity's shard may be another node (§4.2), so these are the
     /// deserialization allowlist entries for `RecordBatch` and `CloseSink`
-    /// (actor §5, §15).
+    /// (actor §2.11, §9).
     fn register(registry: &mut HandlerRegistry<Self>) {
         registry.accept::<RecordBatch>();
         registry.accept::<CloseSink>();
@@ -168,7 +168,7 @@ impl<G: Entity> Handler<RecordBatch> for RecordSink<G> {
         let codec = ctx.system().codec();
         let mut records = Vec::with_capacity(msg.records.len());
         for (seq, bytes) in &msg.records {
-            // Every record wears its facet tag (spec §7.12); the event
+            // Every record wears its facet tag (spec facets §3); the event
             // projection keeps facet 0 and skips the rest (see module docs).
             let Ok((tag, payload)) = crate::facet::split_record(bytes) else {
                 return;
@@ -179,13 +179,13 @@ impl<G: Entity> Handler<RecordBatch> for RecordSink<G> {
             match actor_serialization::decode::<G::Event>(&*codec, payload) {
                 Ok(event) => records.push((*seq, event)),
                 // A record that will not decode: drop the whole batch. The
-                // subscriber sees a gap and backfills by `load` (§7.9): the
+                // subscriber sees a gap and backfills by `load` (§6.3): the
                 // journal is the authority (**E3**), not this delivery.
                 Err(_) => return,
             }
         }
         // try_send, not send: a slow subscriber loses batches on overflow rather
-        // than back-pressuring the host's forwarder (§7.9). A `Full` overflow
+        // than back-pressuring the host's forwarder (§6.3). A `Full` overflow
         // keeps the sink alive; the subscriber reconciles by seq. A `Closed`
         // channel will never be read again, so the sink stops rather than
         // lingering until system shutdown (the framework does not reap actors on
@@ -207,11 +207,11 @@ impl<G: Entity> Handler<CloseSink> for RecordSink<G> {
 
 /// What one [`Follower::next`] yields: the next events, or the one thing that
 /// breaks the exact-sequence contract, snapshot compaction truncating the
-/// journal past the follower's cursor (§9).
+/// journal past the follower's cursor (storage §8).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Followed<E> {
     /// The next in-order events after the cursor, at least one, at their
-    /// journal slots (facet records occupy the ones skipped, §7.12).
+    /// journal slots (facet records occupy the ones skipped, facets §3).
     Batch(Vec<(Seq, E)>),
     /// The journal compacted past the cursor: the records in `(cursor, base]`
     /// are subsumed by the entity's snapshot and can no longer be read, by
@@ -221,7 +221,7 @@ pub enum Followed<E> {
     Truncated { base: Seq },
 }
 
-/// A live follower over an entity's committed events (§7.9), from
+/// A live follower over an entity's committed events (§6.3), from
 /// [`EntityRef::follow`]. It rides a record subscription and reconciles by
 /// `Seq`: it backfills from the journal on first attach, on any gap, and after
 /// the stream closes (a leader move, a lag-drop, or hibernation), so
@@ -308,7 +308,7 @@ impl<G: Entity> Follower<G> {
     }
 
     /// One page of events after the cursor, read from the journal (the
-    /// non-activating gateway read, §7.5), advancing the cursor. `None` when
+    /// non-activating gateway read, §6), advancing the cursor. `None` when
     /// already at the head. A compaction base above the cursor is the
     /// truncation signal: the cursor jumps to the base and the fetched events
     /// are dropped; the next call re-reads from the base, so the one-page

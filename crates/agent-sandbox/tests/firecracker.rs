@@ -1,7 +1,7 @@
 //! Native-tier conformance at the microVM grade (feature `firecracker`):
 //! S1 (the guest reaches the host filesystem through the synced workspace
 //! only, and no network device exists at all), S5 (the VM dies on release,
-//! idempotently), and the loss conduct of sandbox spec §4; the firecracker
+//! idempotently), and the loss conduct of sandbox spec §5; the firecracker
 //! face of the docker suite in `native.rs`.
 //!
 //! Tests that boot a VM need Linux, `/dev/kvm`, and the assets
@@ -293,7 +293,7 @@ async fn provisioning_is_lazy_and_counted() {
     let provider = provider(config);
     let sandbox = open(&provider, "lazy", &image, &ws).await;
 
-    // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
+    // A Workspace call provisions nothing (sandbox spec §3.3 item 2).
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await
         .expect("write");
@@ -331,7 +331,7 @@ async fn release_kills_the_vm_and_is_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// Loss conduct (sandbox spec §4)
+// Loss conduct (sandbox spec §5)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -355,7 +355,7 @@ async fn an_externally_killed_vm_is_single_tier_loss() {
     assert!(killed.success());
 
     // Single-tier loss: an ordinary ToolError, never EnvironmentLost, never
-    // a silent re-grant on this call (sandbox spec §4).
+    // a silent re-grant on this call (sandbox spec §5).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::Sandbox(_))),
@@ -380,7 +380,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
     shell(&sandbox, "true").await.expect("first");
     std::fs::remove_dir_all(&ws).expect("external loss");
 
-    // Only EnvironmentLost engages the agent runtime's reset protocol (agent §5.5).
+    // Only EnvironmentLost engages the agent runtime's reset protocol (agent §4.4).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::EnvironmentLost(_))),
@@ -408,7 +408,7 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
     )
     .await;
 
-    // Provisioning fails as a per-call outcome (agent spec §5.4), and
+    // Provisioning fails as a per-call outcome (agent spec §4.2), and
     // lazily: the Workspace tier still works without firecracker anywhere.
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await
@@ -434,7 +434,7 @@ async fn a_named_egress_allowlist_fails_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let provider = provider(FirecrackerConfig::new("/usr/bin/firecracker", "/k"));
 
-    // §2.2: holding Native implies Network's grants; a VM with no network
+    // §3.2: holding Native implies Network's grants; a VM with no network
     // device delivers an empty allowlist only, so a profile naming egress
     // must fail loudly (the same conduct as the docker fallback).
     let egress = SandboxProfile {

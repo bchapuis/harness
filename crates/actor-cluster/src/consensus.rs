@@ -1,4 +1,4 @@
-//! The application consensus seam (spec §9.4.3).
+//! The application consensus seam (spec §2.19).
 //!
 //! [`RaftConsensus`] is the narrow capability a layer built *on* the cluster
 //! needs from a Raft-hosting [`ClusterSystem`](crate::ClusterSystem):
@@ -20,10 +20,10 @@ use async_channel::Receiver;
 use crate::raft::Committed;
 use crate::raft::GroupId;
 
-/// The multi-group consensus capability (spec §9.4.3): create, reconfigure,
-/// and retire Raft groups, propose commands, and observe commits. Implemented
-/// by [`ClusterSystem`](crate::ClusterSystem) in leader-based mode; outside it,
-/// the methods are inert (no group, no leader).
+/// The multi-group consensus capability (spec §2.19): create,
+/// reconfigure, and retire Raft groups, propose commands, and observe commits.
+/// Implemented by [`ClusterSystem`](crate::ClusterSystem) in leader-based mode;
+/// outside it, the methods are inert (no group, no leader).
 ///
 /// [`sleep`](RaftConsensus::sleep) and [`launch`](RaftConsensus::launch)
 /// re-expose the system's clock and executor, so a consumer's driving loops can
@@ -33,7 +33,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// This node's identity (the `NotLeader` fallback when no leader is known).
     fn node(&self) -> NodeId;
 
-    /// The cluster's consensus-agreed control-plane voter set (spec §9.4.3): the
+    /// The cluster's consensus-agreed control-plane voter set (spec §6.4.3): the
     /// control group's *current* committed voters, which grows/shrinks as nodes are
     /// added/removed. A layer above uses it as the target membership for a metadata
     /// group (reconciled via [`reconfigure_group`](RaftConsensus::reconfigure_group)).
@@ -41,14 +41,14 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn cluster_voters(&self) -> Vec<NodeId>;
 
     /// The cluster's **statically configured** voter set (the founding
-    /// `RaftConfig.voters`, spec §9.4.3): identical on every node and unchanging,
+    /// `RaftConfig.voters`, spec §6.4.3): identical on every node and unchanging,
     /// regardless of when the node joined. It, not the live `cluster_voters`, is
     /// the **creation seed** for a metadata group: a late joiner seeding from the
     /// live set would form a divergent group and disrupt elections. Empty outside
     /// leader-based mode.
     fn configured_voters(&self) -> Vec<NodeId>;
 
-    /// Drive `group`'s voter set toward `voters` (spec §9.4.3 item 2): if this node
+    /// Drive `group`'s voter set toward `voters` (spec §6.4.3 item 2): if this node
     /// leads `group`, propose the `AddVoter`/`RemoveVoter` deltas between the
     /// group's current voters and `voters`. A no-op on a non-leader. The engine
     /// replicates the full committed log to a newly added voter, which then
@@ -56,7 +56,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn reconfigure_group(&self, group: GroupId, voters: Vec<NodeId>);
 
     /// Create an application Raft group with `voters` and non-voting `learners`
-    /// (spec §9.4.3, entity §7.1). Voters elect, lead, and form the commit quorum;
+    /// (spec §6.4.3, storage §3.1). Voters elect, lead, and form the commit quorum;
     /// learners only replicate the log (so they can route and serve reads) and are
     /// absent from the quorum, bounding `voters` to `R` keeps write quorum at
     /// `⌈R/2⌉` regardless of cluster size. The membership control group is created
@@ -65,7 +65,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// after this, before the engine next ticks.
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
-    /// Retire an application Raft group (entity §7.7, E7): stop running it so it no
+    /// Retire an application Raft group (storage §7, E7): stop running it so it no
     /// longer elects, heartbeats, or commits. A group that holds no data (one
     /// used for leader election / placement only) needs no in-group consensus
     /// to retire: each node drops it as it applies the committed merge.
@@ -81,7 +81,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// by replacing its state.
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed>;
 
-    /// Offer an application command to `group`'s leader (spec §9.4.3 item 1):
+    /// Offer an application command to `group`'s leader (spec §6.4.3 item 1):
     /// append locally when leading, else forward to the known leader, else fan
     /// out to the group's voters.
     fn propose_to(&self, group: GroupId, command: Vec<u8>) -> impl Future<Output = ()> + Send;
@@ -109,7 +109,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn group_is_leader(&self, group: GroupId) -> bool;
 
     /// `group`'s current Raft term, or `None` if this node has no engine / is not
-    /// in the group. A layer above (e.g. a per-shard leader-election group, entity §8)
+    /// in the group. A layer above (e.g. a per-shard leader-election group, storage §5)
     /// stamps it on every per-entity append as the single-writer fencing token: one
     /// leader per term, refused by any replica that has acknowledged a higher term.
     fn group_term(&self, group: GroupId) -> Option<u64>;

@@ -1,7 +1,7 @@
-//! The wire codec (spec §5).
+//! The wire codec (spec §2.11).
 //!
 //! [`Codec`] is the pluggable, object-safe serializer fixed per system. Both ends
-//! of an association MUST agree on it (spec §5 rule 2). Object safety matters:
+//! of an association MUST agree on it (spec §2.11 rule 2). Object safety matters:
 //! the system holds a single `Arc<dyn Codec>` and the dispatch registry stores
 //! plain `fn` pointers that decode a concrete message given `&dyn Codec`, so the
 //! codec type never leaks into `HandlerRegistry<A>`, `ActorRef`, or `Ctx`.
@@ -13,7 +13,7 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// A (de)serialization failure (spec §14, surfaced as `CallError::Serialization`).
+/// A (de)serialization failure (spec §8, surfaced as `CallError::Serialization`).
 #[derive(Clone, Debug)]
 pub struct CodecError(pub String);
 
@@ -25,14 +25,14 @@ impl std::fmt::Display for CodecError {
 
 impl std::error::Error for CodecError {}
 
-/// An object-safe, pluggable wire codec (spec §5).
+/// An object-safe, pluggable wire codec (spec §2.11).
 ///
 /// Implementors serialize a type-erased value and expose a type-erased
 /// deserializer over a byte slice; the generic [`encode`]/[`decode`] helpers
 /// build the typed bridge on top.
 pub trait Codec: Send + Sync + 'static {
     /// A short identifier for this codec, exchanged in the handshake so both
-    /// ends can confirm they agree (spec §5, §7.1).
+    /// ends can confirm they agree (spec §2.11, §2.14).
     fn name(&self) -> &'static str;
 
     /// Serialize a type-erased value to bytes.
@@ -64,7 +64,7 @@ pub fn decode<T: DeserializeOwned>(codec: &dyn Codec, bytes: &[u8]) -> Result<T,
 
 /// A JSON codec (human-readable, convenient for tests and debugging). The wire
 /// format is real serde, so every cross-node hop exercises true encoding
-/// (spec §18.2).
+/// (spec §2.12.2).
 ///
 /// It is the wrong default for a deployment that moves **bulk bytes**. JSON has
 /// no byte-string form, so a `Vec<u8>` is written as an array of decimal
@@ -103,8 +103,8 @@ impl Codec for JsonCodec {
 }
 
 /// A `postcard` codec: compact, binary, and the right choice for a deployment
-/// whose messages carry bulk bytes (spec §5 rule 2 lists it among the formats a
-/// system may fix). A `Vec<u8>` costs its own length plus a varint, so a value
+/// whose messages carry bulk bytes (a system fixes one codec, spec §2.11 rule 2).
+/// A `Vec<u8>` costs its own length plus a varint, so a value
 /// crosses the wire once at size rather than growing with every encoding layer.
 ///
 /// Not self-describing: `postcard` writes no field names or type tags, so it
@@ -113,7 +113,7 @@ impl Codec for JsonCodec {
 /// `#[serde(untagged)]`, `#[serde(flatten)]`) cannot travel over it, and a
 /// system carrying one wants [`JsonCodec`]. Both ends of an association must
 /// agree either way; the handshake compares [`Codec::name`] and refuses a
-/// mismatch (spec §7.1).
+/// mismatch (spec §2.14).
 #[derive(Clone, Copy, Default)]
 pub struct PostcardCodec;
 

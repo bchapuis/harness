@@ -1,6 +1,6 @@
-//! Conformance: observability event stream (spec §16): supervision decisions and
+//! Conformance: observability event stream (spec §2.7): supervision decisions and
 //! `Terminated` deliveries are emitted as structured events, and
-//! `Actor::register` runs at most once per actor type (spec §4.4).
+//! `Actor::register` runs at most once per actor type (spec §2.10).
 
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -42,7 +42,7 @@ impl Message for Stop {
     const MANIFEST: Manifest = Manifest::new("obs.Stop");
 }
 
-// --- §4.4: register runs at most once per actor type -------------------------
+// --- §2.10: register runs at most once per actor type -------------------------
 
 static REGISTER_CALLS: AtomicU32 = AtomicU32::new(0);
 
@@ -66,7 +66,7 @@ fn register_runs_at_most_once_per_type() {
     assert_eq!(REGISTER_CALLS.load(Ordering::SeqCst), 1);
 }
 
-// --- §11.2 / §16: supervision decisions are emitted --------------------------
+// --- §2.4 / §2.7: supervision decisions are emitted --------------------------
 
 struct Restartable;
 impl Actor for Restartable {
@@ -130,7 +130,7 @@ fn default_stop_emits_a_supervised_stop_decision() {
     );
 }
 
-// --- §12 / §16: Terminated deliveries are emitted ----------------------------
+// --- §2.5 / §2.7: Terminated deliveries are emitted ----------------------------
 
 struct Target;
 impl Actor for Target {

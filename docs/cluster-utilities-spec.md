@@ -1,115 +1,81 @@
 # Cluster Utilities: Specification
 
-**Status:** Draft v1
-**Scope:** Utilities layered on top of the core framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)): deterministic placement, group routers, and the cluster singleton.
-
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the core specification are cited as **core §N**; sections of this document as plain **§N**. Invariants defined here are numbered **U1, U2, …** to keep them apart from the core catalogue (core §18.5 #1–#22).
+Invariants defined here are numbered **U1, U2, …** to keep them apart from the core catalogue (actor §10).
 
 ---
 
-## 1. Scope and layering
+## 1. Scope
 
-Every utility builds on the core abstractions and modifies none of them:
+The cluster utilities are data-plane helpers layered on the [actor framework](distributed-actor-spec.md): deterministic placement (§2.1), group routers (§2.2), and the cluster singleton (§2.3), in `actor-cluster` beside `ClusterSystem`. They build on the membership view (actor §6), the receptionist (actor §2.6), and the event stream (actor §2.7), and change no core semantics. Entity ranks each shard's replicas with the placement function (storage §6).
 
-- the **membership view** and its merge rule (core §9) supply the node sets every utility derives from;
-- the **receptionist** (core §13) supplies replicated, eventually consistent service listings;
-- the **event stream** (core §16) carries the utilities' events, which extend its `Event` enum (§5).
+A utility's behavior MUST be a deterministic function of the membership view, the system's seeded `Entropy`, and its `Clock` (actor §2.12.2), never of wall-clock time or unseeded randomness.
 
-The core non-goals (core §1.2) hold. Every utility is **data-plane** machinery and **eventually consistent**: none takes a quorum or a lease, and none masks failure; a utility that cannot route fails the call immediately rather than buffering or retrying (core §14.2).
+### 1.1 Non-goals
 
-A utility's behavior MUST be a deterministic function of the virtualized runtime (core §18.1, §18.2): membership views, seeded entropy, and the virtual clock, never wall-clock time or unseeded randomness.
-
----
-
-## 2. Placement (rendezvous hashing)
-
-Placement answers, identically on every node: *given a key, which member owns it?* The singleton (§4) anchors on `owner`, a router's keyed selection ranks routees by the same weight (§3), and entity ranks each shard's replicas by it over the cluster's voters (entity §7.6).
-
-### 2.1 The serving set
-
-1. Placement candidates MUST be derived from the local membership view as the **serving set**: every `up` member not confirmed `unreachable`, **including the local node** iff it is `up`. Members that are `joining`, `draining`, `leaving`, `down`, `removed`, or confirmed `unreachable` are excluded. A merely **`suspect`** member MUST remain in the set: suspicion is refutable detector noise (core §10), and excluding it would move ownership on every dropped probe.
-
-This is stricter than the receptionist's listing filter (core §13 req 4, which only MUST exclude `draining`/`down`) because placement assigns *ownership*, and a key owned by a node nobody can reach is unserved.
-
-### 2.2 The placement function
-
-2. `owner(set, key)` and `top(set, key, n)` MUST be **pure functions** of the candidate set and the key, so that two nodes holding identical serving sets compute identical owners for every key (core §18.1).
-3. The weight of a member for a key is normatively `mix64(fnv1a64(tag ‖ key))`, where `tag` is the member's node uid as 8 little-endian bytes, `fnv1a64` is FNV-1a (64-bit, offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), and `mix64` is the splitmix64 finalizer. The hash MUST NOT vary across platforms, framework versions, or process runs, which rules out `std::hash`; the finalizer compensates for FNV-1a's weak avalanche on short inputs.
-4. `owner` is the member with the highest weight; a weight tie MUST resolve to the lowest `NodeId`. `top(n)` is the `n` distinct members in descending weight order, under the same tie rule; `top(1)` equals `owner`. An empty candidate set yields no owner.
-5. **Minimal movement.** Removing one member from the set MUST reassign only the keys that member owned; adding one MUST move only the keys it now owns. This follows from independent per-member weights, and is what suits the function to replica placement.
-
-### 2.3 Honesty
-
-6. Nodes with **divergent** views MAY place a key differently; view convergence (core §18.5 #14) restores agreement. Placement is a routing function, **not a lease**: it grants no exclusivity and no fencing. Consumers that need single-activation semantics get the singleton's guarantee (§4 rule 3), which carries the same convergence caveat.
+- **Quorums and leases.** Every utility is eventually consistent; none takes a quorum or a lease, or grants exclusivity.
+- **Masking failure.** A utility that cannot route fails the call at once, never buffering or retrying (actor §8.2).
+- **Sharding.** Entities addressed by `(entity type, entity id)` are entity's layer (storage §3.1), not a utility.
 
 ---
 
-## 3. Group routers
+## 2. Seams
 
-A group router spreads calls over the actors registered under one receptionist `Key` (core §13).
+### 2.1 Placement
 
-1. A router is a **node-local, typed view** over a receptionist `Key`. It MUST NOT replicate state of its own or introduce wire frames; the receptionist's replication is the only cluster state involved.
-2. Every routing decision MUST draw from the **current in-rotation listing** (core §13 req 4) at decision time, so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and a `resume` restores it without re-registration.
-3. Strategies and keyed routing. An unkeyed route uses the router's `RouteStrategy`, one of two **keyless** choices:
-   - **Round-robin** MUST cycle the listing in its deterministic order (the registry is an ordered set), so the cycle is reproducible under a fixed seed (core §18.1).
-   - **Random** MUST draw from the system's seeded entropy (core §4.6, §18.1), never an ambient RNG.
+`placement::owner`, `placement::top`, and `placement::weight` answer, identically on every node, which member owns a key; `ClusterSystem::place` applies `owner` to the local serving set. The singleton, keyed routing, and entity consume them. The weight is an interop constant every node, version, and platform MUST compute identically.
 
-   **Rendezvous-hashed** selection is not a third `RouteStrategy` but a per-call choice every router offers (the `route_by`/`ask_by`/`tell_by` family), bypassing the strategy for that call: routees are ranked against a **caller-supplied key** by the §2 weight function over the routee's actor tag (owner-node tag ‖ path ‖ incarnation), ties to the lower `ActorId`. The same key over the same listing MUST select the same routee on every node.
-4. A route over an **empty listing** MUST fail fast with `DeadLetter`; the router MUST NOT buffer, queue, or retry (core §1.2, §14.2).
-5. Routing adds **no delivery guarantee** or failure handling beyond the underlying `ask`/`tell` (core §7.2): a stale listing entry MAY still route to an actor that just terminated, and the call then fails as a direct call would.
+1. **Serving set.** Placement candidates MUST be the local view's serving set (`Membership::serving_members`): every `up` member not confirmed `unreachable`, the local node included iff it is `up`. A merely `suspect` member MUST remain, since suspicion is refutable (actor §7) and excluding it would move ownership on every dropped probe. The set is stricter than the receptionist's rotation filter (actor §2.6 req 4) because a key owned by a node nobody can reach is unserved.
+2. `owner(set, key)` and `top(set, key, n)` MUST be pure functions of the candidate set and the key, so nodes holding identical serving sets compute identical owners for every key.
+3. The weight of a member for a key is normatively `mix64(fnv1a64(tag ‖ key))`, where `tag` is the member's node uid as 8 little-endian bytes (`placement::node_tag`), `fnv1a64` is FNV-1a (64-bit, offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), and `mix64` is the splitmix64 finalizer. The hash MUST NOT vary across platforms, framework versions, or process runs, which rules out `std::hash`.
+4. `owner` is the member with the highest weight, a tie resolving to the lowest `NodeId`. `top(n)` is the `n` distinct members in descending weight order under the same tie rule; `top(1)` equals `owner`. An empty set has no owner.
+5. **Minimal movement.** Removing one member MUST reassign only the keys it owned; adding one MUST move only the keys it now owns.
+6. **Honesty.** Nodes with divergent views MAY place a key differently until views converge (actor §10 #14). Placement is a routing function, not a lease: it grants no exclusivity and no fencing.
+
+### 2.2 Group routers
+
+A `Router<A>` is a node-local, typed view over the actors registered under one receptionist `Key` (actor §2.6). `Router::route`, `ask`, and `tell` select by the router's `RouteStrategy`; `Router::route_by`, `ask_by`, and `tell_by` select by a caller-supplied key.
+
+1. A router MUST NOT replicate state of its own or introduce wire frames.
+2. Every routing decision MUST draw from the current in-rotation listing (actor §2.6 req 4), so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and `resume` restores it.
+3. **Strategies.** `RoundRobin` MUST cycle the listing in its deterministic order (actor §2.6), so the cycle is reproducible under a fixed seed; `Random` MUST draw from the system's seeded entropy. **Keyed** selection bypasses the strategy for one call: routees are ranked against the caller's key by the §2.1 weight over each routee's actor tag (owner-node tag ‖ path ‖ incarnation, `placement::actor_tag`), ties to the lower `ActorId`, so the same key over the same listing MUST select the same routee on every node.
+4. A route over an empty listing MUST fail fast with `DeadLetter`; the router MUST NOT buffer, queue, or retry.
+5. Routing adds no delivery guarantee beyond the underlying `ask` and `tell` (actor §4): a stale entry MAY route to an actor that just terminated, and the call fails as a direct call would.
+
+### 2.3 Cluster singleton
+
+`ClusterSystem::singleton(name, factory, stop)` runs a manager for one logical instance cluster-wide and returns a `SingletonProxy`; `ClusterSystem::singleton_proxy(name)` returns a proxy without hosting. They are inherent methods of `ClusterSystem`, not generic over `ActorSystem`, because the manager reads the serving set, which only a clustered system has.
+
+1. Every node that may host the singleton runs a manager per name. The manager observes only its local membership view, periodically on the system clock, and MUST activate the instance iff its view's **anchor**, `owner(serving set, name)` (§2.1), is the local node; on activation it MUST register the instance under the singleton's receptionist key. The anchor is a pure function of the view in every control-plane mode (actor §6.4), so it needs no join order or coordinator.
+2. When a node's view stops naming it anchor, its manager MUST hand off by delivering the configured stop message to the instance, whose handler SHOULD stop the actor promptly; there is no external kill. The manager MUST NOT activate a new local instance while a previous local activation is live (the per-node half of U2).
+3. **Guarantee honesty (normative).** The singleton guarantees at most one activation per converged view. During divergence (a partition, detector lag) two nodes MAY run an instance concurrently; once views converge (actor §10 #14) the surplus manager MUST stop its instance. The singleton is not a mutual-exclusion primitive: an application requiring exclusivity MUST fence or deduplicate by its own means.
+4. **Liveness.** If the instance terminates while its node remains anchor, the manager MUST re-activate it within bounded logical time.
+5. A `SingletonProxy` resolves the instance from the in-rotation listing on every call, following it across handoffs. A call during a handoff gap MUST fail fast (`DeadLetter` on an empty listing; `Unreachable` or `Timeout` on a stale entry), never buffer.
+6. The hosting node MUST emit `SingletonStarted` on each activation and `SingletonStopped` when it observes that activation terminated (§3).
 
 ---
 
-## 4. Cluster singleton
+## 3. Events
 
-One logical actor instance cluster-wide, for coordinators and schedulers. Placement (§2) decides where it runs; the receptionist (core §13) makes it discoverable.
-
-1. Every node that may host the singleton runs a **manager** per singleton name. The manager observes **only its local membership view**, on a periodic virtual-clock tick (core §18.1), and MUST activate (spawn) the instance iff its view's **anchor**, `owner(serving set, name)` per §2, is the local node. On activation it MUST register the instance under the singleton's receptionist key. The anchor is hash-based in all four control-plane modes (core §9.4): a pure function of the view needs no join order or coordinator the view does not carry.
-2. When a node's view stops naming it anchor, its manager MUST initiate **handoff** by delivering the configured **stop message** to the instance; the instance's handler SHOULD stop the actor promptly. The manager MUST NOT activate a new local instance while a previous local activation is still live: activations on one node are strictly sequential (the per-node half of U2). There is no external kill: the instance always winds down through its own handler.
-3. **Guarantee honesty (normative).** The singleton guarantees at most one activation per **converged** view. During divergence (a partition, detector lag) two nodes MAY run an instance concurrently; once views converge (core §18.5 #14) the surplus manager MUST stop its instance. The singleton is **not** a mutual-exclusion primitive: an application requiring exclusivity MUST fence or deduplicate by its own means. (A quorum-gated activation is future work, §7.)
-4. **Liveness.** If the instance terminates (supervision stop, its own decision) while its node remains anchor, the manager MUST re-activate it within bounded logical time.
-5. Calls through a proxy during a handoff gap MUST fail fast (`DeadLetter` on an empty listing; `Unreachable`/`Timeout` on a stale entry), never buffer (core §14.2).
-6. The hosting node MUST emit `SingletonStarted` on each activation and `SingletonStopped` when it observes that activation terminated (§5).
+Placement and routers define no events. The singleton's manager emits two, on the hosting node: `SingletonStarted { name, actor }` when it activates `actor` as its node's instance of `name`, and `SingletonStopped { name, actor }` when it observes that activation terminated (handoff, supervision, or the actor's own stop). Per node, the two strictly alternate for one name. They are named variants of the core `Event` enum, not `Event::App` payloads (actor §2.7), because the core checker reads them by variant to enforce U2.
 
 ---
 
-## 5. Events
+## 4. Invariants
 
-Utility events extend the core `Event` enum (core §16). Placement (§2) and routers (§3) define none: per-decision events would flood the stream without enabling any check their conformance tests do not already perform.
+The Rust copy of this table, with the suites that verify each row, is `actor-simulation`'s utilities catalogue.
 
-The singleton (§4) defines two, emitted by the hosting node's manager:
-
-| Event | Fields | Meaning |
+| # | Invariant | Defined in |
 |---|---|---|
-| `SingletonStarted` | `name`, `actor` | The manager activated `actor` as its node's instance of `name`. |
-| `SingletonStopped` | `name`, `actor` | The manager observed that activation terminated (handoff, supervision, or its own stop). |
+| U1 | **Deterministic placement.** Placement is a pure, version-stable function of the serving set and key: identical serving sets yield identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2.1 |
+| U2 | **Singleton activation discipline.** A node never runs two live activations of one name at once; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor that loses its instance re-activates it within bounded logical time. | §2.3 |
 
-Per node, `Started`/`Stopped` for one name strictly alternate (U2); a continuous checker enforces this on every simulated run.
-
----
-
-## 6. Conformance
-
-The catalogue mirrors the core catalogue's structure (core §17, §18.5), machine-readable as `utilities_catalogue()` in `actor-simulation` and guarded by the same drift test.
-
-| # | Invariant | Defined in | Verified by |
-|---|---|---|---|
-| U1 | **Deterministic placement.** Rendezvous placement is a pure, version-stable function of the serving set and key: nodes with identical serving sets compute identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2 | property + cluster tests (`conformance_placement.rs`); pinned known-answer hash vectors |
-| U2 | **Singleton activation discipline.** A node never runs two live activations of one singleton name concurrently; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor failure re-activates the singleton within bounded logical time. | §4 | continuous checker (`singleton-at-most-one-per-node`, the per-node half); scenario + swarm tests (`conformance_singleton.rs`, `conformance_swarm.rs`) for the converged-exactly-one and re-activation halves |
-
-Group routers (§3) define no numbered invariant: selecting only from the current in-rotation listing and failing fast when it is empty are local function properties, not emergent ones, pinned directly by `conformance_router.rs`.
-
-The utilities are also held to the core testing contract (core §18.1, §18.3):
-
-- **Seed-reproducibility.** The manager's tick loop, the `SingletonStarted`/`Stopped` event ordering, and the router's seeded random draws reproduce byte-identically from the seed, swept by a dedicated utilities workload in `conformance_determinism.rs`.
-- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`conformance_faults_swarm.rs`); their conformance tests alone use only controlled faults.
+Routers define no numbered invariant: drawing from the current listing and failing fast on an empty one are local properties of a function, not emergent ones.
 
 ---
 
-## 7. Future work
+## 5. Deferred
 
-- **Cluster sharding.** Not provided: this document defines no sharded entity actors (Akka's term) addressed by `(entity type, entity id)` and mapped onto nodes through §2's `owner`/`top`. The tree's sharding layer is the entity crate, which partitions each entity type's namespace into shards (entity §7.1), ranks a shard's replicas by §2's `top` keyed on the shard's group, and agrees the allocation through a per-type Raft group whose committed log is the shard map (entity §7.6), not through a singleton. A sharding utility here would be a second sharding layer beside entity's.
-- **Distributed pub/sub.** Topic-based fan-out over per-node topic mediators discovered through the receptionist; at-most-once, matching core §7.2.
-- **Leader-anchored singleton.** A singleton whose activation is a committed log entry in the leader-based mode, trading the §4 convergence caveat for a quorum-gated activation.
+- **Leader-anchored singleton.** No singleton commits its activation through the leader-based log, so the §2.3 item 3 convergence caveat holds in every mode.
+- **Distributed pub/sub.** No topic fan-out over receptionist-discovered mediators exists.

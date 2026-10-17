@@ -1,8 +1,8 @@
-//! Messages and their wire identity (spec §3.2, §4.4).
+//! Messages and their wire identity (spec §2.1, §2.10).
 
 use actor_serialization::SerializationRequirement;
 
-/// The stable wire identity of a message type, and its dispatch key (spec §4.4).
+/// The stable wire identity of a message type, and its dispatch key (spec §2.10).
 ///
 /// Author-controlled and stable across recompiles and renames. An explicit
 /// string such as `"myapp.Greet"` is RECOMMENDED; a breaking shape change should
@@ -12,7 +12,7 @@ use actor_serialization::SerializationRequirement;
 /// arriving off the wire stays `&str` until
 /// [`HandlerRegistry::dispatch`](crate::HandlerRegistry::dispatch) matches it
 /// against a declared one: the allowlist is the point where a claimed manifest
-/// becomes a recognized identity (spec §5, §15).
+/// becomes a recognized identity (spec §2.11, §9).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Manifest(&'static str);
 
@@ -43,7 +43,7 @@ impl std::fmt::Display for Manifest {
     }
 }
 
-/// A serializable value sent to an actor (spec §3.2).
+/// A serializable value sent to an actor (spec §2.1).
 ///
 /// Each message declares its [`Reply`](Message::Reply) type and its stable
 /// [`MANIFEST`](Message::MANIFEST). Both the message and its reply must satisfy
@@ -52,13 +52,13 @@ impl std::fmt::Display for Manifest {
 ///
 /// A handler that can fail uses `type Reply = Result<T, E>`: an application
 /// failure is a value distinct from a transport failure ([`CallError`], spec
-/// §3.2 rule 4).
+/// §2.1 rule 4).
 ///
 /// [`CallError`]: crate::CallError
 pub trait Message: SerializationRequirement {
     /// The reply this message elicits.
     type Reply: SerializationRequirement;
 
-    /// Stable, author-controlled wire identity and dispatch key (spec §4.4).
+    /// Stable, author-controlled wire identity and dispatch key (spec §2.10).
     const MANIFEST: Manifest;
 }

@@ -94,7 +94,7 @@ fn host_kinds() -> Kinds {
     Kinds::new()
         .register("assistant", build("assistant"))
         // `worker` snapshots aggressively, so the records test below crosses
-        // the compaction trigger (entity §9) in a handful of turns. The
+        // the compaction trigger (storage §8) in a handful of turns. The
         // config is host-side policy: the client-side registry needs no match.
         .register(
             "worker",
@@ -233,7 +233,7 @@ async fn prompt_runs_the_entity_and_isolates_tenants() {
     );
 }
 
-/// `GET /records` surfaces the journal's compaction base (§10.2): once a
+/// `GET /records` surfaces the journal's compaction base (§8.2): once a
 /// session's snapshot has subsumed its oldest records, the page reports
 /// `base > 0` beside the surviving records, so a client reading from 0 learns
 /// its history starts truncated instead of mistaking the short page for the
@@ -328,7 +328,7 @@ async fn a_malformed_body_is_a_structured_bad_request() {
 }
 
 /// A turn id reused with different content is the client's permanent mistake
-/// (agent spec §7.4): a structured `409`, never a retryable or upstream status.
+/// (agent spec §5.3): a structured `409`, never a retryable or upstream status.
 #[tokio::test]
 async fn a_reused_turn_id_with_new_content_is_a_conflict() {
     let gw = gateway().await;

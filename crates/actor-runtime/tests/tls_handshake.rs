@@ -1,4 +1,4 @@
-//! Integration: the mutual-TLS association handshake (spec §7.1, §15). A cluster
+//! Integration: the mutual-TLS association handshake (spec §2.14, §9). A cluster
 //! whose nodes share TLS trust, the cluster secret, and the allowlist talks over
 //! encrypted connections; mismatched trust, secret, or allowlist rejects the
 //! association, surfacing to callers as `Unreachable`, never a hang.

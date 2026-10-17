@@ -1,4 +1,4 @@
-//! Conformance: deterministic placement (utilities spec §2, invariant U1).
+//! Conformance: deterministic placement (utilities spec §2.1, invariant U1).
 //!
 //! The placement function is pure, so most of U1 is pinned by direct property
 //! tests: determinism, permutation invariance, minimal movement, distribution
@@ -125,7 +125,7 @@ fn top_ranks_distinct_members_and_agrees_with_owner() {
 #[test]
 fn converged_nodes_compute_identical_owners() {
     // The cluster half of U1: three converged views derive equal serving sets,
-    // so `place` agrees everywhere (utilities spec §2.2 item 2).
+    // so `place` agrees everywhere (utilities spec §2.1 item 2).
     let sim = Simulation::new(7);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);

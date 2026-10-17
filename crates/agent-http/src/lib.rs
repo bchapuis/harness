@@ -8,9 +8,10 @@
 //! (SSE).
 //!
 //! This is plumbing, not a seam: the model adapters' seam is
-//! `agent::http::HttpPost`, and one implementation of it (the standalone's)
-//! is built on this crate. Protocol decisions (retry taxonomies, SSE frame
-//! vocabulary, auth headers) belong to the callers.
+//! `agent::http::HttpPost` (specified in `docs/agent-spec.md`), and one
+//! implementation of it (the standalone's) is built on this crate. Protocol
+//! decisions (retry taxonomies, SSE frame vocabulary, auth headers) belong to
+//! the callers.
 
 use std::sync::Arc;
 

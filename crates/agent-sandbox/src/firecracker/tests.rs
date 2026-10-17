@@ -32,7 +32,7 @@ impl FakeGuest {
         let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
         let guest_dir = workspace.path().to_path_buf();
         // Test fixture only: the fake guest stands in for a whole VM, which
-        // the actor §18.1 no-OS-threads discipline was never meant to cover.
+        // the actor §2.12.2 no-OS-threads discipline was never meant to cover.
         #[allow(clippy::disallowed_methods)]
         std::thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {

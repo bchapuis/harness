@@ -1,4 +1,4 @@
-//! The deterministic single-thread executor (spec §18.1, §18.2).
+//! The deterministic single-thread executor (spec §2.12.2, §2.12.2).
 //!
 //! All three runtime capabilities share one [`Inner`] behind an `Arc<Mutex<_>>`:
 //! the [`SimSpawner`] enqueues tasks, the
@@ -40,7 +40,7 @@ struct Task {
     /// `None` only while the task is mid-poll (taken out to avoid re-entrancy).
     future: Mutex<Option<BoxFuture<'static, ()>>>,
     /// The **process incarnation** ("domain") this task belongs to, for
-    /// pause/resume and retirement (spec §18.3). `None` for test-driver tasks
+    /// pause/resume and retirement (docs/simulation-testing.md). `None` for test-driver tasks
     /// (`block_on`, a bare `sim.spawner()`), which are never frozen or retired.
     /// Set from the spawning system's tagged spawner, and inherited by child
     /// tasks via [`CURRENT_DOMAIN`].
@@ -93,14 +93,14 @@ impl PartialOrd for Timer {
 pub(crate) struct Inner {
     now: Instant,
     /// Ids of tasks ready to be polled. A `Vec`, not a queue, because selection
-    /// among ready tasks is seed-randomized (spec §18.3), not FIFO.
+    /// among ready tasks is seed-randomized (docs/simulation-testing.md), not FIFO.
     ready: Vec<u64>,
     /// Live tasks, keyed by id. `BTreeMap` keeps iteration deterministic.
     tasks: BTreeMap<u64, Arc<Task>>,
     timers: BinaryHeap<Timer>,
     next_task_id: u64,
     next_seq: u64,
-    /// Frozen domains (spec §18.3). A paused node's tasks stay ready but are not
+    /// Frozen domains (docs/simulation-testing.md). A paused node's tasks stay ready but are not
     /// polled, so it makes no progress and its inbound frames queue; its timers
     /// still fire (re-readying the task) but never run until it resumes. Empty in
     /// every run that uses no pause, so scheduling is then byte-identical.
@@ -124,7 +124,7 @@ impl Inner {
         }
     }
 
-    /// Freeze (`paused = true`) or thaw a node's tasks (spec §18.3).
+    /// Freeze (`paused = true`) or thaw a node's tasks (docs/simulation-testing.md).
     pub(crate) fn set_paused(&mut self, domain: u64, paused: bool) {
         if paused {
             self.paused.insert(domain);
@@ -141,7 +141,7 @@ impl Inner {
     }
 
     /// Forget every task belonging to `domain`, the scheduler half of a process
-    /// death (spec §18.3). The tasks leave the ready set and the task table, so
+    /// death (docs/simulation-testing.md). The tasks leave the ready set and the task table, so
     /// nothing in that incarnation is ever polled again.
     ///
     /// Returns the removed tasks rather than dropping them, because dropping a
@@ -215,7 +215,7 @@ impl Wake for TaskWaker {
     }
 }
 
-/// Task spawner backed by the simulation scheduler (spec §4.6).
+/// Task spawner backed by the simulation scheduler (spec §2.12.1).
 #[derive(Clone)]
 pub struct SimSpawner {
     shared: Shared,
@@ -227,7 +227,7 @@ pub struct SimSpawner {
 impl SimSpawner {
     /// A clone of this spawner tagged with a **fresh process incarnation**, whose
     /// id is returned alongside it so the caller can later freeze, thaw, or retire
-    /// that incarnation as a unit (spec §18.3). Clones keep the tag, so the whole
+    /// that incarnation as a unit (docs/simulation-testing.md). Clones keep the tag, so the whole
     /// subtree the incarnation spawns belongs to it.
     pub(crate) fn with_fresh_domain(&self) -> (SimSpawner, u64) {
         let domain = self
@@ -253,7 +253,7 @@ impl SimSpawner {
     }
 
     /// End a process incarnation: drop every task it owns, so none is ever polled
-    /// again (spec §18.3). The futures are dropped after the scheduler lock is
+    /// again (docs/simulation-testing.md). The futures are dropped after the scheduler lock is
     /// released; see [`Inner::retire_domain`].
     pub(crate) fn retire_domain(&self, domain: u64) {
         let retired = {
@@ -278,6 +278,25 @@ impl actor_core::Spawner for SimSpawner {
 
 /// A deterministic simulation runtime: one seed drives time, randomness, task
 /// scheduling, and the in-memory network.
+///
+/// A system takes the simulation's [`clock`](Simulation::clock),
+/// [`entropy`](Simulation::entropy), and [`spawner`](Simulation::spawner), the
+/// same traits production uses, so the system code and its codec run unchanged.
+/// A single-node test builds the real local system on them:
+///
+/// ```ignore
+/// let sim = Simulation::new(seed);
+/// let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+///     .mailbox_capacity(cap)
+///     .events(sink) // the event stream every check reads
+///     .build();
+/// sim.block_on(workload.run(system)); // returns when the future resolves
+/// sim.run(); // the drain to quiescence is a separate, explicit step
+/// ```
+///
+/// A cluster test runs real cluster nodes over a [`SimNetwork`](crate::SimNetwork)
+/// on the same simulation; a [`ClusterWorkload`](crate::ClusterWorkload) and its
+/// runners do that wiring.
 pub struct Simulation {
     shared: Shared,
     entropy: SimEntropy,
@@ -450,12 +469,12 @@ impl Simulation {
     }
 
     /// Pick the next ready task. With more than one ready, selection is
-    /// seed-randomized (spec §18.3) to surface ordering-dependent bugs.
+    /// seed-randomized (docs/simulation-testing.md) to surface ordering-dependent bugs.
     fn take_ready(&self) -> Option<u64> {
         let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
         // Fast path: no node is frozen. A run that never pauses draws entropy and
         // orders tasks byte-for-byte as one with pause absent would (the
-        // reproducibility contract, spec §18.1).
+        // reproducibility contract, spec §2.12.2).
         if inner.paused.is_empty() {
             return match inner.ready.len() {
                 0 => None,

@@ -119,13 +119,15 @@ still runs, and only the shell is missing.
 
 ## Going deeper
 
-[docs/README.md](docs/README.md) indexes everything: the nine specifications,
+[docs/README.md](docs/README.md) indexes everything: the eleven specifications,
 the guides, and the testing conventions. The paths worth taking first:
 
+- [docs/architecture.md](docs/architecture.md): the map. The components, the
+  seams between them, the dependency order, and how each deployment wires them.
 - [docs/standalone-deployment.md](docs/standalone-deployment.md): the full
   deployment guide, with configuration, the failure drill step by step, and
   limits.
-- [docs/multi-tenant-edge.md](docs/multi-tenant-edge.md): bearer-token auth,
+- [docs/edge-spec.md](docs/edge-spec.md): the HTTP/SSE edge: bearer-token auth,
   per-tenant isolation, the tenancy directory, and the
   gateway-as-cluster-client trust model.
 - [k8s/README.md](k8s/README.md): the cluster as a Kubernetes StatefulSet of
@@ -133,8 +135,11 @@ the guides, and the testing conventions. The paths worth taking first:
 - [docs/agent-spec.md](docs/agent-spec.md): why the journal
   is the session.
 - [docs/entity-spec.md](docs/entity-spec.md): the substrate under all of it:
-  what an entity is, the fenced journal, shards and snapshots, and the facet model
-  every storage feature is built from.
+  what an entity is, its gates and lifecycle. Its two companions are
+  [docs/entity-storage-spec.md](docs/entity-storage-spec.md) (the fenced
+  journal, replication, shards and snapshots) and
+  [docs/entity-facets-spec.md](docs/entity-facets-spec.md) (the facet model
+  every storage feature is built from).
 - [docs/machine-spec.md](docs/machine-spec.md): why a machine is an entity plus
   durable storage and a network seam: the disk facet, the session-grained
   capture cadence, the self-fencing lease, and the SSH front door.
@@ -143,8 +148,6 @@ the guides, and the testing conventions. The paths worth taking first:
 - [docs/distributed-actor-spec.md](docs/distributed-actor-spec.md) and
   [docs/cluster-utilities-spec.md](docs/cluster-utilities-spec.md): the framework
   underneath.
-- [docs/wal-spec.md](docs/wal-spec.md): the framed, checksummed write-ahead log
-  primitive for file-backed durable stores.
 - [docs/compatibility-spec.md](docs/compatibility-spec.md): how a format says
   which version it is, and why a skew is a refusal rather than a misparse.
 - [docs/simulation-testing.md](docs/simulation-testing.md): how the deterministic

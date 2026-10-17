@@ -1,4 +1,4 @@
-//! The machine's conformance narrative (machine spec §7): one seeded run
+//! The machine's conformance narrative (machine spec §6): one seeded run
 //! driving attach → mid-session crash → partition with a doomed session →
 //! failover → reconnect, asserting M1–M3 and M5 along the way, plus the disk
 //! facet's F2/F4 (rehydration reproduces the last committed capture).
@@ -341,7 +341,7 @@ impl ClusterWorkload for Narrative {
 
 #[test]
 fn the_machine_survives_the_attach_crash_partition_failover_reconnect_story() {
-    // machine §7: one seed drives the whole narrative; M1, M3, M5, and E6 hold
+    // machine §6: one seed drives the whole narrative; M1, M3, M5, and E6 hold
     // throughout, and the machine is reachable and provisioned at the end.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = Narrative {

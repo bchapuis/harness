@@ -69,14 +69,21 @@ pub enum Owner {
 pub const UNREGISTERED: &[(&str, &str)] = &[
     (
         "F",
-        "entity §7.12's facet contract: four rows beside the E catalogue rather \
-         than a site of its own, and no crate holds a Rust copy of it",
+        "the facets spec's facet contract (facets §2.1, §3.7): four obligations \
+         stated with the facet seam rather than a catalogue of their own, and no \
+         crate holds a Rust copy of them",
+    ),
+    (
+        "L",
+        "the wal crate's L1-L4: the crate's rustdoc is its specification, and its \
+         own conformance catalogue holds the rows against the crate docs, not a \
+         spec site",
     ),
     (
         "V",
-        "compatibility §1: a two-column table with neither a `Defined in` nor a \
-         `Verified by`, so there is no Rust copy to compare it against; each \
-         format's own tests hold V1 and V2 for it",
+        "compatibility §5: a table no crate holds a Rust copy of; each format's \
+         own tests hold V1 to V3 for it, and the registry test holds §4 to the \
+         formats the code declares",
     ),
 ];
 

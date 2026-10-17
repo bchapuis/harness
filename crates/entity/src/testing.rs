@@ -1,4 +1,4 @@
-//! Shared simulation invariants over entity events (entity spec §7, actor §18.5).
+//! Shared simulation invariants over entity events (storage spec §1, actor §10).
 //!
 //! These are safety predicates every entity-backed swarm wants: commits advance,
 //! and an entity is live at most once per node. They are claims about the entity
@@ -291,7 +291,7 @@ impl crate::store::EntityStore for StaticEntityStore {
 ///
 /// The deterministic stand-in for the state **E4** exists to survive: an entity whose
 /// latest durable snapshot names a seq past its committed head. In production that is
-/// the `Quorum` tier's doing: `head` is recovered from a write quorum (§8, **E14**)
+/// the `Quorum` tier's doing: `head` is recovered from a write quorum (storage §5, **E14**)
 /// while the snapshot is read from whichever replica holds the newest one, so a
 /// snapshot saved by a former leader can outrun the head a quorum will admit. A
 /// single-node store can never disagree with itself that way, and reaching it through

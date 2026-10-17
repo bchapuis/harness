@@ -1,4 +1,4 @@
-//! Rebinding `ActorRef`s on decode (spec §4.4, invariant #10).
+//! Rebinding `ActorRef`s on decode (spec §2.10, invariant #10).
 //!
 //! An [`ActorRef`](crate::ActorRef) serializes to just its `ActorId`; on the
 //! wire it carries no system handle. To deserialize one back into a usable
@@ -24,7 +24,7 @@ thread_local! {
 }
 
 /// Run `f` with `system` set as the current system for any [`ActorRef`] decoded
-/// within it (spec §4.4). The previous system is restored afterward, even on
+/// within it (spec §2.10). The previous system is restored afterward, even on
 /// panic.
 ///
 /// [`ActorRef`]: crate::ActorRef

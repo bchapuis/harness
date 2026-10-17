@@ -1,12 +1,12 @@
 //! The entity-native content-addressed blob store under the cluster fault swarm
-//! (durable-workspace design; entity §7.10, V&V checklist #2, #4, #7, #8).
+//! (storage §9).
 //!
 //! `tests/blobs.rs` drives the blob store through *scripted* faults (one crash,
 //! one tampered copy). This file applies the V&V doctrine the other way round: a
 //! [`ClusterWorkload`] of blob put/get/has/gc traffic is swept across many seeds
 //! while a seeded nemesis injects partitions, crashes, heals, loss, duplication,
-//! and delay (actor §18.3) on the *unfenced* blob RPCs (`PutBlob`, `GetBlob`,
-//! `SweepBlobs`), and a [`Checker`] watches the §13 event stream live. Four
+//! and delay (docs/simulation-testing.md) on the *unfenced* blob RPCs (`PutBlob`, `GetBlob`,
+//! `SweepBlobs`), and a [`Checker`] watches the §10 event stream live. Four
 //! properties are asserted, the way the record path asserts its own in
 //! `entity_swarm.rs`:
 //!
@@ -19,7 +19,7 @@
 //!   `PutBlob` must not change the id (E18).
 //! - **Safety core under faults (#4).** [`default_invariants`] (no-silent-loss,
 //!   serial execution, lifecycle exactly-once) hold on every run, so the new
-//!   blob RPCs integrate with §14 no-silent-loss: each fanned `PutBlob`/
+//!   blob RPCs integrate with §11 no-silent-loss: each fanned `PutBlob`/
 //!   `GetBlob` ask closes its `AskIssued`/`AskOutcome` bracket even when it is
 //!   the drained straggler of a committed quorum.
 //! - **Seed-reproducibility (#7).** The same seed yields a byte-identical event
@@ -70,7 +70,7 @@ use support::Exercised;
 //
 // Its folded state is just the ids it has stored: the small metadata that
 // references the bulk bytes living in `ctx.blobs()`. Fixed to `SimNode` so it
-// hosts on the leader-based clustered system the shard map requires (§7.6).
+// hosts on the leader-based clustered system the shard map requires (storage §6).
 
 #[derive(Default)]
 struct BlobEntity;
@@ -107,7 +107,7 @@ impl Entity for BlobEntity {
 }
 
 /// Store bytes; reply with their content id (or a durability failure as a string).
-/// The bulk bytes reach a write quorum BEFORE the id is journaled (§7.10).
+/// The bulk bytes reach a write quorum BEFORE the id is journaled (storage §9).
 #[derive(Clone, Serialize, Deserialize)]
 struct Put(Vec<u8>);
 impl Message for Put {
@@ -196,7 +196,7 @@ impl EntityHandler<KeepOnly> for BlobEntity {
 /// resident for the whole run, `true` makes it short enough that clients can idle
 /// past it, so an entity's blob area is torn down and rebuilt mid-run. The snapshot
 /// cadence follows, so a returning activation restores from a composite snapshot
-/// (whose blob root set it must re-fan, §7.10) rather than from an empty base.
+/// (whose blob root set it must re-fan, storage §9) rather than from an empty base.
 fn config(hibernating: bool) -> EntityConfig {
     EntityConfig {
         shards: 2,
@@ -226,7 +226,7 @@ fn content(n: u64) -> Vec<u8> {
 }
 
 /// Put/get/has/gc traffic against a handful of blob entities, hosted on a
-/// leader-based cluster, driven through the public `EntityRef` API only (actor §18.4).
+/// leader-based cluster, driven through the public `EntityRef` API only (docs/simulation-testing.md).
 /// Every call is faulted by the nemesis and the transport; a failed call is
 /// recorded as nothing and the client moves on, so the drive future always
 /// completes and the invariants are checked over whatever the run produced.
@@ -294,7 +294,7 @@ impl ClusterWorkload for BlobSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (§7.6); every node is a control voter so the map group can form.
+        // (storage §6); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 

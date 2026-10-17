@@ -1,10 +1,10 @@
-//! The SQL facet under the cluster fault swarm (spec §7.14, §14; V&V checklist
+//! The SQL facet under the cluster fault swarm (spec facets §4.3, entity §11; V&V checklist
 //! #4, #5, #7).
 //!
 //! `tests/sql.rs` proves the facet's contract on the `Local` tier. This file
 //! hosts a SQL-only entity on the leader-based clustered system and sweeps it
 //! across seeds while the nemesis injects partitions, crashes, heals, loss,
-//! duplication, and delay (actor §18.3). What that adds:
+//! duplication, and delay (docs/simulation-testing.md). What that adds:
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose materialization is rebuilt from the composite-snapshot
@@ -100,7 +100,7 @@ fn ensure_schema(ctx: &EntityCtx<SqlAccount>) {
 }
 
 /// Insert one deposit row; reply with the running total: a WAL-frame record
-/// committing through the quorum path (§7.14, E19).
+/// committing through the quorum path (facets §4.3, E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Deposit {
     cents: u64,
@@ -133,7 +133,7 @@ impl EntityHandler<Deposit> for SqlAccount {
     }
 }
 
-/// The running total, a pure read: no frames, no record (§7.5).
+/// The running total, a pure read: no frames, no record (§6).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadTotal;
 impl Message for ReadTotal {
@@ -162,7 +162,7 @@ impl EntityHandler<ReadTotal> for SqlAccount {
 // --- The workload ---------------------------------------------------------------
 
 /// Deposit-and-read SQL traffic against a handful of entities under the nemesis,
-/// driven through the public `EntityRef` API only (actor §18.4). A faulted call
+/// driven through the public `EntityRef` API only (docs/simulation-testing.md). A faulted call
 /// records nothing and the client moves on, so the drive future always completes
 /// and the invariants run over whatever the run produced.
 ///
@@ -256,7 +256,7 @@ impl ClusterWorkload for SqlAccountSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (§7.6); every node is a control voter so the map group can form.
+        // (storage §6); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -424,7 +424,7 @@ fn sql_cluster_swarm_is_reproducible() {
     }
 }
 
-/// SQL traffic under the seeded swarm (actor §18.4): randomized writes and reads
+/// SQL traffic under the seeded swarm (docs/simulation-testing.md): randomized writes and reads
 /// across a small key space, with sleeps past `idle_after` so activations
 /// hibernate, checkpoint into blobs, and rematerialize mid-run. One scratch
 /// directory serves every run, so the facet's restore has to discard stale
@@ -432,7 +432,7 @@ fn sql_cluster_swarm_is_reproducible() {
 ///
 /// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
 /// It is off for reproducibility sweeps: physical replication makes the value
-/// safe for durability (asserted elsewhere), but the actor §18.1 repro contract stays
+/// safe for durability (asserted elsewhere), but the actor §2.12.2 repro contract stays
 /// strict, no unseeded randomness in a replayed run.
 struct SqlSwarm {
     clients: usize,

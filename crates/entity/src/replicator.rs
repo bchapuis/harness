@@ -1,9 +1,9 @@
-//! The Replicator: per-entity durability (spec §7.2, §7.4, §8).
+//! The Replicator: per-entity durability (spec storage §4, §2.2, §5).
 //!
 //! An entity's records are made durable not by a shared log but by a **per-entity
-//! quorum append** (§7.2): the shard leader assigns each record the next `Seq` (free,
+//! quorum append** (storage §4): the shard leader assigns each record the next `Seq` (free,
 //! since it is the single writer) and the Replicator fans it to the shard's replicas,
-//! reporting it durable once a quorum has stored it, fenced by the shard term (§8).
+//! reporting it durable once a quorum has stored it, fenced by the shard term (storage §5).
 //! On activation a fresh leader **recovers** each entity's head by read-repair: it
 //! fence-reads a **read** quorum, takes the highest-term record per slot, and writes
 //! the merged tail back to a quorum under its own term before serving, so no
@@ -56,7 +56,7 @@ use crate::store::WriteKind;
 
 /// A pending per-replica store ack from the [`ReplicaTransport`] fan-out, tagged
 /// with the replica it came from so a joint quorum can attribute it to the right
-/// set(s) during a replica-set migration (§7.7).
+/// set(s) during a replica-set migration (storage §6).
 type StoreAckFuture =
     actor_core::BoxFuture<'static, (NodeId, Result<StoreAck, actor_core::CallError>)>;
 
@@ -72,7 +72,7 @@ enum OnUnreachable {
 }
 
 /// This node's own store outcome as one more replica's ack, so a quorum is counted
-/// uniformly over all R replicas (the leader is a replica, §5.2).
+/// uniformly over all R replicas (the leader is a replica, §4.2).
 ///
 /// Already resolved, because the caller awaited the local write (fsync included)
 /// before building this. It is still shaped as a future so the leader's own ack and
@@ -119,7 +119,7 @@ fn local_store_ack(
 
 /// A pending per-replica blob store from the [`ReplicaTransport`] blob fan-out: it
 /// resolves once that peer has stored the blob or reported it could not. Tagged with
-/// the replica for joint-quorum attribution (§7.7).
+/// the replica for joint-quorum attribution (storage §6).
 type BlobAckFuture =
     actor_core::BoxFuture<'static, (NodeId, Result<BlobAck, actor_core::CallError>)>;
 
@@ -133,22 +133,22 @@ type Merged = (Vec<Vec<u8>>, Seq, Option<(Seq, Term, Vec<u8>)>, bool);
 /// Carried as a pair rather than read from the config at each use, so the two are
 /// visibly a policy the deployment sets. The right values depend on the deployment's
 /// network and storage, and setting them too low is worse than slow: every timeout
-/// here is ambiguous (§7.2), so it steps the activation down and forces a rehydration.
+/// here is ambiguous (storage §4), so it steps the activation down and forces a rehydration.
 ///
 /// Deliberately without a `Default`: the defaults live once, in
 /// [`EntityConfig`](crate::EntityConfig), and a second set here would be a second
 /// place to edit one tuning number. Every construction comes from a config.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    /// A quorum append, snapshot, or blob put (§11).
+    /// A quorum append, snapshot, or blob put (storage §10).
     pub quorum: Duration,
-    /// A recovery read quorum, before the read-your-leader fallback (§7.5, §8).
+    /// A recovery read quorum, before the read-your-leader fallback (§6, storage §5).
     pub recover: Duration,
 }
 
 // --- Quorum tier: per-entity quorum append over the shard's replicas ----------
 
-/// A shard's replica sets (§7.6, §7.7): the committed `current` set, and (while a
+/// A shard's replica sets (storage §6, §7): the committed `current` set, and (while a
 /// replica-set migration is in flight) the committed `target` set. Shared between
 /// the shard map's apply loop (the writer, updating it as `Assign`/`Migrated`
 /// commit) and the shard's [`QuorumReplicator`] (the reader).
@@ -158,14 +158,14 @@ pub struct Deadlines {
 /// durability ever rests on a set that lacks it: old-set quorums still intersect
 /// every pre-migration write, new-set quorums intersect every in-migration write,
 /// and the flip to `target`-only happens only after the migration driver has
-/// caught every entity up on the target set (§7.7).
+/// caught every entity up on the target set (storage §6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplicaSets {
     pub(crate) current: Vec<NodeId>,
     pub(crate) target: Option<Vec<NodeId>>,
 }
 
-/// One shard's committed allocation (§5.1, §7.6, §7.7): the key range it owns,
+/// One shard's committed allocation (§4.1, storage §6, §7): the key range it owns,
 /// its `current` replica set, and the one operation in flight on it, if any.
 ///
 /// Held once per hosted shard, behind one mutex, by the shard map (the writer:
@@ -176,7 +176,7 @@ pub(crate) struct ReplicaSets {
 /// on migration.
 #[derive(Clone)]
 pub(crate) struct Allocation {
-    /// The key range this shard owns (§5.1): shrinks on a committed split,
+    /// The key range this shard owns (§4.1): shrinks on a committed split,
     /// extends on a committed merge. An append outside it is refused
     /// `NotLeader` before any store attempt: the leader-local half of E15.
     pub(crate) range: crate::system::KeyRange,
@@ -185,7 +185,7 @@ pub(crate) struct Allocation {
     pub(crate) in_flight: InFlight,
 }
 
-/// The operation in flight on a shard (§7.7): one at a time, which the type
+/// The operation in flight on a shard (storage §7): one at a time, which the type
 /// makes the only representable state.
 #[derive(Clone)]
 pub(crate) enum InFlight {
@@ -199,14 +199,14 @@ pub(crate) enum InFlight {
     Merging(MergeRole),
 }
 
-/// An in-flight split's committed plan (§7.7).
+/// An in-flight split's committed plan (storage §7).
 #[derive(Clone, Copy)]
 pub(crate) struct SplitPlan {
     pub(crate) child: u32,
     pub(crate) boundary: u64,
 }
 
-/// A shard's role in an in-flight merge (§7.7).
+/// A shard's role in an in-flight merge (storage §7).
 #[derive(Clone, Copy)]
 pub(crate) enum MergeRole {
     /// The **left** shard, absorbing the adjacent `right` (carries its index).
@@ -226,13 +226,13 @@ impl Allocation {
         }
     }
 
-    /// Whether this shard is free to start a migration, split, or merge (§7.7's
+    /// Whether this shard is free to start a migration, split, or merge (storage §7's
     /// one-op-at-a-time rule).
     pub(crate) fn idle(&self) -> bool {
         matches!(self.in_flight, InFlight::Idle)
     }
 
-    /// The target set of an in-flight migration (§7.7).
+    /// The target set of an in-flight migration (storage §6).
     pub(crate) fn target(&self) -> Option<&[NodeId]> {
         match &self.in_flight {
             InFlight::Migrating(target) => Some(target),
@@ -240,7 +240,7 @@ impl Allocation {
         }
     }
 
-    /// The plan of an in-flight split (§7.7).
+    /// The plan of an in-flight split (storage §7).
     pub(crate) fn split(&self) -> Option<SplitPlan> {
         match self.in_flight {
             InFlight::Splitting(plan) => Some(plan),
@@ -248,7 +248,7 @@ impl Allocation {
         }
     }
 
-    /// This shard's role in an in-flight merge (§7.7).
+    /// This shard's role in an in-flight merge (storage §7).
     pub(crate) fn merge(&self) -> Option<MergeRole> {
         match self.in_flight {
             InFlight::Merging(role) => Some(role),
@@ -270,7 +270,7 @@ impl Allocation {
         }
     }
 
-    /// The leader-local seal an in-flight split or merge puts on appends (§7.7):
+    /// The leader-local seal an in-flight split or merge puts on appends (storage §7):
     /// the split boundary, or the whole range of a shard being absorbed. A fast
     /// path only: the authoritative barrier is the replica stores' durable
     /// append bound, which refuses at any term.
@@ -297,7 +297,7 @@ impl ReplicaSets {
 
 /// The nodes involved in a shard right now: `current ∪ target`, deduplicated,
 /// order-preserving; the one definition of the mid-migration joint membership
-/// (§7.7), shared by the replicator's fan-out and the shard map's reconcile loop
+/// (storage §6), shared by the replicator's fan-out and the shard map's reconcile loop
 /// so the two cannot drift.
 pub(crate) fn joint_members(current: &[NodeId], target: Option<&[NodeId]>) -> Vec<NodeId> {
     let mut nodes = current.to_vec();
@@ -311,12 +311,12 @@ pub(crate) fn joint_members(current: &[NodeId], target: Option<&[NodeId]>) -> Ve
     nodes
 }
 
-/// A majority of `n` replicas (§7.2).
+/// A majority of `n` replicas (storage §4).
 fn majority(n: usize) -> usize {
     n / 2 + 1
 }
 
-/// Per-set ack counting toward a joint quorum (§7.7): an ack from a node counts
+/// Per-set ack counting toward a joint quorum (storage §6): an ack from a node counts
 /// toward every set that contains it.
 struct JointCount<'a> {
     sets: &'a ReplicaSets,
@@ -354,7 +354,7 @@ impl<'a> JointCount<'a> {
     }
 }
 
-/// The outcome of a recovery read phase (§7.2, §8): the fenced replies that survived
+/// The outcome of a recovery read phase (storage §4, §5): the fenced replies that survived
 /// the read fan-out, this node's local head taken before the reply was merged, and
 /// whether the acks reached a joint read quorum.
 struct ReadQuorum {
@@ -363,9 +363,9 @@ struct ReadQuorum {
     confirmed: bool,
 }
 
-/// The clustered `Quorum` replicator (spec §7.2, §7.4, §8). Holds the shard's
+/// The clustered `Quorum` replicator (spec storage §4, §2.2, §5). Holds the shard's
 /// leader-election group (for the term and leadership gate), this node's
-/// [`NodeStore`] (the leader is one of the replicas, §5.2), and the
+/// [`NodeStore`] (the leader is one of the replicas, §4.2), and the
 /// [`ReplicaTransport`] to the other replicas.
 pub(crate) struct QuorumReplicator<R: RaftConsensus> {
     election: LeaderElection<R>,
@@ -374,7 +374,7 @@ pub(crate) struct QuorumReplicator<R: RaftConsensus> {
     /// drives this node's heartbeats (see [`crate::blocking`]).
     local: NodeStore,
     transport: Arc<dyn ReplicaTransport>,
-    /// The shard's committed allocation (§7.1, §7.7), shared with the shard map,
+    /// The shard's committed allocation (storage §3.1, §7), shared with the shard map,
     /// whose apply loop updates it in place as commands commit, so quorums always
     /// count over the committed allocation, never a snapshot from construction time.
     allocation: Arc<std::sync::Mutex<Allocation>>,
@@ -384,12 +384,12 @@ pub(crate) struct QuorumReplicator<R: RaftConsensus> {
 }
 
 impl<R: RaftConsensus> QuorumReplicator<R> {
-    /// Build one shard's replicator over its leader-election group (spec §7.3,
-    /// §7.4): the group supplies placement (who may write, under which term)
-    /// holding no entity data (§7.1, §8); this replicator supplies durability.
+    /// Build one shard's replicator over its leader-election group (spec storage §2.1,
+    /// §2.2): the group supplies placement (who may write, under which term)
+    /// holding no entity data (storage §3.1, §5); this replicator supplies durability.
     /// `allocation` is the shard's committed allocation, shared with the shard
     /// map's apply loop so a committed reallocation or split reaches in-flight
-    /// journals (§7.7). The
+    /// journals (storage §7). The
     /// returned handle is the shard's `EntityJournal` (the `Quorum` tier) and
     /// the migration driver's replicator in one.
     pub(crate) fn for_shard(
@@ -435,7 +435,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// The fan-out peers of `sets` other than this node (the leader writes its own
-    /// store locally, §5.2): `current ∪ target` during a migration.
+    /// store locally, §4.2): `current ∪ target` during a migration.
     fn peers_of(&self, sets: &ReplicaSets) -> Vec<NodeId> {
         sets.union()
             .into_iter()
@@ -443,12 +443,12 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .collect()
     }
 
-    /// Per-entity quorum append (spec §7.2): stamp the shard term, write the local
+    /// Per-entity quorum append (spec storage §4): stamp the shard term, write the local
     /// replica, fan out to the peers, and commit once a quorum has stored. A
     /// `Fenced` reply means a higher term exists (we are deposed) → `NotLeader`; a
-    /// missed quorum within the timeout → `Unavailable` (§11). The record's identity
+    /// missed quorum within the timeout → `Unavailable` (storage §10). The record's identity
     /// is its `(entity, Seq)` slot, so a timed-out append that lands later is applied
-    /// once on recovery with no dedup token (§7.2).
+    /// once on recovery with no dedup token (storage §4).
     pub(crate) async fn append(
         &self,
         entity: &EntityName,
@@ -458,7 +458,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let Some(term) = self.leadership_term() else {
             return self.not_leader();
         };
-        // The split/merge gate (§7.7, E15): an append for a key this shard no longer
+        // The split/merge gate (storage §7, E15): an append for a key this shard no longer
         // owns, or that is frozen mid-move, is refused BEFORE any store attempt, so it
         // provably never ran and the caller can re-resolve against the committed map.
         // The authoritative barrier is the replica stores' durable append bound.
@@ -472,7 +472,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         };
         let events_len = events.len();
         // Fan out to the remote peers first, each cloning the payload for its own wire
-        // message; then write this node's own replica, *moving* the payload in (§5.2).
+        // message; then write this node's own replica, *moving* the payload in (§4.2).
         // The batch is deep-cloned R-1 times, never R.
         let mut replicas: Vec<StoreAckFuture> = self.fan(self.peers_of(&sets), |node| {
             self.transport.store_record(
@@ -489,7 +489,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             )
         });
         // The local write joins the fan-out as one more replica's ack (the leader is a
-        // replica, §5.2), so this node counts toward the quorum exactly when its own
+        // replica, §4.2), so this node counts toward the quorum exactly when its own
         // bytes are stable. Handed to the quorum *unresolved* rather than awaited
         // first: the peer asks are lazy futures, so awaiting the flush here would keep
         // every `StoreRecord` off the wire until this node's disk answered, making a
@@ -510,14 +510,14 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let _counted = local_write.await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
-            // hot path (§7.2), so the append's latency is the quorum's, not the slowest
+            // hot path (storage §4), so the append's latency is the quorum's, not the slowest
             // replica's.
             self.drain(pending);
         } else {
             // The append did not commit: roll back this node's tentative local write
             // so a later stale-local recovery never folds an uncommitted record
-            // (§7.2, E5). Peers that stored it keep it, so a quorum can still commit
-            // it late (the ambiguous-timeout case, §7.2). `pending` is already drained.
+            // (storage §4, E5). Peers that stored it keep it, so a quorum can still commit
+            // it late (the ambiguous-timeout case, storage §4). `pending` is already drained.
             // Bounded by our own term: while the quorum wait was in flight a newer
             // leader may have fenced this store and landed committed records above
             // `after`; those carry a higher term and must survive (E14). Awaited before
@@ -529,16 +529,18 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             QuorumOutcome::Committed => {
                 AppendOutcome::Committed(Seq::new(after.value() + events_len as u64))
             }
+            // Deposed, and no peer can hold the record (see `collect_store_quorum`),
+            // so the command provably did not commit and the caller may re-issue it.
             QuorumOutcome::Fenced => self.not_leader(),
-            // A stale head: an up-to-date replica rejected the append (§8). Step down
+            // A stale head: an up-to-date replica rejected the append (storage §5). Step down
             // (ambiguous) and re-recover from a quorum on the next activation.
             QuorumOutcome::Stale => AppendOutcome::Unavailable("stale head; reactivating".into()),
-            // A replica's append bound refused the moved range (§7.7): this
+            // A replica's append bound refused the moved range (storage §7): this
             // leader's map is behind a committed split. AMBIGUOUS, not
             // `NotLeader`: unbounded replicas may hold the record and the
             // split's transfer can adopt it, so an auto-retry against the child
             // could double-apply. `Unavailable` puts the outcome under the
-            // caller's §2.2 idempotence discipline, like any quorum timeout.
+            // caller's §1.1 idempotence discipline, like any quorum timeout.
             QuorumOutcome::Sealed => {
                 AppendOutcome::Unavailable("shard sealed for a split/merge".into())
             }
@@ -548,16 +550,16 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
-    /// Recover an entity's head by read-repair over a read quorum (spec §8,
+    /// Recover an entity's head by read-repair over a read quorum (spec storage §5,
     /// **E14**): the rehydration barrier. Fence-read that quorum (a Paxos prepare
     /// that bars a deposed leader from committing after we read),
     /// take the highest-term record per slot, write the recovered tail back under our
     /// own term so the adopted head is itself quorum-durable, and leave the records
     /// and snapshot in the local store so subsequent `load`/`load_snapshot` read
     /// locally. Returns the recovered head, or `Unavailable` while the shard is
-    /// electing or a quorum is unreachable (the failover window, §8.3).
+    /// electing or a quorum is unreachable (the failover window, storage §5.3).
     ///
-    /// Short of a read quorum this falls back to the local view (§7.5,
+    /// Short of a read quorum this falls back to the local view (§6,
     /// read-your-leader): acceptable for serving reads, never for a decision
     /// that moves data; those paths use [`recover_quorum`](Self::recover_quorum).
     pub(crate) async fn recover(&self, entity: &EntityName) -> Result<Seq, EntityJournalError> {
@@ -565,7 +567,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// [`recover`](Self::recover) that REQUIRES the read quorum: `Err` instead of
-    /// the local fallback. The migration and split drivers (§7.7) use this: a
+    /// the local fallback. The migration and split drivers (storage §6, §7) use this: a
     /// transfer or `Migrated`/`SplitCommitted` proposal must never be based on a
     /// possibly-stale local view (E14/E15), and during a migration the confirmed
     /// joint quorum is also what makes the write-back run at all.
@@ -587,7 +589,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let sets = self.sets();
 
         let read = self.fence_read(entity, term, &sets).await?;
-        // A joint read quorum during a migration (§7.7): every pre-migration commit
+        // A joint read quorum during a migration (storage §6): every pre-migration commit
         // sits on a majority of `current`, every in-migration commit additionally on
         // a majority of `target`, so requiring both majorities intersects them all.
         if require_quorum && !read.confirmed {
@@ -598,20 +600,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
         // Merge: highest-term record per slot, and the best snapshot. When a quorum
         // was reached this is the authoritative head; otherwise it is the merge of
-        // whatever replied short of a quorum: a read-your-leader fallback (§7.5) that
+        // whatever replied short of a quorum: a read-your-leader fallback (§6) that
         // may be stale but cannot fork a write, since a write from it still needs a
         // quorum and a stale-head append is rejected by an up-to-date replica's
-        // optimistic check (§8).
+        // optimistic check (storage §5).
         //
         // One read anomaly beyond staleness is possible in this fallback: a crash
         // after a failed append's local write but before its rollback truncate can
         // leave an uncommitted record in the local store; a quorum-less recovery
         // adopts it into the served state until the next quorum recovery drops it.
         // The record was never acknowledged, so no durability claim is violated (the
-        // relaxed-read window of §7.5).
+        // relaxed-read window of §6).
         let (records, head, snapshot, any_below) = merge(read.replies, term);
         // The recovered head's compacted base: the seq of the best snapshot, which
-        // the recovered tail records sit above (§9).
+        // the recovered tail records sit above (storage §8).
         let base = snapshot.as_ref().map_or(Seq::ZERO, |(s, _, _)| *s);
 
         // Cache the recovered snapshot locally first, so the local store's base is
@@ -620,7 +622,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         if let Some((at, snap_term, state)) = snapshot {
             // The ack is deliberately dropped, and this is the one place on the
             // recovery path where that is sound: the snapshot is a local cache and the
-            // merged *records* remain the authority (§9), so a refusal here costs a
+            // merged *records* remain the authority (storage §8), so a refusal here costs a
             // longer replay on the next activation rather than a durability claim.
             // Every other store call on this path reads its outcome (**E14**). Awaited
             // before the write-back below, which lands the tail above this base.
@@ -654,8 +656,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         Ok(head)
     }
 
-    /// Recovery read phase (§7.2, §8): fence-read the local store and every peer,
-    /// awaiting all reads so no in-flight ask is dropped (no-silent-loss, §14).
+    /// Recovery read phase (storage §4, §5): fence-read the local store and every peer,
+    /// awaiting all reads so no in-flight ask is dropped (no-silent-loss, §11).
     /// Each read is bounded by `self.deadlines.recover`, so an unreachable peer just falls
     /// out of the quorum. `Err` when the local store or a peer has fenced us behind a
     /// higher term.
@@ -741,13 +743,13 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         })
     }
 
-    /// Recovery write-back phase (§8): make the recovered tail quorum-durable under
+    /// Recovery write-back phase (storage §5): make the recovered tail quorum-durable under
     /// our term, so no later recovery regresses it and the local store can serve
     /// `load`. The tail sits after `base`; a replica already compacted past it skips
-    /// the covered records (§8). Skips the network (returning `Ok` without a write)
+    /// the covered records (storage §5). Skips the network (returning `Ok` without a write)
     /// when nothing changed (a stable re-activation: no record below our term, head
     /// not advanced), except during a migration, when the write-back is exactly how a
-    /// target replica receives the entity's records (§7.7), so it always runs.
+    /// target replica receives the entity's records (storage §6), so it always runs.
     #[allow(clippy::too_many_arguments)] // mirrors the raft.rs handler signatures
     async fn write_back(
         &self,
@@ -812,10 +814,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Records from the **local** store, not from a quorum: the quorum read on the
-    /// activation path is `head`'s recovery (§8), which runs once and backfills
+    /// activation path is `head`'s recovery (storage §5), which runs once and backfills
     /// whatever this replica was missing. So a rehydration's replay, however long,
     /// costs no round trips: it is local reads over records this node already holds.
-    /// That is why §9's snapshot cadence can afford to be sparse
+    /// That is why storage §8's snapshot cadence can afford to be sparse
     /// (`docs/hardware-envelope.md` §3.1).
     pub(crate) async fn load(
         &self,
@@ -835,9 +837,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         Ok(self.local.snapshot(self.shard, entity))
     }
 
-    /// The §11 gate on the local reads above: a failed store answers them as an
+    /// The storage §10 gate on the local reads above: a failed store answers them as an
     /// entity with no history. `recover` already refuses at `prepare`, so an
-    /// activation never gets this far; the gateway's non-activating read (§7.5) does,
+    /// activation never gets this far; the gateway's non-activating read (§6) does,
     /// and without the gate it would serve an empty page as the entity's history.
     fn local_usable(&self) -> Result<(), EntityJournalError> {
         if self.local.failed() {
@@ -885,7 +887,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         bytes: Vec<u8>,
     ) -> Result<(), EntityJournalError> {
         let sets = self.sets();
-        // Local copy first (the leader is a replica, §5.2): move the bytes into peers'
+        // Local copy first (the leader is a replica, §4.2): move the bytes into peers'
         // wire messages by clone, but the local write needs no copy beyond the fan-out.
         let pending: FuturesUnordered<BlobAckFuture> = self
             .fan(self.peers_of(&sets), |node| {
@@ -905,7 +907,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // Awaited *before* the peers are polled, rather than joining the fan-out as
         // one more ack the way the record path does: **E18** requires a blob's quorum
         // to always include the leader, because that is what makes a later `get` a
-        // local read (§7.10 colocation). That requirement is also why a failed local
+        // local read (storage §9 colocation). That requirement is also why a failed local
         // write ends the put here, no number of peer copies can substitute for the
         // one E18 names, and the caller must not hear success without it.
         let stored = self.local.put_blob(self.shard, entity, id, bytes).await;
@@ -917,7 +919,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
         // A blob has no fence or order, so any peer that reports it stored counts.
         let (satisfied, pending) = self
-            .accumulate_quorum(&sets, true, pending, |result| {
+            .accumulate_quorum(&sets, true, pending, |_, result| {
                 matches!(result, Ok(BlobAck::Stored))
             })
             .await;
@@ -950,7 +952,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             // peer-sourced backfill below can replace it in place: a content-addressed
             // `put_blob` of an id already on disk writes nothing, so without this the
             // bad copy would persist, forcing a network fetch on every future read and
-            // leaving this replica's durability margin permanently one short (§7.10
+            // leaving this replica's durability margin permanently one short (storage §9
             // self-heal). Safe unconditionally: a copy that fails verification can
             // never be returned.
             corrupt = true;
@@ -1051,7 +1053,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let _ = join_all(sweeps).await;
     }
 
-    /// Persist a snapshot on a quorum (spec §9), fenced by the shard term. Quorum-
+    /// Persist a snapshot on a quorum (spec storage §8), fenced by the shard term. Quorum-
     /// blocking so a later compaction can safely truncate the covered records.
     pub(crate) async fn save_snapshot(
         &self,
@@ -1064,7 +1066,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         };
         let sets = self.sets();
         // Clone the state for each remote peer's wire message, then move it into this
-        // node's own replica write (§5.2): R-1 copies, not R.
+        // node's own replica write (§4.2): R-1 copies, not R.
         let mut replicas: Vec<StoreAckFuture> = self.fan(self.peers_of(&sets), |node| {
             self.transport.store_snapshot(
                 node,
@@ -1104,7 +1106,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
-    // --- Replica-set migration (§7.7) -----------------------------------------
+    // --- Replica-set migration (storage §6) -----------------------------------------
     //
     // The shard's migration driver (a leader-only loop in `shardmap`) uses these to
     // catch every entity up on the `target` set before the map flips to it. All are
@@ -1145,7 +1147,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
-    /// Catch one entity up on the target set (§7.7): recover its head (the joint
+    /// Catch one entity up on the target set (storage §6): recover its head (the joint
     /// write-back lands the records on the target replicas), then re-persist its
     /// best snapshot on the joint quorum (a compacted entity's prefix exists only in
     /// the snapshot, so the records alone are not enough), then copy its blob area.
@@ -1202,7 +1204,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         .await
     }
 
-    // --- Shard split/merge transfer (§7.7) -------------------------------------
+    // --- Shard split/merge transfer (storage §7) -------------------------------------
     //
     // The split (and merge) driver (a leader-only loop in `shardmap`) uses these
     // to move a key range's entities to their destination shard's keys before the
@@ -1237,7 +1239,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .into_iter()
             .collect();
         let (satisfied, pending) = self
-            .accumulate_quorum(&sets, true, pending, Result::is_ok)
+            .accumulate_quorum(&sets, true, pending, |_, result| result.is_ok())
             .await;
         if satisfied {
             self.drain(pending);
@@ -1250,7 +1252,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Land one moved entity's committed prefix (snapshot, then records, then
-    /// blobs) under `dest` shard keys on `dest_replicas` (§7.7). The source is
+    /// blobs) under `dest` shard keys on `dest_replicas` (storage §7). The source is
     /// a quorum recovery under our own term (fencing deposed leaders of this
     /// shard), after which the local store holds the authoritative prefix; the
     /// copy is a [`WriteKind::Transfer`] at `Term::ZERO`, majority-acked on
@@ -1373,9 +1375,12 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             target: None,
         };
         let (satisfied, pending) = self
-            .accumulate_quorum(&sets, local_stored, peers.into_iter().collect(), |reply| {
-                matches!(reply, Ok(StoreAck::Stored(_)))
-            })
+            .accumulate_quorum(
+                &sets,
+                local_stored,
+                peers.into_iter().collect(),
+                |_, reply| matches!(reply, Ok(StoreAck::Stored(_))),
+            )
             .await;
         if satisfied {
             self.drain(pending);
@@ -1404,7 +1409,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Copy a moved entity's blob area to the reachable destination replicas'
-    /// `dest`-keyed areas (§7.7, E17/E18): the shared copy behind
+    /// `dest`-keyed areas (storage §7, E17/E18): the shared copy behind
     /// [`copy_blob_area`](Self::copy_blob_area), best-effort per destination node; an unreachable
     /// dest replica (a split's child inherits the parent's replicas, which may
     /// include a crashed one) is skipped rather than stalling the split; its
@@ -1430,7 +1435,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         .await
     }
 
-    /// The one blob-area copy (§7.7): gather the source id set (this
+    /// The one blob-area copy (storage §7): gather the source id set (this
     /// replica's list under this shard's keys plus every reachable
     /// `source_peers` list) then, per destination node, list what it holds
     /// under `dest` and ship each missing blob through a verified
@@ -1527,21 +1532,21 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Seed the local ack, then poll `pending` until a joint quorum has acked (spec
-    /// §7.2), returning as soon as it is reached: the commit waits on the quorum, not
+    /// storage §4), returning as soon as it is reached: the commit waits on the quorum, not
     /// the slowest replica. `is_ack` decides whether a peer's reply counts: a `Stored`
     /// [`StoreAck`] on the record and transfer paths, a `Stored` [`BlobAck`] on the
     /// blob path, any reply at all on the seal path. During a migration the quorum is
-    /// JOINT (§7.7): a majority of `current` AND of `target`.
+    /// JOINT (storage §6): a majority of `current` AND of `target`.
     /// The unresolved stragglers come back for [`drain`](Self::drain), so each still
     /// closes its `AskIssued`/`AskOutcome` bracket off the hot path (no-silent-loss,
-    /// §14). When the quorum is not reached the loop has drained every peer, so the
+    /// §11). When the quorum is not reached the loop has drained every peer, so the
     /// returned set is empty.
     async fn accumulate_quorum<Reply>(
         &self,
         sets: &ReplicaSets,
         local_acked: bool,
         mut pending: FuturesUnordered<actor_core::BoxFuture<'static, (NodeId, Reply)>>,
-        mut is_ack: impl FnMut(&Reply) -> bool,
+        mut is_ack: impl FnMut(NodeId, &Reply) -> bool,
     ) -> (
         bool,
         FuturesUnordered<actor_core::BoxFuture<'static, (NodeId, Reply)>>,
@@ -1554,7 +1559,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             return (true, pending);
         }
         while let Some((node, reply)) = pending.next().await {
-            if is_ack(&reply) {
+            if is_ack(node, &reply) {
                 count.ack(node);
             }
             if count.satisfied() {
@@ -1564,13 +1569,22 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         (false, pending)
     }
 
-    /// Count every replica's ack toward a quorum (spec §7.2) on the record path, over
+    /// Count every replica's ack toward a quorum (spec storage §4) on the record path, over
     /// [`accumulate_quorum`](Self::accumulate_quorum). A `Stored` counts; a
     /// `Fenced`/`Stale` reply does not but is remembered, so short of a quorum a single
     /// `Fenced` means we are deposed and a `Stale` means the head was stale, running
     /// out of replies with neither is `Unavailable`. A quorum that stored wins even if
     /// a lagging replica also reported a higher term: had a higher-term leader prepared
-    /// a quorum, the intersection would have fenced this store (§8).
+    /// a quorum, the intersection would have fenced this store (storage §5).
+    ///
+    /// `Fenced` is reported only when no **peer** can hold the write: every peer
+    /// answered with a refusal. A peer that stored it, or whose ask failed (a timed-out
+    /// message may still land), leaves a lower-term copy a new leader's recovery can
+    /// adopt, since the merge keeps the highest term *present* at a slot (storage §5). Reported
+    /// as `Fenced`, that copy would reach the caller as `NotLeader`, which promises the
+    /// command never ran and is re-issued (§2.2), so it could apply twice; it is
+    /// `Unavailable` instead. This node's own copy does not count: a write that did not
+    /// commit is rolled back here (storage §4).
     async fn collect_store_quorum(
         &self,
         sets: &ReplicaSets,
@@ -1579,12 +1593,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let mut fenced = false;
         let mut stale = false;
         let mut sealed = false;
+        let mut peer_may_hold = false;
+        let this_node = self.self_node;
         // Every replica including this node arrives through the stream (see
         // [`local_ack`]), so nothing is counted before the poll loop.
         let pending: FuturesUnordered<StoreAckFuture> = replicas.into_iter().collect();
         let (satisfied, pending) = self
-            .accumulate_quorum(sets, false, pending, |reply| match reply {
-                Ok(StoreAck::Stored(_)) => true,
+            .accumulate_quorum(sets, false, pending, |node, reply| match reply {
+                Ok(StoreAck::Stored(_)) => {
+                    peer_may_hold |= node != this_node;
+                    true
+                }
                 Ok(StoreAck::Fenced(_)) => {
                     fenced = true;
                     false
@@ -1602,14 +1621,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 // sets no flag. If the remaining replicas still make a quorum the write
                 // commits normally; otherwise this falls through to `Unavailable`.
                 Ok(StoreAck::Failed) => false,
-                Err(_) => false,
+                // No answer is not a refusal: the message may still land.
+                Err(_) => {
+                    peer_may_hold |= node != this_node;
+                    false
+                }
             })
             .await;
         if satisfied {
             return (QuorumOutcome::Committed, pending);
         }
-        let outcome = if fenced {
+        let outcome = if fenced && !peer_may_hold {
             QuorumOutcome::Fenced
+        } else if fenced {
+            QuorumOutcome::Unavailable
         } else if sealed {
             QuorumOutcome::Sealed
         } else if stale {
@@ -1621,11 +1646,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Drive the leftover peer asks of a committed quorum (a record store or a blob
-    /// store) to completion off the hot path (spec §7.2). Launched as a detached task,
+    /// store) to completion off the hot path (spec storage §4). Launched as a detached task,
     /// so the commit returns at quorum latency while every issued ask still closes its
-    /// `AskIssued`/`AskOutcome` bracket (no-silent-loss, §14). A late `Stored` is
+    /// `AskIssued`/`AskOutcome` bracket (no-silent-loss, §11). A late `Stored` is
     /// harmless (the slot already holds the record); a late `Fenced` cannot un-commit a
-    /// quorum-durable write (§8).
+    /// quorum-durable write (storage §5).
     fn drain<F>(&self, mut pending: FuturesUnordered<F>)
     where
         F: Future + Send + 'static,
@@ -1639,18 +1664,18 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 }
 
-/// The outcome of a quorum store/append (spec §7.2, §8, §11, §7.7).
+/// The outcome of a quorum store/append (spec storage §4, §5, §10, §7).
 enum QuorumOutcome {
     Committed,
     Fenced,
     Stale,
-    /// A replica's append bound refused the moved key range (§7.7): the shard is
+    /// A replica's append bound refused the moved key range (storage §7): the shard is
     /// sealed for a split/merge this leader has not yet applied.
     Sealed,
     Unavailable,
 }
 
-/// Merge a quorum of recovery reads by **highest-term-per-slot** (spec §8): for each
+/// Merge a quorum of recovery reads by **highest-term-per-slot** (spec storage §5): for each
 /// `Seq` slot, keep the record carried under the highest term any replica holds.
 /// Returns the contiguous record prefix (ascending bytes), its head, the best
 /// snapshot, and whether any kept record's term is below `our_term` (so a write-back
@@ -1682,7 +1707,7 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
         }
     }
     // The head base is the best snapshot's seq: records it subsumes were compacted
-    // away on the replicas that hold it (§9), so the contiguous scan starts just
+    // away on the replicas that hold it (storage §8), so the contiguous scan starts just
     // above it. A snapshot is only ever taken at a committed head, so using its seq
     // as the base can never drop a committed record (E14).
     let base = snapshot.as_ref().map_or(0, |(s, _, _)| s.value());
@@ -1701,11 +1726,11 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     (records, head, snapshot, any_below)
 }
 
-/// The clustered `Quorum` journal (spec §7, §7.4): the shard's replicator
+/// The clustered `Quorum` journal (spec storage §1, §2.2): the shard's replicator
 /// handle *is* the [`EntityJournal`], no layer relays between them, because
 /// the composition (election + replicator) already happened in
 /// `QuorumReplicator::for_shard`. An entity write is an independent per-entity
-/// quorum append (§7.2), not an entry in a shared shard log, so a write-heavy
+/// quorum append (storage §4), not an entry in a shared shard log, so a write-heavy
 /// entity never queues behind its shard-mates. On `Arc` because a journal
 /// clones per activation, sharing one replicator.
 impl<R: RaftConsensus> EntityJournal for Arc<QuorumReplicator<R>> {
@@ -1723,7 +1748,7 @@ impl<R: RaftConsensus> EntityJournal for Arc<QuorumReplicator<R>> {
     }
 
     async fn head(&self, entity: &EntityName) -> Result<Seq, EntityJournalError> {
-        // On the `Quorum` tier `head` *is* the rehydration barrier (§8, §9): it
+        // On the `Quorum` tier `head` *is* the rehydration barrier (storage §5, §8): it
         // recovers the entity's head by read-repair over a read quorum, writing the
         // merged tail back under its own term, so a fresh leader never folds onto a
         // stale head.
@@ -1868,7 +1893,7 @@ mod tests {
         );
     }
 
-    // --- The migration barrier (§7.7, E14) ----------------------------------------
+    // --- The migration barrier (storage §6, E14) ----------------------------------------
 
     /// A consensus that always leads: placement is not what these tests exercise.
     #[derive(Clone)]
@@ -1919,17 +1944,24 @@ mod tests {
     /// case a pass that tolerated an unconfirmed read quorum would sail through.
     struct PeersWithSlowReads {
         unreadable: Vec<NodeId>,
+        /// Each listed peer's answer to a record store; an unlisted peer stores.
+        record_replies: Vec<(NodeId, Result<StoreAck, actor_core::CallError>)>,
     }
 
     impl ReplicaTransport for PeersWithSlowReads {
         fn store_record(
             &self,
-            _: NodeId,
+            node: NodeId,
             msg: StoreRecord,
             _: Duration,
         ) -> actor_core::BoxFuture<'static, Result<StoreAck, actor_core::CallError>> {
             let head = Seq::new(msg.after.value() + msg.records.len() as u64);
-            Box::pin(async move { Ok(StoreAck::Stored(head)) })
+            let reply = self
+                .record_replies
+                .iter()
+                .find(|(peer, _)| *peer == node)
+                .map_or(Ok(StoreAck::Stored(head)), |(_, reply)| reply.clone());
+            Box::pin(async move { reply })
         }
         fn prepare(
             &self,
@@ -2032,7 +2064,10 @@ mod tests {
             0,
             allocation,
             stored_store(Arc::new(crate::blocking::InlineIo)),
-            Arc::new(PeersWithSlowReads { unreadable }),
+            Arc::new(PeersWithSlowReads {
+                unreadable,
+                record_replies: Vec::new(),
+            }),
             Deadlines {
                 quorum: Duration::from_secs(1),
                 recover: Duration::from_secs(1),
@@ -2042,7 +2077,7 @@ mod tests {
 
     #[test]
     fn a_migration_pass_short_of_the_joint_read_quorum_fails_instead_of_completing() {
-        // §7.6 step 3 / E14: `Migrated` may be proposed only after a complete pass,
+        // storage §6 step 3 / E14: `Migrated` may be proposed only after a complete pass,
         // and a pass is complete only if the joint write-back ran, which it does
         // only under a confirmed joint read quorum. With the target majority (d, e)
         // not answering the recovery read, the read-your-leader fallback would
@@ -2071,5 +2106,86 @@ mod tests {
             outcome.is_ok(),
             "a pass with the joint read quorum confirmed failed: {outcome:?}",
         );
+    }
+
+    // --- What a refused append reports (§2.2, storage §5) ----------------------------------
+
+    /// A shard {a, b, c} led by `a`, whose own store fences every write (a newer
+    /// leader reached it), and whose peers answer a record store as listed.
+    fn deposed_replicator(
+        record_replies: Vec<(NodeId, Result<StoreAck, actor_core::CallError>)>,
+    ) -> Arc<QuorumReplicator<AlwaysLeading>> {
+        let [a, b, c] = [1, 2, 3].map(NodeId::new);
+        let allocation = Arc::new(Mutex::new(Allocation {
+            range: crate::system::KeyRange {
+                start: 0,
+                end: u64::MAX,
+            },
+            current: vec![a, b, c],
+            in_flight: InFlight::Idle,
+        }));
+        QuorumReplicator::for_shard(
+            AlwaysLeading(a),
+            GroupId(7),
+            0,
+            allocation,
+            NodeStore::new(
+                Arc::new(StaticEntityStore::fenced()),
+                Arc::new(crate::blocking::InlineIo),
+            ),
+            Arc::new(PeersWithSlowReads {
+                unreadable: Vec::new(),
+                record_replies,
+            }),
+            Deadlines {
+                quorum: Duration::from_secs(1),
+                recover: Duration::from_secs(1),
+            },
+        )
+    }
+
+    fn append_one(replicator: &QuorumReplicator<AlwaysLeading>) -> AppendOutcome {
+        replicator
+            .append(&EntityName::new("t", "k"), Seq::ZERO, vec![vec![7]])
+            .now_or_never()
+            .expect("every replica answers immediately")
+    }
+
+    #[test]
+    fn a_fenced_append_no_peer_holds_is_not_leader() {
+        // Every replica refused: nothing anywhere can be adopted by a recovery, so the
+        // command provably did not commit and `NotLeader` (which a caller re-issues)
+        // is the truth.
+        let fenced = Ok(StoreAck::Fenced(Term::new(9)));
+        let replicator = deposed_replicator(vec![
+            (NodeId::new(2), fenced.clone()),
+            (NodeId::new(3), fenced),
+        ]);
+        let outcome = append_one(&replicator);
+        assert!(
+            matches!(outcome, AppendOutcome::NotLeader(_)),
+            "an append every replica refused must be NotLeader: {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn a_fenced_append_a_peer_may_hold_is_ambiguous() {
+        // One peer fenced, the other stored (or did not answer): no quorum, yet a
+        // lower-term copy may sit on that peer, and a new leader's recovery keeps the
+        // highest term present at a slot, so it can adopt the record. `NotLeader` would
+        // let the caller re-issue a command that may commit: it must be `Unavailable`.
+        let fenced = (NodeId::new(2), Ok(StoreAck::Fenced(Term::new(9))));
+        for other in [
+            Ok(StoreAck::Stored(Seq::new(1))),
+            Err(actor_core::CallError::Timeout),
+        ] {
+            let replicator =
+                deposed_replicator(vec![fenced.clone(), (NodeId::new(3), other.clone())]);
+            let outcome = append_one(&replicator);
+            assert!(
+                matches!(outcome, AppendOutcome::Unavailable(_)),
+                "a fenced append with peer {other:?} must be Unavailable: {outcome:?}",
+            );
+        }
     }
 }

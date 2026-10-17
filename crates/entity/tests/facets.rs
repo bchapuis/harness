@@ -1,4 +1,4 @@
-//! End-to-end facet tests on the `Local` tier (spec §7.12, §7.13): tagged
+//! End-to-end facet tests on the `Local` tier (spec facets §3, §4.2): tagged
 //! records interleaving with events in one atomic batch, read-your-staged-writes
 //! within a command, the composite snapshot, the hibernation round-trip, the
 //! transparent kv spill, and the host-unioned blob sweep.
@@ -55,7 +55,7 @@ impl Entity for Prefs {
 }
 
 /// Stage `key = value` in the kv facet AND emit a facet-0 event, then read the
-/// staged value back within the same handler (read-your-staged-writes, §7.12).
+/// staged value back within the same handler (read-your-staged-writes, facets §3).
 /// Replies with the echoed value and the post-command write count: one command,
 /// two facets, one atomic batch (E19).
 #[derive(Clone, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ impl EntityHandler<Set> for Prefs {
     }
 }
 
-/// Read a key, no events, no staged ops, commits nothing (§7.5).
+/// Read a key, no events, no staged ops, commits nothing (§6).
 #[derive(Clone, Serialize, Deserialize)]
 struct GetKey(String);
 impl Message for GetKey {
@@ -122,7 +122,7 @@ impl EntityHandler<DelKey> for Prefs {
     }
 }
 
-/// The keys under a prefix, through the overlay (§7.13).
+/// The keys under a prefix, through the overlay (facets §4.2).
 #[derive(Clone, Serialize, Deserialize)]
 struct Keys(String);
 impl Message for Keys {
@@ -178,7 +178,7 @@ impl EntityHandler<HasBlob> for Prefs {
 }
 
 /// Sweep with an empty application root set: everything the sweep retains comes
-/// from the host-unioned facet roots (§7.12); a live spilled value must
+/// from the host-unioned facet roots (facets §3); a live spilled value must
 /// survive, a deleted one must not.
 #[derive(Clone, Serialize, Deserialize)]
 struct SweepNow;
@@ -198,7 +198,7 @@ impl EntityHandler<SweepNow> for Prefs {
     }
 }
 
-// --- An entity composing BOTH facets: events + kv + ws, one boundary (§7.12) ----
+// --- An entity composing BOTH facets: events + kv + ws, one boundary (facets §3) ----
 
 #[derive(Default)]
 struct Project;
@@ -220,7 +220,7 @@ impl Entity for Project {
 /// One command, three facets, one atomic batch (E19): write the document into
 /// the workspace directory and capture it, point `last` at it in the kv facet,
 /// and count the save as a facet-0 event; one entity, one consistency
-/// boundary (§7.11).
+/// boundary (facets §4.1).
 #[derive(Clone, Serialize, Deserialize)]
 struct SaveDoc {
     path: String,
@@ -381,11 +381,11 @@ fn kv_and_events_commit_together_and_survive_hibernation() {
     });
 
     let entity = prefs.entity("prefs/0");
-    let big = vec![7u8; INLINE_MAX + 1]; // spills to the blob area (§7.13)
+    let big = vec![7u8; INLINE_MAX + 1]; // spills to the blob area (facets §4.2)
     let big_for_task = big.clone();
     sim.block_on(async move {
         // Each Set is one atomic batch: one kv record + one event (E19), with
-        // read-your-staged-writes inside the handler (§7.12).
+        // read-your-staged-writes inside the handler (facets §3).
         let (echoed, writes) = entity
             .ask(Set {
                 key: "theme".into(),
@@ -439,7 +439,7 @@ fn kv_and_events_commit_together_and_survive_hibernation() {
         );
 
         // The live spilled id survives a sweep with NO application roots: the
-        // handle unions the facet roots (§7.12).
+        // handle unions the facet roots (facets §3).
         reread.ask(SweepNow).await.expect("sweep");
         assert!(
             reread.ask(HasBlob(big_id)).await.expect("has"),

@@ -1,4 +1,4 @@
-//! Where a store's blocking file I/O runs (spec §7.4, §14).
+//! Where a store's blocking file I/O runs (spec storage §2.2, entity §11).
 //!
 //! An [`EntityStore`] call is synchronous by contract: when it
 //! returns, its outcome is settled, and for the file-backed store that means the
@@ -9,7 +9,7 @@
 //! append. That worker is also driving Raft heartbeats, election timers, and every
 //! other shard's quorum wait, so one slow device does not merely slow one write: it
 //! stalls heartbeats past the election timeout, the shard elects a new leader, the
-//! entities on the old one step down (§6), and the next access rehydrates them; a
+//! entities on the old one step down (§5), and the next access rehydrates them; a
 //! cluster-wide event produced by a local hiccup, and one that makes more I/O while
 //! the disk is already the bottleneck.
 //!
@@ -51,11 +51,11 @@
 //! a write cannot be issued on the calling thread by forgetting to wrap it, and a
 //! reader checks the policy in one place instead of at every call site.
 //!
-//! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
+//! **Why a seam and not just a thread pool.** The deterministic simulator (§11) runs
 //! the *production* store: `raft_journal.rs` cold-restarts a real
 //! [`FileEntityStore`](crate::file_store::FileEntityStore) under virtual time, and a real thread
 //! pool there would make a run's outcome depend on OS scheduling, breaking the
-//! seed-reproducibility the whole test strategy rests on (actor §18.1). [`InlineIo`]
+//! seed-reproducibility the whole test strategy rests on (actor §2.12.2). [`InlineIo`]
 //! is therefore the default and runs the job on the calling thread, reproducing
 //! today's behaviour exactly; a deployment opts into [`ThreadPoolIo`].
 
@@ -77,7 +77,7 @@ use crate::store::WriteKind;
 /// A unit of blocking work: one synchronous store call.
 pub(crate) type Job = Box<dyn FnOnce() + Send + 'static>;
 
-/// Where the blocking file I/O of a durable store runs.
+/// Where the blocking file I/O of a durable store runs (storage §2.5).
 ///
 /// The contract is only about *threads*, never about order: submitting does not
 /// serialize anything, and two jobs may run concurrently. Ordering between store
@@ -121,7 +121,7 @@ where
     rx.await.expect("an accepted job always sends its value")
 }
 
-/// This node's durable store as the runtime calls it (spec §7.4): the [`EntityStore`]
+/// This node's durable store as the runtime calls it (spec storage §2.2): the [`EntityStore`]
 /// plug point paired with the [`BlockingIo`] its writes run on. Built once per hosted
 /// entity type at `entities()` time and cloned into every journal, replicator, shard
 /// map, and replica-store actor that type uses.
@@ -367,7 +367,7 @@ impl ThreadPoolIo {
     /// A pool of `threads` workers (at least one).
     pub fn new(threads: usize) -> ThreadPoolIo {
         let threads = threads.max(1);
-        // `async_channel` is the workspace's queue (actor §4.2 mailboxes use it) and is
+        // `async_channel` is the workspace's queue (actor §3.1 mailboxes use it) and is
         // multi-consumer, so each worker holds its own receiver and the first one free
         // takes the next job: the scheduling a device-bound queue wants, without a
         // shared dequeue lock in front of it.
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn inline_io_runs_the_job_before_the_call_returns() {
         // The property the simulation depends on: no thread, no scheduling, so a run
-        // is a pure function of its seed (§14). The job must have run by the time
+        // is a pure function of its seed (§11). The job must have run by the time
         // `submit` returns, not at some later poll.
         let io: Arc<dyn BlockingIo> = Arc::new(InlineIo);
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));

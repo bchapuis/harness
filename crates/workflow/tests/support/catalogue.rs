@@ -1,4 +1,4 @@
-//! The machine-readable W-catalogue, W1–W7 (workflow spec §9).
+//! The machine-readable W-catalogue, W1–W7 (workflow spec §8).
 //!
 //! The workflow analogue of the core, entity, and agent catalogue: one table
 //! linking each invariant to the code that verifies it, guarded by the drift test
@@ -14,7 +14,7 @@
 use actor_simulation::CatalogueEntry;
 use actor_simulation::Verify;
 
-/// The workflow invariant catalogue, W1–W7 (workflow spec §9).
+/// The workflow invariant catalogue, W1–W7 (workflow spec §8).
 pub fn w_catalogue() -> &'static [CatalogueEntry] {
     W_CATALOGUE
 }
@@ -58,7 +58,7 @@ const W_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 5,
-        spec: "workflow §4.5, §3.1",
+        spec: "workflow §4.4, §3.1",
         property: "Straggler rejection: an outcome whose key is absent from the current desired set is discarded, never settled, and writes no record; exact because keys are unique over the journal",
         verify: &[
             Verify::Checker("workflow-cycle"),
@@ -67,7 +67,7 @@ const W_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 6,
-        spec: "workflow §4.4",
+        spec: "workflow §4.3",
         property: "Orphan resolution: after rehydration every member of the first tick's desired set is re-launched or settled Interrupted per its declared policy; none is dropped and none is resolved twice",
         verify: &[
             Verify::SimTest("conformance_orphan.rs, workflow_swarm.rs"),

@@ -5,7 +5,10 @@
 //! it: a naming convention (the principal id rides in an entity's key), a capability
 //! boundary at each consumer's authenticating edge, and an application-level
 //! **directory** that records which entities a principal owns. This crate is that
-//! directory.
+//! directory. Its seam is the [`Directory`] entity's commands ([`Record`],
+//! [`Forget`], [`Clear`], [`Get`], [`List`], [`ListByType`]); the agent
+//! runtime's HTTP edge is its consumer, and `docs/edge-spec.md` specifies how
+//! the edge records and lists ownership.
 //!
 //! "Own" means more than "address": it means **enumerate** ("list my entities") and
 //! **bulk-forget** ("drop my whole index when I leave"). A [`Directory`] is one
@@ -19,10 +22,10 @@
 //! chose, when it recorded the entity, caller-defined attributes. It MUST NOT mirror
 //! the target entity's live state (its balance, its status): that would be a second
 //! source of truth that drifts the moment the entity changes, reintroducing the
-//! cross-entity consistency entity keeps out (each entity is its own boundary, §2.2).
+//! cross-entity consistency entity keeps out (each entity is its own boundary, §1.1).
 //!
 //! Every field is **caller-supplied**, because the fold ([`Entity::apply`]) must be
-//! pure and deterministic, no clock, no entropy (entity §4.1). So `created_at` is
+//! pure and deterministic, no clock, no entropy (entity §3.1). So `created_at` is
 //! whatever epoch the caller passes at [`Record`] time; the directory never reads
 //! the clock.
 //!
@@ -64,7 +67,7 @@ use serde::Serialize;
 
 /// The listing metadata of one owned entity: the attributes a listing page renders.
 ///
-/// Every field is caller-supplied (the fold reads no clock, entity §4.1) and
+/// Every field is caller-supplied (the fold reads no clock, entity §3.1) and
 /// belongs to the directory, never a copy of the target entity's live state
 /// (see the crate docs).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +114,7 @@ pub struct Ownership {
     entries: BTreeMap<EntityName, Meta>,
 }
 
-/// The directory's journal record: the unit of durable change (entity §4.1).
+/// The directory's journal record: the unit of durable change (entity §3.1).
 ///
 /// `apply` is the pure fold over these; it never performs I/O or reads the clock,
 /// so live commit and replay agree (E2).
@@ -128,7 +131,7 @@ pub enum Change {
 /// A principal's ownership index: one entity per principal, keyed by principal id.
 ///
 /// Generic over the hosting system so it runs on either durability tier (the
-/// single-node `Local` tier and the clustered `Quorum` tier, entity §7.4) and on
+/// single-node `Local` tier and the clustered `Quorum` tier, storage §2.2) and on
 /// any [`EntitySystem`]. The type carries no state of its own: the activation's
 /// state is the folded [`Ownership`], rebuilt from the journal (entity §1).
 pub struct Directory<S>(PhantomData<fn() -> S>);
@@ -173,7 +176,7 @@ impl<S: EntitySystem> Entity for Directory<S> {
 
 /// Record that the principal owns `name` with `meta`, or update the metadata of a
 /// name already owned. Idempotent: recording a name already owned with identical
-/// metadata commits nothing and replies [`Recorded::Unchanged`] (entity §7.5).
+/// metadata commits nothing and replies [`Recorded::Unchanged`] (entity §6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub name: EntityName,
@@ -220,7 +223,7 @@ impl Message for Get {
 
 /// Enumerate the entries the principal owns: name and metadata, enough to render a
 /// listing without touching each entity. Emits no events; served locally from the
-/// activation (entity §7.5).
+/// activation (entity §6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct List;
 impl Message for List {

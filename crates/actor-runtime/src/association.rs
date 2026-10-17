@@ -1,4 +1,4 @@
-//! The transport's protocol decisions, socket-free (spec §9.3): the runtime
+//! The transport's protocol decisions, socket-free (spec §6.3): the runtime
 //! **address book** and the per-peer **association slots**.
 //!
 //! `TcpTransport` interleaves two different things: sockets (dial, handshake,
@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 
 use actor_core::NodeId;
 
-/// The runtime address book (spec §9.3): who this node believes lives where.
+/// The runtime address book (spec §6.3): who this node believes lives where.
 /// Seeded from the configured dial map, then grown as handshakes and endpoint
 /// gossip reveal more peers. One rule guards it: claims about **this node**
 /// are ignored; our own advertised address is authoritative, and neither a
@@ -169,7 +169,7 @@ impl<A: Association> Slots<A> {
         false
     }
 
-    /// Drop every slot (shutdown, spec §9.3).
+    /// Drop every slot (shutdown, spec §6.3).
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
     }

@@ -1,25 +1,27 @@
-//! Deployment configuration for an entity type (spec Appendix A).
+//! Deployment configuration for an entity type: the per-type settings chosen when
+//! the type is hosted.
 
 use std::time::Duration;
 
 use crate::store::EntityStoreFactory;
 
-/// Per-entity-type runtime configuration (spec Appendix A).
+/// Per-entity-type runtime configuration, given when the type is hosted
+/// ([`EntityNode::entities`](crate::cluster::EntityNode::entities)).
 #[derive(Clone)]
 pub struct EntityConfig {
     /// The number of shards this entity type's namespace is **initially**
-    /// partitioned into (§7.1): `entities()` founds this many equal key ranges.
+    /// partitioned into (storage §3.1): `entities()` founds this many equal key ranges.
     /// Each shard is one consensus group; a name maps to a shard by a stable
     /// hash onto the range partition. The partition then grows and shrinks with
-    /// load through split/merge (§7.7).
+    /// load through split/merge (storage §7).
     pub shards: usize,
-    /// Replicas per shard (§7.1): the allocator bounds each shard's voter set to
+    /// Replicas per shard (storage §3.1): the allocator bounds each shard's voter set to
     /// this many nodes by rendezvous hashing, and the reconcile loop reconfigures
-    /// the group as membership changes (§7.6). **No-op on the `Local` tier**
+    /// the group as membership changes (storage §6). **No-op on the `Local` tier**
     /// (one local store).
     pub replication_factor: usize,
     /// Auto-split a shard once its durable footprint grows past this many bytes
-    /// (§7.7): the shard leader measures its local store and requests a split,
+    /// (storage §7): the shard leader measures its local store and requests a split,
     /// which divides the shard's key range in two. **`0` (the default) disables
     /// the size trigger**, since a good threshold depends on how large a type's
     /// entities are individually. Split and merge remain available explicitly
@@ -27,14 +29,14 @@ pub struct EntityConfig {
     /// [`Entities::merge_shards`](crate::Entities::merge_shards)). **No-op on the
     /// `Local` tier** (split/merge is `Quorum` elasticity).
     pub shard_target_bytes: u64,
-    /// Hibernate an entity after this idle interval (§10).
+    /// Hibernate an entity after this idle interval (§7).
     ///
     /// The mechanism comes from Durable Objects (DO §5); the *number* does not. DO
     /// evicts after ten seconds because it multiplexes tenants onto shared hosts and
     /// prices resident memory. On a dedicated node, eviction reclaims kilobytes
     /// against a machine sized in the hundreds of gigabytes, and costs a quorum
     /// head-recovery round trip on the next touch, plus a snapshot on the way out if
-    /// enough has accumulated (§9). Memory is abundant here and the round trip is
+    /// enough has accumulated (storage §8). Memory is abundant here and the round trip is
     /// scarce, so the window is long enough that an entity in intermittent use stays
     /// resident between touches (`docs/hardware-envelope.md` §3.1, §3.2).
     ///
@@ -42,33 +44,35 @@ pub struct EntityConfig {
     /// lengthen it for one whose entities are touched in bursts minutes apart: an
     /// agent session between turns is exactly that shape.
     pub idle_after: Duration,
-    /// Persist a snapshot every this many committed events (§9). `0` disables
+    /// Persist a snapshot every this many committed events (storage §8). `0` disables
     /// snapshotting (every activation replays the full log).
     ///
     /// The trigger for **both** snapshot paths, the write path and idle hibernation
-    /// (§10), so this one number decides how often an entity pays what a snapshot
-    /// costs, and on the `Quorum` tier that cost lands on every replica (§7.3),
+    /// (§7), so this one number decides how often an entity pays what a snapshot
+    /// costs, and on the `Quorum` tier that cost lands on every replica (storage §2.1),
     /// billed R−1 times to the uplink (`docs/hardware-envelope.md` §3.9). It is no
     /// longer O(state): past 64 KiB facet 0's state travels as content-defined
-    /// chunks and only the chunks that changed are sent (§9), so a snapshot is
+    /// chunks and only the chunks that changed are sent (storage §8), so a snapshot is
     /// roughly O(delta) plus a manifest. What it buys is a shorter replay, and
-    /// replay reads are **local** (§9). The default stays high, but the penalty for
-    /// lowering it is far smaller for an entity whose state grows by accretion.
+    /// replay reads are **local** (storage §8). The default stays high because chunking
+    /// lowers bytes, not round trips: every snapshot is still a round of blob puts plus
+    /// a record. The penalty for lowering it is far smaller for an entity whose state
+    /// grows by accretion.
     ///
     /// The counter-pressure is failover, not steady state: a new leader recovers the
-    /// records above the last snapshot from a quorum (§8), so a larger gap means a
+    /// records above the last snapshot from a quorum (storage §5), so a larger gap means a
     /// larger one-off recovery read per entity, once per leadership change against a
     /// broadcast every threshold. A type whose events are large relative to its state
     /// should lower it.
     pub snapshot_every: u64,
     /// How each node obtains its durable [`EntityStore`](crate::store::EntityStore)
-    /// (spec §7.4). `None` (the default) gives every node a fresh in-memory store,
+    /// (spec storage §2.2). `None` (the default) gives every node a fresh in-memory store,
     /// lost on restart. A deployment that must survive a full-cluster cold restart
     /// supplies a factory that caches per node and outlives a restart: the entity
-    /// analogue of the Raft WAL storage seam (actor §9.4.3).
+    /// analogue of the Raft WAL storage seam (actor §6.4.3).
     pub entity_store: Option<EntityStoreFactory>,
     /// How this deployment groups nodes into failure domains: racks, zones,
-    /// whatever fails together (spec §7.1). `None` (the default) treats every node as
+    /// whatever fails together (spec storage §3.1). `None` (the default) treats every node as
     /// its own domain: replicas spread across the cluster but nothing stops all R of a
     /// shard landing in one zone, so a single zone loss can take shards below quorum
     /// while the cluster looks healthy.
@@ -78,7 +82,7 @@ pub struct EntityConfig {
     /// [`FailureDomains`](crate::system::FailureDomains).
     pub failure_domains: Option<crate::system::FailureDomains>,
     /// How long a per-entity quorum append, snapshot, or blob put waits before
-    /// reporting `Unavailable` (spec §11).
+    /// reporting `Unavailable` (spec storage §10).
     ///
     /// Configurable because the right value is a property of the deployment's
     /// network and storage, not of the code, and the spread is two orders of
@@ -89,18 +93,18 @@ pub struct EntityConfig {
     /// numbers it is derived from. Set it well above the p99.9 commit latency you
     /// actually observe, never against a median (hw §3.7). The cost of setting it too
     /// low is not a slow write but a *false* one: every timeout is ambiguous (the
-    /// append MAY still commit later, §7.2), so it steps the activation down and
+    /// append MAY still commit later, storage §4), so it steps the activation down and
     /// forces a full rehydration, turning transient slowness into activation churn.
     pub quorum_timeout: Duration,
     /// How long a recovery read quorum waits before falling back to local state
-    /// (§7.5, read-your-leader) or reporting `Unavailable` (spec §8, §11).
+    /// (§6, read-your-leader) or reporting `Unavailable` (spec storage §5, §10).
     ///
     /// Kept separate from [`quorum_timeout`](EntityConfig::quorum_timeout) because
     /// the two fail differently: a slow append is a stalled write, while a slow
     /// recovery is an entity that cannot activate at all, and after a failover every
     /// entity on the shard pays it at once.
     pub recover_timeout: Duration,
-    /// How many resolved host handles a node caches per entity type (spec §5.4).
+    /// How many resolved host handles a node caches per entity type (spec §4.4).
     ///
     /// The cache is what keeps a repeat call off the serial gateway, so it wants to
     /// be large; it is also per *name*, and a long-lived client (the gateway fronts
@@ -112,8 +116,8 @@ pub struct EntityConfig {
     /// entries while an older generation ages out.
     pub host_cache_capacity: usize,
     /// The node-local scratch directory every **physical facet** materializes
-    /// under (spec §7.12): the workspace tree (§7.11), the SQL database files
-    /// (§7.14) and the disk image (§7.15) live here, keyed by node and entity.
+    /// under (spec facets §3): the workspace tree (facets §4.1), the SQL database files
+    /// (facets §4.3) and the disk image (facets §4.4) live here, keyed by node and entity.
     /// Rebuildable caches only, never a source of truth (§1); safe to wipe between
     /// runs. `None` (the default) uses the system temp directory.
     pub data_dir: Option<std::path::PathBuf>,

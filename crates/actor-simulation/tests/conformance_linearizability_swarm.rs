@@ -1,5 +1,5 @@
 //! Conformance: linearizability of a **remote** register under the cluster
-//! swarm (spec §18.4).
+//! swarm (docs/simulation-testing.md).
 //!
 //! The single-node scenarios in `conformance_linearizability.rs` prove the
 //! checker has teeth and that a local register is linearizable. This is the

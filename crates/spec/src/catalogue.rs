@@ -27,9 +27,9 @@
 //!
 //! # The two shapes
 //!
-//! Seven catalogues are markdown tables with `Invariant` and `Defined in`
-//! columns. The core catalogue (actor §18.5) is a numbered list instead
-//! ([`Shape`]), for eight sites in all.
+//! Six catalogues are markdown tables with `Invariant` and `Defined in`
+//! columns. The core catalogue (actor §10) is a numbered list instead
+//! ([`Shape`]), for seven sites in all.
 
 use std::fmt;
 use std::io;
@@ -73,42 +73,35 @@ pub const CATALOGUES: &[CatalogueSite] = &[
     CatalogueSite {
         id: "core",
         doc: "actor",
-        section: "18.5",
+        section: "10",
         label: "",
         shape: Shape::NumberedList,
     },
     CatalogueSite {
         id: "utilities",
         doc: "utilities",
-        section: "6",
+        section: "4",
         label: "U",
-        shape: Shape::Table,
-    },
-    CatalogueSite {
-        id: "wal",
-        doc: "wal",
-        section: "7",
-        label: "L",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "entity",
         doc: "entity",
-        section: "15",
+        section: "12",
         label: "E",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "workflow",
         doc: "workflow",
-        section: "9",
+        section: "8",
         label: "W",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "agent",
         doc: "agent",
-        section: "11",
+        section: "10",
         label: "A",
         shape: Shape::Table,
     },
@@ -122,7 +115,7 @@ pub const CATALOGUES: &[CatalogueSite] = &[
     CatalogueSite {
         id: "machine",
         doc: "machine",
-        section: "7",
+        section: "6",
         label: "M",
         shape: Shape::Table,
     },

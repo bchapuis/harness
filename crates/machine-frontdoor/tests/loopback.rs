@@ -1,10 +1,12 @@
 //! The front door end to end over a loopback: an in-process russh client
 //! authenticates against a fake [`MachineAuthority`], and an exec channel
 //! bridges to a fake guest agent through an in-memory [`ChannelBackend`]
-//! (machine §5.1). Proves M4's auth decision (an authorized key attaches, an
-//! unauthorized one is rejected) and the channel bridge (guest output and
-//! exit status reach the client). No VM, no vsock, no SSH transport beyond a
-//! `tokio::io::duplex` pair.
+//! (machine §2.5). Proves M4's auth decision (an authorized key attaches, an
+//! unauthorized one is rejected), its attribution (the journaled principal is
+//! the authenticating key's, not the client's word), the refusal a client is
+//! told about (an authority's reason, distinct from a key rejection), and the
+//! channel bridge (guest output and exit status reach the client). No VM, no
+//! vsock, no SSH transport beyond a `tokio::io::duplex` pair.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -51,10 +53,13 @@ Gikc25+5DDH+WJzTl+pkAAAACXdyb25nLWtleQECAwQ=
 ";
 
 /// A fake authority: one journaled key, a fixed host key, an attachment
-/// counter recording attach/detach so the test can assert the journal.
+/// counter recording attach/detach so the test can assert the journal, and an
+/// optional refusal every attach answers with (a door that does not lead the
+/// machine).
 struct FakeAuthority {
     authorized: PublicKey,
     host_key: PrivateKey,
+    refusal: Option<String>,
     attaches: Mutex<Vec<String>>,
     detaches: Mutex<Vec<u64>>,
 }
@@ -73,6 +78,9 @@ impl MachineAuthority for FakeAuthority {
     }
 
     async fn attach(&self, _machine: &EntityName, principal: &str) -> Result<u64, FrontDoorError> {
+        if let Some(refusal) = &self.refusal {
+            return Err(FrontDoorError(refusal.clone()));
+        }
         let mut attaches = self.attaches.lock().unwrap();
         attaches.push(principal.to_string());
         Ok(attaches.len() as u64)
@@ -141,15 +149,37 @@ fn authority() -> Arc<FakeAuthority> {
     Arc::new(FakeAuthority {
         authorized,
         host_key,
+        refusal: None,
         attaches: Mutex::new(Vec::new()),
         detaches: Mutex::new(Vec::new()),
     })
 }
 
+/// An authority that refuses every attach with `reason`, as a door that does
+/// not lead the machine does.
+fn refusing_authority(reason: &str) -> Arc<FakeAuthority> {
+    let authority = Arc::into_inner(authority()).expect("sole owner");
+    Arc::new(FakeAuthority {
+        refusal: Some(reason.to_string()),
+        ..authority
+    })
+}
+
+/// The SHA-256 fingerprint the door journals for `key` (OpenSSH's own form).
+fn fingerprint(key: &str) -> String {
+    PrivateKey::from_openssh(key)
+        .expect("parse key")
+        .public_key()
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string()
+}
+
 /// A client handler that pins the server's host key (proving the front door
-/// presents the machine's journaled host key at KEX).
+/// presents the machine's journaled host key at KEX) and records the reason
+/// of a disconnect the server sends.
 struct Client {
     server_key: Arc<Mutex<Option<PublicKey>>>,
+    disconnect: Arc<Mutex<Option<String>>>,
 }
 
 impl russh::client::Handler for Client {
@@ -159,6 +189,55 @@ impl russh::client::Handler for Client {
         *self.server_key.lock().unwrap() = Some(key.clone());
         Ok(true)
     }
+
+    async fn disconnected(
+        &mut self,
+        reason: russh::client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        match reason {
+            russh::client::DisconnectReason::ReceivedDisconnect(info) => {
+                *self.disconnect.lock().unwrap() = Some(info.message);
+                Ok(())
+            }
+            russh::client::DisconnectReason::Error(e) => Err(e),
+        }
+    }
+}
+
+/// Connect over `client_side` and attempt publickey authentication as `user`
+/// with `key`. Returns the client handle (for a caller that goes on to open a
+/// channel), whether authentication succeeded, the host key the server
+/// presented, and the slot a server-sent disconnect reason lands in.
+async fn connect_and_authenticate(
+    client_side: tokio::io::DuplexStream,
+    user: &str,
+    key: PrivateKey,
+) -> (
+    russh::client::Handle<Client>,
+    bool,
+    Option<PublicKey>,
+    Arc<Mutex<Option<String>>>,
+) {
+    let server_key = Arc::new(Mutex::new(None));
+    let disconnect = Arc::new(Mutex::new(None));
+    let config = Arc::new(russh::client::Config::default());
+    let mut handle = russh::client::connect_stream(
+        config,
+        client_side,
+        Client {
+            server_key: Arc::clone(&server_key),
+            disconnect: Arc::clone(&disconnect),
+        },
+    )
+    .await
+    .expect("client handshake");
+
+    let auth = handle
+        .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
+        .await
+        .expect("auth call");
+    let host_key = server_key.lock().unwrap().clone();
+    (handle, auth.success(), host_key, disconnect)
 }
 
 /// Drive one client session: connect over `client_side`, authenticate with
@@ -168,24 +247,8 @@ async fn run_client(
     client_side: tokio::io::DuplexStream,
     key: PrivateKey,
 ) -> (bool, String, Option<u32>, Option<PublicKey>) {
-    let server_key = Arc::new(Mutex::new(None));
-    let config = Arc::new(russh::client::Config::default());
-    let mut handle = russh::client::connect_stream(
-        config,
-        client_side,
-        Client {
-            server_key: Arc::clone(&server_key),
-        },
-    )
-    .await
-    .expect("client handshake");
-
-    let auth = handle
-        .authenticate_publickey("alice", PrivateKeyWithHashAlg::new(Arc::new(key), None))
-        .await
-        .expect("auth call");
-    let host_key = server_key.lock().unwrap().clone();
-    if !auth.success() {
+    let (handle, authed, host_key, _) = connect_and_authenticate(client_side, "alice", key).await;
+    if !authed {
         return (false, String::new(), None, host_key);
     }
 
@@ -233,7 +296,7 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
     );
     // The presented host key is the seed-expanded machine identity: the same
     // journaled 32 bytes always yield this key, so the client's `known_hosts`
-    // pin survives hibernation, migration, and failover (machine §5.1).
+    // pin survives hibernation, migration, and failover (machine §2.5).
     let presented = host_key.expect("the front door must present a host key at KEX");
     assert_eq!(
         presented.key_data(),
@@ -247,7 +310,11 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
     // The attachment was journaled with its principal, and detach fired on
     // close (M4).
     let _ = server.await;
-    assert_eq!(&*authority.attaches.lock().unwrap(), &["alice".to_string()]);
+    assert_eq!(
+        &*authority.attaches.lock().unwrap(),
+        &[format!("{} (alice)", fingerprint(AUTHORIZED_KEY))],
+        "the principal is the authenticating key's fingerprint, the user name beside it"
+    );
     assert_eq!(
         authority.detaches.lock().unwrap().len(),
         1,
@@ -316,5 +383,99 @@ async fn an_unauthorized_key_is_rejected() {
     assert!(
         authority.attaches.lock().unwrap().is_empty(),
         "a rejected key never attaches"
+    );
+}
+
+/// The journaled principal comes from the key that authenticated, never from
+/// the client's word alone: a client that calls itself `root` (or another
+/// user's name) is still journaled under the fingerprint of the key it proved
+/// it holds, so "who reached this machine" is answerable from the journal
+/// (M4).
+#[tokio::test]
+async fn the_journaled_principal_derives_from_the_authenticating_key() {
+    let authority = authority();
+    let machine = EntityName::new("machine", "dev-box");
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+    let server = tokio::spawn(serve_connection(
+        server_side,
+        machine,
+        Arc::clone(&authority),
+        Arc::new(FakeBackend),
+    ));
+
+    let key = PrivateKey::from_openssh(AUTHORIZED_KEY).expect("client key");
+    let (handle, authed, _, _) = connect_and_authenticate(client_side, "root", key).await;
+    assert!(
+        authed,
+        "the authorized key attaches whatever name it asserts"
+    );
+    drop(handle);
+    let _ = server.await;
+
+    let attaches = authority.attaches.lock().unwrap().clone();
+    assert_eq!(attaches.len(), 1, "one attachment journaled");
+    assert!(
+        attaches[0].starts_with(&fingerprint(AUTHORIZED_KEY)),
+        "the principal must lead with the authenticating key's fingerprint, got {:?}",
+        attaches[0]
+    );
+    assert!(
+        !attaches[0].starts_with("root"),
+        "the client-asserted name must not stand in for the key"
+    );
+}
+
+/// An authorized key refused for a reason the authority gives (this node does
+/// not lead the machine) is told that reason, as the SSH disconnect message,
+/// and nothing is journaled. A key the policy does not authorize gets the plain
+/// publickey failure and no reason, so the two refusals stay distinct.
+#[tokio::test]
+async fn an_attach_refusal_reaches_the_client_as_the_disconnect_reason() {
+    let reason = "machine/dev-box: led by node 2; reconnect to that node's door";
+    let refusing = refusing_authority(reason);
+    let machine = EntityName::new("machine", "dev-box");
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+    let server = tokio::spawn(serve_connection(
+        server_side,
+        machine.clone(),
+        Arc::clone(&refusing),
+        Arc::new(FakeBackend),
+    ));
+
+    let key = PrivateKey::from_openssh(AUTHORIZED_KEY).expect("client key");
+    let (handle, authed, _, disconnect) = connect_and_authenticate(client_side, "alice", key).await;
+    assert!(!authed, "a refused attach must not authenticate");
+    // The disconnect follows the rejection; the client session ends on it.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("the refusing door must end the connection, not leave it open");
+    let told = disconnect.lock().unwrap().clone();
+    assert!(
+        told.as_deref().is_some_and(|m| m.contains(reason)),
+        "the client must be told the authority's reason, got {told:?}"
+    );
+    let _ = server.await;
+    assert!(
+        refusing.attaches.lock().unwrap().is_empty(),
+        "a refused attach journals nothing"
+    );
+
+    // The key refusal, for contrast: rejected, and no reason sent.
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    let _server = tokio::spawn(serve_connection(
+        server_side,
+        machine,
+        authority(),
+        Arc::new(FakeBackend),
+    ));
+    let key = PrivateKey::from_openssh(UNAUTHORIZED_KEY).expect("client key");
+    let (_handle, authed, _, disconnect) =
+        connect_and_authenticate(client_side, "alice", key).await;
+    assert!(!authed, "an unauthorized key is rejected");
+    assert!(
+        disconnect.lock().unwrap().is_none(),
+        "a key refusal carries no authority reason"
     );
 }

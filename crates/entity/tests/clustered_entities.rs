@@ -1,14 +1,14 @@
 //! Cross-node entities on the clustered `Quorum` journal (per-entity quorum append),
-//! under deterministic simulation (entity §14).
+//! under deterministic simulation (entity §11).
 //!
 //! These exercise the cluster-only invariants the single-node tier cannot reach:
 //! an entity hosted on a 3-node cluster activates on its shard's Raft leader and is
 //! callable from *any* node with the same reply it would give locally (**E13**),
 //! committed state survives a shard-leader crash (**E14**, **E12**), a call that
-//! races a leadership change is absorbed by the bounded redirect (§5.4), and a
+//! races a leadership change is absorbed by the bounded redirect (§4.4), and a
 //! shard that loses its quorum pauses writes as `Unavailable` rather than forking
 //! (**E11**, CP). The agent runtime mirrors `tests/raft_journal.rs`; the entity is the
-//! Appendix A `Account`, hosted on the clustered `SimNode`.
+//! crate-root example's `Account`, hosted on the clustered `SimNode`.
 
 mod support;
 
@@ -55,7 +55,7 @@ const C: NodeId = NodeId::new(3);
 const D: NodeId = NodeId::new(4);
 const E: NodeId = NodeId::new(5);
 
-// --- The Appendix A account entity, hosted on the clustered system -------------
+// --- The crate-root example's account entity, on the clustered system ---------
 
 #[derive(Default)]
 struct Account;
@@ -71,7 +71,7 @@ enum Ledger {
     Withdrew(u64),
 }
 
-/// An application error: lives inside `M::Reply`, never in `EntityError` (§4.2).
+/// An application error: lives inside `M::Reply`, never in `EntityError` (§3.2).
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Overdraft;
 
@@ -188,7 +188,7 @@ fn config() -> EntityConfig {
 }
 
 /// Bring up a 3-node leader cluster and host `Account` on every node, so each
-/// creates the shards' Raft groups and registers its gateway (§5.3). Returns the
+/// creates the shards' Raft groups and registers its gateway (§4.3). Returns the
 /// network (for fault injection), the systems, and an `Entities` handle per node.
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Entities<Account>>) {
     let net = leader_net(sim);
@@ -226,7 +226,7 @@ fn entity_is_callable_from_a_non_leader_node() {
         let acct = entities.entity(key);
         let deposit = acct.ask(Deposit { cents: 1000 }).await;
         let withdraw = acct.ask(Withdraw { cents: 500 }).await;
-        // An overdraw commits nothing (§7.5): the reply is an application error.
+        // An overdraw commits nothing (§6): the reply is an application error.
         let overdraft = acct.ask(Withdraw { cents: 9999 }).await;
         let balance = acct.ask(ReadBalance).await;
         (deposit, withdraw, overdraft, balance)
@@ -292,10 +292,10 @@ fn committed_state_survives_shard_leader_failover() {
 
 #[test]
 fn a_gateway_read_on_a_fresh_leader_serves_the_committed_journal() {
-    // §7.5: after a failover, the new leader's local store may be missing
+    // §6: after a failover, the new leader's local store may be missing
     // committed records (it was not necessarily in every write quorum) and may
     // hold undecided ones. The non-activating read must recover its committed-head
-    // floor first (the §8 read-repair, which backfills the store), then return
+    // floor first (the storage §5 read-repair, which backfills the store), then return
     // exactly the committed sequence: nothing omitted, nothing invented, and no
     // activation triggered to get it.
     let sim = Simulation::new(5);
@@ -354,7 +354,7 @@ fn a_gateway_read_on_a_fresh_leader_serves_the_committed_journal() {
 
 #[test]
 fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
-    // §8.3: a departing node hands its shards to caught-up replicas instead of
+    // storage §5.3: a departing node hands its shards to caught-up replicas instead of
     // stopping and letting each shard wait out a leader-election timeout. Without
     // the handoff, every rolling restart of a node leading N shards costs N
     // simultaneous failovers, each followed by the rehydration of every entity on
@@ -431,7 +431,7 @@ fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
 
 #[test]
 fn a_call_during_failover_is_absorbed_by_the_redirect() {
-    // §5.4: a call issued right after the leader crashes (with no settling time)
+    // §4.4: a call issued right after the leader crashes (with no settling time)
     // is held by the gateway's bounded redirect until the new leader is elected
     // and discovered, then succeeds. A remote call stays observably identical to a
     // local one across failover (E13), never surfacing NotLeader.
@@ -442,7 +442,7 @@ fn a_call_during_failover_is_absorbed_by_the_redirect() {
     // The two survivors of the crash. Write through one, then read through the
     // *other*: its cache is cold, so the read resolves through the gateway and
     // exercises the bounded redirect (a cached host on the just-crashed leader
-    // would instead time out, which a write must not auto-retry; §6, §2.2).
+    // would instead time out, which a write must not auto-retry; §5, §1.1).
     let survivors: Vec<usize> = systems
         .iter()
         .enumerate()
@@ -480,7 +480,7 @@ fn a_call_during_failover_is_absorbed_by_the_redirect() {
 
 #[test]
 fn the_shard_map_is_consensus_agreed_across_nodes() {
-    // §7.6: the allocation is decided once by the per-type map group and committed,
+    // storage §6: the allocation is decided once by the per-type map group and committed,
     // so every node reports the *identical* replica set for each entity; the
     // agreement a per-node derived snapshot cannot guarantee under staggered
     // observation.
@@ -526,7 +526,7 @@ fn add_control_voter(sim: &Simulation, systems: &[SimNode], node: NodeId) {
 
 #[test]
 fn a_compacted_shard_brings_a_new_replica_up_via_snapshot() {
-    // §9 log compaction: sustained writes to an entity push its shard's Raft log past
+    // storage §8 log compaction: sustained writes to an entity push its shard's Raft log past
     // the compaction threshold, so each replica discards the committed prefix
     // against a projection snapshot. When the cluster then grows and the shard
     // rebalances onto a *new* node, that node cannot replay the (compacted) history:
@@ -598,7 +598,7 @@ fn a_compacted_shard_brings_a_new_replica_up_via_snapshot() {
 
 #[test]
 fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
-    // §7.6/§7.7 rebalancing (grow): a node that joins *after* the map formed is no
+    // storage §6/§7 rebalancing (grow): a node that joins *after* the map formed is no
     // longer route-only; the allocator recomputes each shard's replica set by
     // rendezvous over the now-larger `cluster_voters()` and re-proposes `Assign`,
     // and the reconcile loop drives each shard group's Raft membership in place onto
@@ -676,7 +676,7 @@ fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
 
 #[test]
 fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
-    // §7.6/§7.7 rebalancing (shrink): when a node leaves the control quorum, the
+    // storage §6/§7 rebalancing (shrink): when a node leaves the control quorum, the
     // allocator recomputes each shard over the smaller `cluster_voters()` and
     // re-proposes, and the reconcile loop reconfigures the affected shard groups
     // onto survivors. An entity on a shard that the removed node replicated keeps its
@@ -777,7 +777,7 @@ fn quorum_loss_pauses_entity_writes_with_unavailable() {
     let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
 
     // Activate the entity and commit one write *with* a quorum, so the leader holds
-    // a live, quorum-recovered activation (§8): the §11 scenario is an active entity
+    // a live, quorum-recovered activation (storage §5): the storage §10 scenario is an active entity
     // that then loses quorum, not a cold activation under quorum loss (which never
     // recovers its head and so fails to activate at all; also CP-correct).
     let committed = {
@@ -797,7 +797,7 @@ fn quorum_loss_pauses_entity_writes_with_unavailable() {
     sim.run_for(Duration::from_secs(1));
 
     // The next write appends to the local replica but can never reach a write quorum
-    // (§7.2); the ask deadline outlasts the per-entity append timeout, so the
+    // (storage §4); the ask deadline outlasts the per-entity append timeout, so the
     // durability outcome surfaces.
     let outcome = {
         let entities = hosts[leader_idx].clone();
@@ -816,7 +816,7 @@ fn quorum_loss_pauses_entity_writes_with_unavailable() {
 
 #[test]
 fn storage_distributes_and_non_replicas_still_route() {
-    // §7.6 storage distribution: with 5 nodes and replication_factor 3, each shard
+    // storage §6 storage distribution: with 5 nodes and replication_factor 3, each shard
     // lives on exactly 3 replica nodes; the other 2 hold no data for it. A
     // non-replica routes to a replica via the shard map, so the entity is callable
     // with identical durable replies from every node: replicas and non-replicas
@@ -901,7 +901,7 @@ type ChosenShards = ((String, NodeId), (String, NodeId), [NodeId; 2]);
 
 #[test]
 fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
-    // E11 / §11 BLAST RADIUS: "only that shard's entities are affected; the rest of
+    // E11 / storage §10 BLAST RADIUS: "only that shard's entities are affected; the rest of
     // the cluster serves normally." 5 nodes, R=3, several shards on *different*
     // replica sets. Kill the two followers of shard X (X's leader survives but
     // loses quorum) while leaving shard Y a full quorum: an entity in X must pause
@@ -1133,12 +1133,12 @@ fn concurrent_counter_entity_is_linearizable_across_failover() {
     // the shard leader crashed while traffic is in flight. The observed history
     // must be linearizable on every seed: a write applied twice (e.g. a
     // non-idempotent retry after an ambiguous failure, the at-most-once contract
-    // of §2.2/E5) or a lost committed write (E14) would be caught here.
+    // of §1.1/E5) or a lost committed write (E14) would be caught here.
     //
     // Clients run on the survivors, not on the crashed leader, on purpose: entity
     // serves reads from the leader's in-memory state without a Raft read-index or
     // leader lease, so a deposed-but-isolated leader can still serve a *stale* read
-    // to a client co-located with it (§7.5 offers only this relaxed read;
+    // to a client co-located with it (§6 offers only this relaxed read;
     // linearizable reads are a deferred extension). Reaching the current leader is
     // the guarantee this asserts.
     scenario_sweep(
@@ -1212,7 +1212,7 @@ fn concurrent_counter_entity_is_linearizable_across_failover() {
 #[test]
 fn many_entities_collapse_onto_a_bounded_set_of_shards() {
     // E7: the cluster runs O(shards) consensus groups, never O(entities). The unit
-    // of consensus is the shard, which holds many entities (§7.1), so a large
+    // of consensus is the shard, which holds many entities (storage §3.1), so a large
     // entity population maps onto the fixed shard set. Observable through the
     // public name→shard map: hundreds of distinct entity names resolve to at most
     // `shards` shards, and every node agrees on the (bounded) replica set of each.
@@ -1246,7 +1246,7 @@ fn many_entities_collapse_onto_a_bounded_set_of_shards() {
 fn activations_and_writes_leave_the_shard_map_unchanged() {
     // E8 (activation without consensus) and E9 (control plane off the data path):
     // the shard map changes only on cluster events (splits/merges/membership),
-    // never on an entity activation or write (§7.6, §7.8). Snapshot the allocation
+    // never on an entity activation or write (storage §6, §3.2). Snapshot the allocation
     // and per-shard leadership, drive a burst of fresh activations *and* committed
     // writes across many entities, and both must come back unchanged: data-plane
     // traffic never touched the control plane.
@@ -1294,7 +1294,7 @@ fn activations_and_writes_leave_the_shard_map_unchanged() {
 
 // --- Atomic multi-event batch: no observer ever sees a partial command --------
 //
-// §7.3 / §6: "all of a command's events commit in one Raft entry, so no observer
+// storage §2.1 / entity §5: "all of a command's events commit in one Raft entry, so no observer
 // ever sees a partial command." Every other entity here emits one event per
 // command. `Pair` emits TWO per write (`IncA` then `IncB`) that jointly preserve
 // the invariant `a == b`, so a reader that ever observed `a != b` would prove a
@@ -1436,7 +1436,7 @@ fn a_multi_event_command_commits_atomically_across_failover() {
             assert!(
                 torn.is_empty(),
                 "seed {seed}: a read observed a partial multi-event command (a != b): {torn:?}; \
-             the batch did not commit/fold atomically (§7.3)",
+             the batch did not commit/fold atomically (storage §2.1)",
             );
         },
     );
@@ -1444,7 +1444,7 @@ fn a_multi_event_command_commits_atomically_across_failover() {
 
 #[test]
 fn committed_writes_survive_a_rebalance_that_replaces_their_original_replicas() {
-    // §7.7/E14: a migration must move a shard's entity data onto the target set
+    // storage §6/E14: a migration must move a shard's entity data onto the target set
     // BEFORE the map flips, so a committed write's durability never rests on
     // replicas that left. Grow the cluster so shards rebalance; once a
     // shard's flip commits, CRASH every node that departed its replica set: the

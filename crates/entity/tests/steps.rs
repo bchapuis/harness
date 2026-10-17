@@ -1,4 +1,4 @@
-//! Durable-workflow scenarios under deterministic simulation (entity §7.17).
+//! Durable-workflow scenarios under deterministic simulation (facets §4.6).
 //!
 //! Exercises the [`Steps`](entity::facet::Steps) step memo + the
 //! [`Alarm`](entity::facet::Alarm)-backed `sleep` through the self-driving

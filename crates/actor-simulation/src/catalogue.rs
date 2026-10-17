@@ -1,13 +1,13 @@
-//! The §18.5 invariant catalogue (spec §17, §18.5, §18.6).
+//! The §10 invariant catalogue (spec §10, §10, §2.12.2).
 //!
-//! A machine-readable table linking each of the 22 §18.5 invariants to *how* it
+//! A machine-readable table linking each of the 22 §10 invariants to *how* it
 //! is verified; the invariant *mechanism* is [`crate::invariant`]. The
 //! `conformance_catalogue` integration test asserts this table stays consistent
 //! with [`default_invariants`](crate::default_invariants), so a checker added in
 //! code but not recorded here, or the reverse, fails the build.
 
-/// How a §18.5 invariant is verified: the method the catalogue assigns it, which
-/// §17 makes the conformance criterion.
+/// How a §10 invariant is verified: the method the catalogue assigns it, which
+/// §10 makes the conformance criterion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verify {
     /// A continuous [`Invariant`](crate::Invariant) in
@@ -29,7 +29,7 @@ pub enum Verify {
     /// owning crate.
     ///
     /// The alternative to [`SimTest`](Verify::SimTest) for a catalogue whose spec
-    /// names its verification the same way: machine §7 and wal §7 both do. A function name states the property; a file name says where to look.
+    /// names its verification the same way: machine §6 does, and so does the `wal` crate's own catalogue. A function name states the property; a file name says where to look.
     /// Where a suite is a whole file the file is the better pointer, and where it
     /// is one case among many in `src/lib.rs` only the function is worth anything.
     ///
@@ -75,7 +75,7 @@ impl Verify {
     }
 }
 
-/// One row of the §18.5 invariant catalogue: the invariant number, the spec
+/// One row of the §10 invariant catalogue: the invariant number, the spec
 /// sections that define it, a one-line property, and how it is verified.
 #[derive(Clone, Copy, Debug)]
 pub struct CatalogueEntry {
@@ -100,8 +100,8 @@ pub enum Catalogue {
 /// a `Verify::Checker` row asserts, stated from the checker's side.
 ///
 /// Both sides are needed because neither is derivable from the other: the
-/// catalogue is what the spec's "Verified by" column mirrors, and the coverage
-/// table is what an edit to an `observe` body invalidates. The
+/// catalogue records how each invariant is verified, and the coverage table is
+/// what an edit to an `observe` body invalidates. The
 /// `conformance_catalogue` test holds them equal
 /// (see [`checker_coverage`](crate::checker_coverage)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,15 +133,15 @@ impl CheckerCoverage {
     }
 }
 
-/// The §18.5 invariant catalogue (#1–#22): the single source of truth linking
-/// each invariant to the code that verifies it (spec §17, §18.5). Kept
+/// The §10 invariant catalogue (#1–#22): the single source of truth linking
+/// each invariant to the code that verifies it (spec §10, §10). Kept
 /// consistent with [`default_invariants`](crate::default_invariants) by the
 /// `conformance_catalogue` test.
 pub fn core_catalogue() -> &'static [CatalogueEntry] {
     CATALOGUE
 }
 
-/// The cluster-utilities invariant catalogue (utilities spec §6): U1, U2, …,
+/// The cluster-utilities invariant catalogue (utilities spec §4): U1, U2, …,
 /// numbered apart from the core #1–#22 because the utilities are specified in
 /// their own document (`cluster-utilities-spec.md`). `invariant: n` here reads
 /// as "Un". Guarded by the same `conformance_catalogue` drift test as the core
@@ -153,7 +153,7 @@ pub fn utilities_catalogue() -> &'static [CatalogueEntry] {
 const CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
-        spec: "§7.2, §14",
+        spec: "§4, §8",
         property: "No silent loss: every ask reaches exactly one outcome; none pending at quiescence",
         verify: &[
             Verify::Checker("no-silent-loss"),
@@ -162,9 +162,9 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 2,
-        // §9.4 is where `down` is declared, and the MUST is stated against `down`;
-        // §10's confirmed `unreachable` only MAY complete the ask early (§18.5 #2).
-        spec: "§7.2, §9.4",
+        // §6.4 is where `down` is declared, and the MUST is stated against `down`;
+        // §7's confirmed `unreachable` only MAY complete the ask early (§10 #2).
+        spec: "§4, §6.4",
         property: "An ask to a downed node completes with Unreachable, never hangs",
         verify: &[Verify::SimTest(
             "conformance_faults.rs, conformance_membership.rs",
@@ -172,7 +172,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 3,
-        spec: "§6",
+        spec: "§3.3",
         property: "Per-pair FIFO: messages from one sender to one recipient observed in send order",
         verify: &[Verify::SimTest(
             "conformance_messaging.rs, conformance_faults.rs",
@@ -180,7 +180,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 4,
-        spec: "§6",
+        spec: "§3.3",
         property: "Serial, non-reentrant execution: an actor never dispatches two messages at once",
         verify: &[
             Verify::Checker("serial-execution"),
@@ -189,13 +189,13 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 5,
-        spec: "§6",
+        spec: "§3.3",
         property: "Bounded, non-dropping mailbox: a full mailbox blocks or returns MailboxFull",
         verify: &[Verify::SimTest("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 6,
-        spec: "§4.2",
+        spec: "§3.1",
         property: "Lifecycle order and exactly-once: assign_id → actor_ready → resign_id",
         verify: &[
             Verify::Checker("lifecycle-exactly-once"),
@@ -204,43 +204,43 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 7,
-        spec: "§4.3",
+        spec: "§3.2",
         property: "resolve classifies locality with no network round-trip",
         verify: &[Verify::SimTest("conformance_lifecycle.rs")],
     },
     CatalogueEntry {
         invariant: 8,
-        spec: "§4.4, §5, §15",
+        spec: "§2.10, §2.11, §9",
         property: "Manifest dispatch and allowlist: unregistered (type, manifest) → Unhandled",
         verify: &[Verify::SimTest("conformance_serialization.rs")],
     },
     CatalogueEntry {
         invariant: 9,
-        spec: "§4.3, §4.4",
+        spec: "§3.2, §2.10",
         property: "Local sends skip serialization, with a result identical to the remote path",
         verify: &[Verify::SimTest("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 10,
-        spec: "§4.4",
+        spec: "§2.10",
         property: "An ActorRef in a message/reply is rebound to the receiving system on decode",
         verify: &[Verify::SimTest("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 11,
-        spec: "§12",
+        spec: "§2.5",
         property: "Death-watch exactly-once, including NodeDown",
         verify: &[Verify::SimTest("conformance_deathwatch.rs")],
     },
     CatalogueEntry {
         invariant: 12,
-        spec: "§12",
+        spec: "§2.5",
         property: "Watching an already-terminated actor yields Terminated immediately",
         verify: &[Verify::SimTest("conformance_deathwatch.rs")],
     },
     CatalogueEntry {
         invariant: 13,
-        spec: "§12",
+        spec: "§2.5",
         property: "Signal ordering: Terminated delivered through the mailbox in serial order",
         verify: &[
             Verify::Checker("signal-in-band"),
@@ -249,7 +249,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 14,
-        spec: "§9.2, §9.4",
+        spec: "§6.2, §6.4",
         property: "Membership convergence once faults cease and partitions heal, by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based)",
         verify: &[Verify::SimTest(
             "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
@@ -257,7 +257,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 15,
-        spec: "§9.1",
+        spec: "§6.1",
         property: "down is terminal: a node observed down never reappears up at the same incarnation",
         verify: &[
             Verify::Checker("down-is-terminal"),
@@ -266,7 +266,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 16,
-        spec: "§9.4",
+        spec: "§6.4",
         property: "Partition tolerance: under the default policy a partition alone never downs a member; unconditionally in registry-based mode (observe-only detector), and on any quorum-less side in leader-based mode (#22)",
         verify: &[Verify::SimTest(
             "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
@@ -274,37 +274,37 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 17,
-        spec: "§10",
+        spec: "§7",
         property: "SWIM refutation: a suspected node refutes via a higher incarnation",
         verify: &[Verify::SimTest("conformance_membership.rs")],
     },
     CatalogueEntry {
         invariant: 18,
-        spec: "§11",
+        spec: "§2.4",
         property: "Supervision containment: a panic never crashes the node; default Stop; restarts back off",
         verify: &[Verify::SimTest("conformance_supervision.rs")],
     },
     CatalogueEntry {
         invariant: 19,
-        spec: "§13",
+        spec: "§2.6",
         property: "Receptionist consistency: pruned on node down; subscribe delivers snapshot then changes",
         verify: &[Verify::SimTest("conformance_receptionist.rs")],
     },
     CatalogueEntry {
         invariant: 20,
-        spec: "§3.3",
+        spec: "§2.2",
         property: "Type-safety: an ask/tell of a message the actor has no Handler for does not compile",
         verify: &[Verify::CompileFail("actor-core/tests/compile_fail")],
     },
     CatalogueEntry {
         invariant: 21,
-        spec: "§3.3",
+        spec: "§2.2",
         property: "Location transparency: local vs remote target produce identical replies and ordering",
         verify: &[Verify::Differential("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 22,
-        spec: "§9.4.3",
+        spec: "§6.4.3",
         property: "Quorum-gated control plane: every transition is a quorum-committed log entry applied in log order; at most one leader per term; a minority never evicts the majority",
         verify: &[
             Verify::Checker("one-leader-per-term"),
@@ -316,16 +316,16 @@ const CATALOGUE: &[CatalogueEntry] = &[
 const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1, // U1
-        spec: "utilities §2",
+        spec: "utilities §2.1",
         property: "Deterministic placement: a pure, version-stable function of the serving set and key; identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
         // No continuous checker: placement is a pure function off the event stream;
         // per-decision events would flood the stream without enabling any check the
-        // property tests do not already perform (utilities spec §5).
+        // property tests do not already perform (utilities spec §3).
         verify: &[Verify::SimTest("conformance_placement.rs")],
     },
     CatalogueEntry {
         invariant: 2, // U2
-        spec: "utilities §4",
+        spec: "utilities §2.3",
         property: "Singleton activation discipline: a node never runs two live activations of one name concurrently; a healed, converged cluster runs exactly one per name; an anchor failure re-activates within bounded logical time",
         verify: &[
             Verify::Checker("singleton-at-most-one-per-node"),

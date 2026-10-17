@@ -75,7 +75,7 @@ cargo run -p agent-tui
 The defaults match the loopback demo, so `--token anonymous` acts as tenant
 "anonymous". Against an authenticated gateway, pass the opaque API token
 instead; it is the tenant identity, and the gateway is where auth terminates
-(`docs/multi-tenant-edge.md`).
+(`docs/edge-spec.md`).
 
 ## Caveats
 

@@ -1,6 +1,6 @@
-//! The workspace facet (spec §7.11): a real directory per entity, durable by capture.
+//! The workspace facet (spec facets §4.1): a real directory per entity, durable by capture.
 //!
-//! The second **physical facet** (§7.12), on the SQL facet's seam (§7.14). The
+//! The second **physical facet** (facets §3), on the SQL facet's seam (facets §4.3). The
 //! entity's workspace is an ordinary node-local directory under the scratch dir:
 //! shells, containers, microVMs, and typed file tools all read and write the same
 //! real files, with no interposition. Durability comes from **capture**: after a
@@ -18,10 +18,10 @@
 //! directory is a rebuildable cache, never a source of truth (§1).
 //!
 //! **Checkpoints are the snapshot contribution.** At snapshot time every durable
-//! file is chunked into content-addressed blobs (§7.10) and the contribution is a
+//! file is chunked into content-addressed blobs (storage §9) and the contribution is a
 //! small `path → chunk ids` manifest. Unchanged files hash to blobs already
 //! stored, so a checkpoint uploads only new content. The manifests' chunk ids are
-//! the facet's blob roots (F3); §9 compaction then drops the delta records the
+//! the facet's blob roots (F3); storage §8 compaction then drops the delta records the
 //! checkpoint subsumes. A snapshot taken while an in-flight tool has dirtied the
 //! directory fails (never snapshot uncaptured bytes); the idle/deactivation
 //! snapshot runs quiesced and lands.
@@ -65,7 +65,7 @@ use crate::facet_blobs::put_chunked;
 
 /// Cap on the durable subtree, matching the sandbox tar bound: eager capture and
 /// checkpointing are cheap under it and loud past it. Not implemented: ranged
-/// sub-records and lazy hydration (§16).
+/// sub-records and lazy hydration (§13).
 pub const MAX_TREE_BYTES: u64 = 64 << 20;
 
 /// Checkpoint chunk size: content-addressed per file, so an unchanged file's
@@ -90,14 +90,14 @@ const EXCLUDED: &[&str] = &[
 /// capture would otherwise be invisible. Younger files are re-hashed.
 const STAT_TRUST_AGE: Duration = Duration::from_secs(2);
 
-/// The workspace facet marker (spec §7.11): declare `type Facets = (Ws, …)` and
+/// The workspace facet marker (spec facets §4.1): declare `type Facets = (Ws, …)` and
 /// reach the directory through [`EntityCtx::ws`](crate::EntityCtx::ws).
 pub struct Ws;
 
 impl Sealed for Ws {}
 
 /// A workspace operation failed: an *application-level* outcome the handler maps
-/// into its reply, distinct from a durability failure (§12).
+/// into its reply, distinct from a durability failure (§9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WsError {
     /// The form is not materialized (only possible outside an activation).
@@ -132,7 +132,7 @@ impl std::fmt::Display for WsError {
 
 impl std::error::Error for WsError {}
 
-/// One journaled record (spec §7.11): a captured whole-file write (bytes inline,
+/// One journaled record (spec facets §4.1): a captured whole-file write (bytes inline,
 /// applied byte-deterministically on replay; F1) or the paths a capture found
 /// deleted. Per-file `Write` records keep each record bounded by the largest
 /// single file while `drain` still joins them in ONE atomic batch (E19).
@@ -142,7 +142,7 @@ enum WsRecord {
     Remove { paths: Vec<String> },
 }
 
-/// The checkpoint manifest (spec §7.11): the facet's composite-snapshot
+/// The checkpoint manifest (spec facets §4.1): the facet's composite-snapshot
 /// contribution; every durable file as content-addressed chunks in the entity's
 /// blob area, in path order.
 #[derive(Serialize, Deserialize)]
@@ -275,7 +275,7 @@ impl Facet for Ws {
         records
     }
 
-    /// Replay only: the live path skips physical facets (§7.12); the bytes were
+    /// Replay only: the live path skips physical facets (facets §3); the bytes were
     /// on disk before the record was captured. Applies one record to the
     /// directory and the index, byte-deterministically (F1).
     fn fold(form: &mut WsForm, payload: &[u8]) -> Result<(), FacetError> {
@@ -362,7 +362,7 @@ impl Facet for Ws {
                     }
                     // Chunk ids are pure functions of the bytes, so they are
                     // known before the puts; the puts below make them durable
-                    // before the manifest that references them commits (§7.10).
+                    // before the manifest that references them commits (storage §9).
                     let ids: Vec<BlobId> = bytes
                         .chunks(CHUNK_BYTES)
                         .map(|chunk| {
@@ -413,7 +413,7 @@ impl Facet for Ws {
             let manifest: WsManifest = decode_payload("ws restore", bytes)?;
             // Fetch every file's chunks concurrently; each get verifies by
             // content (E17). `join_all_results`, not `try_join_all` (core spec
-            // §18.5 #1; see `put_chunked`).
+            // §10 #1; see `put_chunked`).
             let contents = join_all_results(
                 manifest
                     .files
@@ -471,7 +471,7 @@ pub struct WsCapture {
     pub tree_bytes: u64,
 }
 
-/// The handler-facing workspace accessor (spec §7.11), obtained from
+/// The handler-facing workspace accessor (spec facets §4.1), obtained from
 /// [`EntityCtx::ws`](crate::EntityCtx::ws). The directory is the live truth for
 /// the activation; [`capture`](WsHandle::capture) stages its changes into the
 /// current command's atomic batch (E19).
@@ -484,10 +484,10 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's workspace directory (spec §7.11). Compiles exactly when the
+    /// The entity's workspace directory (spec facets §4.1). Compiles exactly when the
     /// entity declares the [`Ws`] facet (`type Facets = (Ws, …)`): the E10
     /// discipline applied to storage. [`capture`](WsHandle::capture) is valid
-    /// only inside a command handler (§7.12).
+    /// only inside a command handler (facets §3).
     pub fn ws<I>(&self) -> WsHandle<'_, G, I>
     where
         G::Facets: HasFacet<Ws, I>,
@@ -516,9 +516,9 @@ where
     }
 
     /// Diff the durable subtree against the committed index and stage the delta
-    /// into the current command's batch (§7.11). Synchronous disk I/O on the
+    /// into the current command's batch (facets §4.1). Synchronous disk I/O on the
     /// actor thread, bounded by [`MAX_TREE_BYTES`]. An unchanged tree stages
-    /// nothing (the read path, §7.5). Valid only inside a command handler.
+    /// nothing (the read path, §6). Valid only inside a command handler.
     pub fn capture(&self) -> Result<WsCapture, WsError> {
         self.cell.with_form_and_stage::<Ws, I, _>(|form, stage| {
             let dir = form.0.as_ref().ok_or(WsError::NotMaterialized)?;
@@ -527,14 +527,14 @@ where
     }
 }
 
-/// The capture scan (spec §7.11): deterministic walk, stat-pruned re-hash,
+/// The capture scan (spec facets §4.1): deterministic walk, stat-pruned re-hash,
 /// stage what changed.
 fn capture_into(dir: &WsDir, stage: &mut WsStage) -> Result<WsCapture, WsError> {
     if !dir.root.is_dir() {
         // Never interpret a vanished root as a mass deletion.
         return Err(WsError::RootLost);
     }
-    // Wall clock, not `Clock::now` (actor §18.1 exception): the prune compares
+    // Wall clock, not `Clock::now` (actor §2.12.2 exception): the prune compares
     // against file *mtimes*, which are real-filesystem wall-clock facts the
     // sim clock cannot be compared to. Local-only, never journaled.
     #[allow(clippy::disallowed_methods)]
@@ -626,7 +626,7 @@ fn walk(
             let meta = entry.metadata().map_err(io_ws_err)?;
             out.insert(child, (entry.path(), meta.len(), meta.modified().ok()));
         }
-        // Symlinks and special files: not durable (files-only model, §7.11).
+        // Symlinks and special files: not durable (files-only model, facets §4.1).
     }
     Ok(())
 }

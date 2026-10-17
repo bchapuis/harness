@@ -128,7 +128,7 @@ async fn connecting_to_an_absent_agent_is_gone() {
 }
 
 /// A guest this host is not running answers `Gone`: what a front door reports
-/// for a machine whose activation is on another node (machine §5.1).
+/// for a machine whose activation is on another node (machine §2.5).
 #[tokio::test]
 async fn connect_by_key_reports_an_absent_guest() {
     if !docker_available().await {
@@ -146,7 +146,7 @@ async fn connect_by_key_reports_an_absent_guest() {
 
 /// The block-image path ([`MachineHost::start`]) refuses a NIC rather than
 /// booting a guest whose journaled egress policy it silently dropped
-/// (machine §5.2).
+/// (machine §2.6).
 #[tokio::test]
 async fn a_tap_is_refused_not_ignored() {
     let host: Arc<dyn MachineHost> =

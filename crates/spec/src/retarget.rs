@@ -96,6 +96,15 @@ impl Map {
         None
     }
 
+    /// The new home of one numbered item of an old section, mapped on its own:
+    /// `5.3 item 4`, `4.2 rule 1`. Items are mapped only when their list was
+    /// rewritten; an item of a list that kept its numbering follows its section.
+    pub fn lookup_item(&self, doc: &'static str, number: &str, item: &str) -> Option<Target> {
+        self.entries
+            .get(&(doc, format!("{number} {item}")))
+            .cloned()
+    }
+
     /// The old sections of `doc` this map names, so a caller can hold it complete
     /// against the old document's headings.
     pub fn sections_of(&self, doc: &str) -> impl Iterator<Item = &str> {
@@ -200,6 +209,7 @@ pub fn rewrite(text: &str, scan: &str, ctx: Context<'_>, map: &Map, old: &OldAnc
         let number_start = cite.offset + '§'.len_utf8();
         let (_, number_len) = markdown::dotted_number(&scan[number_start..]);
         let number_end = number_start + number_len;
+        let item = item_suffix(&scan[number_end..]);
         let separated = is_separator(&scan[previous_end..cite.offset]);
         previous_end = number_end;
         let note = |what: String| Note {
@@ -225,8 +235,19 @@ pub fn rewrite(text: &str, scan: &str, ctx: Context<'_>, map: &Map, old: &OldAnc
             continue;
         }
 
-        // Where it lives now.
-        let (new_doc, new_number) = if map.renumbers(old_doc) {
+        // Where it lives now. A numbered item mapped on its own replaces the
+        // whole `§5.3 item 4` with its new section.
+        let mut replaced_end = number_end;
+        let item_target = item.as_ref().and_then(|(written, len)| {
+            let target = map.lookup_item(old_doc, &cite.number, written)?;
+            replaced_end = number_end + len;
+            Some(target)
+        });
+        // The next citation's gap starts after the item this one consumed.
+        previous_end = replaced_end;
+        let (new_doc, new_number) = if let Some(Target::Section(doc, number)) = item_target {
+            (doc, number)
+        } else if map.renumbers(old_doc) {
             match map.lookup(old_doc, &cite.number) {
                 Some((Target::Section(doc, number), fallback)) => {
                     if fallback {
@@ -292,7 +313,10 @@ pub fn rewrite(text: &str, scan: &str, ctx: Context<'_>, map: &Map, old: &OldAnc
         if new_number != cite.number || new_doc != old_doc {
             out.moved += 1;
         }
-        if new_number != cite.number {
+        if replaced_end != number_end {
+            out.moved += 1;
+            edits.push((number_start, replaced_end, new_number));
+        } else if new_number != cite.number {
             // Keep a trailing period the parser excluded from the number.
             let written = &scan[number_start..number_end];
             let suffix = &written[cite.number.len()..];
@@ -307,6 +331,27 @@ pub fn rewrite(text: &str, scan: &str, ctx: Context<'_>, map: &Map, old: &OldAnc
     }
     out.text = text;
     out
+}
+
+/// A numbered item written after a citation, `§5.3 item 4` or `§4.2, rule 1`:
+/// the item as a map writes it (`item 4`), and how many bytes it spans.
+fn item_suffix(after: &str) -> Option<(String, usize)> {
+    let rest = after.strip_prefix(',').unwrap_or(after);
+    let rest = rest.strip_prefix(' ')?;
+    let word_len = rest.find(' ')?;
+    let word = rest[..word_len].trim_end_matches('s');
+    if !matches!(word, "item" | "rule" | "requirement") {
+        return None;
+    }
+    let digits: String = rest[word_len + 1..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let len = (after.len() - rest.len()) + word_len + 1 + digits.len();
+    Some((format!("{word} {digits}"), len))
 }
 
 /// The same reading of a gap as the citation parser's: only punctuation, `and`,
@@ -420,6 +465,23 @@ mod tests {
         };
         let text = "the contract (§18.1)";
         assert_eq!(rewrite(text, text, ctx, &map(), &old()).text, text);
+    }
+
+    #[test]
+    fn a_mapped_item_replaces_its_whole_citation() {
+        let mut map = map();
+        map.entries.insert(
+            ("entity", "4.1 item 2".to_string()),
+            Target::Section("actor", "18".to_string()),
+        );
+        let ctx = Context {
+            bare: &["entity"],
+            default: Some("entity"),
+            fresh: &[],
+        };
+        let text = "per §4.1 item 2, and §4.1 item 3.";
+        let out = rewrite(text, text, ctx, &map, &old());
+        assert_eq!(out.text, "per actor §18, and entity §2.1 item 3.");
     }
 
     #[test]

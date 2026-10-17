@@ -1,4 +1,4 @@
-//! History recording and linearizability checking (spec §18.4).
+//! History recording and linearizability checking.
 //!
 //! Record the history of operations a *client* observed, each as an
 //! invoke/complete pair with concurrency preserved, then ask whether that
@@ -7,7 +7,7 @@
 //!
 //! - A [`History`] an in-simulation client records into, marking each operation
 //!   `invoke` → (`ok` with the observed return | `info` unknown | `fail` did not
-//!   happen). Recording is by the public API only (spec §18.4).
+//!   happen). Recording is by the public API only (docs/simulation-testing.md).
 //! - A [`check`] that decides linearizability by the **Wing & Gong** algorithm:
 //!   linearize operations one at a time, only ever choosing one whose invoke
 //!   precedes the earliest still-pending completion, backtracking on a dead end,
@@ -70,7 +70,7 @@ struct Inner<M: Model> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpId(usize);
 
-/// A client-observed operation history (spec §18.4), recorded live during a run.
+/// A client-observed operation history (docs/simulation-testing.md), recorded live during a run.
 /// Clone to share one log among several concurrent client tasks; the executor is
 /// single-threaded, so the recorded order is exactly the virtual-time order in
 /// which calls returned.
@@ -248,7 +248,7 @@ impl std::fmt::Display for Linearization {
 pub(crate) const MAX_HISTORY: usize = 128;
 
 /// Decide whether `history` is linearizable with respect to model `M`, by the
-/// Wing & Gong search (spec §18.4). Returns [`Linearization::Ok`] with a
+/// Wing & Gong search (docs/simulation-testing.md). Returns [`Linearization::Ok`] with a
 /// witnessing order found, or [`Linearization::Violation`] if none exists.
 pub fn check<M: Model>(history: &History<M>) -> Linearization {
     let ops = history.ops();

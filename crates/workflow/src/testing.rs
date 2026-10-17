@@ -1,4 +1,4 @@
-//! The continuous W-checkers over the workflow's event stream (workflow spec §9).
+//! The continuous W-checkers over the workflow's event stream (workflow spec §8).
 //!
 //! One checker, `workflow-cycle`, carrying four of the seven invariants: it is the
 //! grammar of a claim's life. A key is launched (or resolved as orphaned), and
@@ -22,7 +22,7 @@ use entity::EntityName;
 
 use crate::WorkflowEvent;
 
-/// An entity's open claims, per node hosting an activation of it (entity §13).
+/// An entity's open claims, per node hosting an activation of it (entity §10).
 /// Under failover a deposed leader and its successor are two activations of one
 /// entity, and their claims must not be confused.
 type Claims = BTreeMap<NodeId, BTreeSet<String>>;
@@ -39,7 +39,7 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///   dropped without a record; it must correspond to a launch on the stream, or
 ///   the workflow discarded something it never sent.
 /// - **W7, quiescence.** A `Quiescent` must not be announced while a claim is
-///   open, and on the single-node tier the entity's `Deactivated` (entity §13) must
+///   open, and on the single-node tier the entity's `Deactivated` (entity §10) must
 ///   not arrive while one is: an activation with an effect in flight has not
 ///   settled its work, and hibernating under it would strand the outcome.
 /// - **W2, launch coverage**, in the shape a stream can carry: the `Quiescent`
@@ -47,7 +47,7 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///
 /// What the stream cannot show (that a *backed-off* key is eventually relaunched)
 /// is a scenario assertion rather than a grammar rule, because the liveness is
-/// conditional on the activation surviving (§9 W2). The checker does hold the
+/// conditional on the activation surviving (§8 W2). The checker does hold the
 /// half that is checkable: a `Settled { committed: false }` closes its claim, so
 /// a stranded key shows up as a `Deactivated` with nothing open and the work still
 /// in the fold, which the scenario suites assert against the journal.
@@ -170,8 +170,8 @@ impl Invariant for WorkflowCycle {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // The activation lifecycle is the entity's own (entity §13); the workflow
-        // mints no duplicate of it (§8).
+        // The activation lifecycle is the entity's own (entity §10); the workflow
+        // mints no duplicate of it (§2.8).
         if let Some(entity) = event.as_app::<EntityEvent>() {
             match entity {
                 EntityEvent::Deactivated { node, name } => {
@@ -248,8 +248,9 @@ impl Invariant for WorkflowCycle {
 }
 
 /// Which W-invariant each tick checker enforces, as `(checker name, W number)`:
-/// the pairing §9's "Verified by" column asserts, stated from the checker's
-/// side, and held equal to the catalogue's per pair by `conformance_catalogue`.
+/// the pairing the W-catalogue's `Verify::Checker` rows assert, stated from the
+/// checker's side, and held equal to the catalogue's per pair by
+/// `conformance_catalogue`.
 pub fn checker_coverage() -> &'static [(&'static str, u8)] {
     &[
         ("workflow-cycle", 2),
@@ -358,7 +359,7 @@ mod tests {
     #[test]
     fn a_settle_that_committed_nothing_still_closes_its_claim() {
         // The reason `Settled` carries `committed` and fires on every settle
-        // (§8): an event that fired only on a commit would leave this claim open
+        // (§2.8): an event that fired only on a commit would leave this claim open
         // forever and W7 could never be closed.
         let mut c = WorkflowCycle::strict();
         c.observe(&launched("k")).unwrap();

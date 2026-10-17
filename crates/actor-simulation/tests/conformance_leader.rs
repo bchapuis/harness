@@ -1,9 +1,9 @@
-//! Conformance: **leader-based** membership (spec §9.4.3); the self-hosted
+//! Conformance: **leader-based** membership (spec §6.4.3); the self-hosted
 //! consensus control plane.
 //!
 //! The cluster's source of truth is a replicated Raft log: an elected leader
 //! serializes every membership transition as a quorum-committed entry, the
-//! commit index is the authority stamp (spec §9.2), and the SWIM detector is a
+//! commit index is the authority stamp (spec §6.2), and the SWIM detector is a
 //! sensor feeding the leader, which alone may commit `down` under the
 //! configured downing policy. These tests pin the observable guarantees:
 //! election safety, log-ordered transitions, leader failover, quorum-gated
@@ -66,7 +66,7 @@ fn elected_leader<'a>(nodes: &'a [&SimNode]) -> &'a SimNode {
 
 #[test]
 fn a_leader_is_elected_and_at_most_one_per_term() {
-    // Election safety (spec §9.4.3, invariant #22): a leader emerges, every
+    // Election safety (spec §6.4.3, invariant #22): a leader emerges, every
     // node converges on it, and no term ever sees two `LeaderElected` claims.
     let sim = Simulation::new(1);
     let recorder = Recorder::new();
@@ -99,7 +99,7 @@ fn a_leader_is_elected_and_at_most_one_per_term() {
 
 #[test]
 fn a_joiner_is_admitted_by_a_committed_entry() {
-    // Spec §9.3, §9.4.3 items 1 and 3: the leader commits `joining → up`; voters
+    // Spec §6.3, §6.4.3 items 1 and 3: the leader commits `joining → up`; voters
     // apply it from the log, and the non-voter joiner itself learns the stamped
     // decision by gossip; both paths converge on the same commit index.
     let sim = Simulation::new(2);
@@ -138,7 +138,7 @@ fn a_joiner_is_admitted_by_a_committed_entry() {
 
 #[test]
 fn drain_and_resume_are_committed_entries_even_from_a_non_leader() {
-    // Spec §9.4.3 item 1: every transition is a log entry committed through the
+    // Spec §6.4.3 item 1: every transition is a log entry committed through the
     // leader; a command offered to a non-leader is *forwarded*, never applied
     // locally. Drain C from a non-leader node, resume it from another.
     let sim = Simulation::new(3);
@@ -182,7 +182,7 @@ fn drain_and_resume_are_committed_entries_even_from_a_non_leader() {
 
 #[test]
 fn the_cluster_elects_a_new_leader_when_the_leader_crashes() {
-    // Leader failover (spec §9.4.3): committed state survives, a new leader is
+    // Leader failover (spec §6.4.3): committed state survives, a new leader is
     // elected by the surviving quorum, and new transitions commit through it.
     let sim = Simulation::new(4);
     let net = leader_net(&sim, DowningPolicy::Conservative);
@@ -231,8 +231,8 @@ fn the_cluster_elects_a_new_leader_when_the_leader_crashes() {
 
 #[test]
 fn downing_is_a_quorum_committed_entry_and_runs_the_cascade() {
-    // Spec §9.4.3 item 4: the detector confirms `unreachable`, the leader
-    // commits `down` under the policy, and the cascade (spec §8.1) follows;
+    // Spec §6.4.3 item 4: the detector confirms `unreachable`, the leader
+    // commits `down` under the policy, and the cascade (spec §5.1) follows;
     // watchers get `NodeDown`, calls fail `Unreachable`, the node never returns.
     let sim = Simulation::new(5);
     let net = leader_net(&sim, DowningPolicy::Timeout(Duration::from_millis(400)));
@@ -332,7 +332,7 @@ fn a_minority_partition_can_never_evict_the_majority() {
 
 #[test]
 fn quorum_loss_pauses_the_control_plane_but_not_the_data_plane() {
-    // Spec §9.4.3 item 5: without a quorum nothing commits (no drain, no down)
+    // Spec §6.4.3 item 5: without a quorum nothing commits (no drain, no down)
     // while existing members keep exchanging actor traffic on the last
     // committed view.
     let sim = Simulation::new(7);
@@ -359,7 +359,7 @@ fn quorum_loss_pauses_the_control_plane_but_not_the_data_plane() {
     });
     assert!(
         !drained,
-        "no transition commits without a quorum (spec §9.4.3 #5)"
+        "no transition commits without a quorum (spec §6.4.3 #5)"
     );
     assert_eq!(
         a.membership().status(D),
@@ -381,7 +381,7 @@ fn quorum_loss_pauses_the_control_plane_but_not_the_data_plane() {
 
 #[test]
 fn a_committed_voter_change_takes_effect() {
-    // Spec §9.4.3 item 2: voter-set changes are committed configuration
+    // Spec §6.4.3 item 2: voter-set changes are committed configuration
     // entries. Add D as a fourth voter, crash one original voter, and the
     // cluster still commits: the new quorum (3 of 4) must include D, proving
     // the change took effect.
@@ -437,7 +437,7 @@ fn a_committed_voter_change_takes_effect() {
 
 #[test]
 fn a_graceful_leave_is_committed_at_the_departing_nodes_request() {
-    // Spec §9.3, §9.4.3 item 1: the `leaving` announcement decides nothing; the
+    // Spec §6.3, §6.4.3 item 1: the `leaving` announcement decides nothing; the
     // leader commits `leaving → down`, and the cascade notifies watchers.
     let sim = Simulation::new(9);
     let net = leader_net(&sim, DowningPolicy::Conservative);
@@ -459,7 +459,7 @@ fn a_graceful_leave_is_committed_at_the_departing_nodes_request() {
 
 #[test]
 fn a_voter_removed_during_a_partition_commits_consistently() {
-    // §9.4.3 item 2 + §18.5 #22: voter-set changes are committed configuration
+    // §6.4.3 item 2 + §10 #22: voter-set changes are committed configuration
     // entries. The dangerous, previously-untested case is a *reconfiguration that
     // races a partition*: a voter removed while it is isolated. The majority
     // commits the change over the old config's quorum; the isolated minority can
@@ -565,13 +565,13 @@ fn a_voter_removed_during_a_partition_commits_consistently() {
 
 #[test]
 fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
-    // §8.1 / #22: leadership is a quorum fact, not a clock fact; "a paused leader
+    // §5.1 / #22: leadership is a quorum fact, not a clock fact; "a paused leader
     // that wakes is already deposed and cannot commit." The sharp, one-way case
     // symmetric partition cannot express: block only the leader's OUTBOUND traffic.
     // Its followers, hearing no heartbeats, elect a new leader at a higher term;
     // that leader's heartbeats still reach the old one (inbound is open), so the old
     // leader learns it is deposed and steps down WITHOUT any heal: already deposed
-    // the moment it hears the newer term, exactly the §8.1 property. A new control
+    // the moment it hears the newer term, exactly the §5.1 property. A new control
     // change commits through the new leader; the old leader contributed nothing.
     let sim = Simulation::new(31);
     let net = leader_net(&sim, DowningPolicy::Conservative);
@@ -604,12 +604,12 @@ fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
         "a new leader was elected on the reachable side"
     );
 
-    // The crux (§8.1): the old leader, still partitioned for sending, has ALREADY
+    // The crux (§5.1): the old leader, still partitioned for sending, has ALREADY
     // stepped down; it heard the newer term on its open inbound link, with no heal.
     assert_ne!(
         old_sys.leader(),
         Some(old_leader),
-        "the deposed leader stepped down on hearing the new term, without a heal (§8.1)",
+        "the deposed leader stepped down on hearing the new term, without a heal (§5.1)",
     );
 
     // The cluster commits through the new leader while the old one is still one-way
@@ -715,11 +715,11 @@ fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
     assert!(recovered, "after heal the control plane commits again");
 }
 
-// --- A frozen (paused) leader: GC-stall / VM-freeze (spec §8.1, §18.3) ---------
+// --- A frozen (paused) leader: GC-stall / VM-freeze (spec §5.1, §10) ---------
 
 #[test]
 fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
-    // §8.1: "a paused leader that wakes is already deposed and cannot commit,
+    // §5.1: "a paused leader that wakes is already deposed and cannot commit,
     // regardless of clock skew, and no separate token is needed"; leadership is a
     // quorum fact, not a clock fact. This exercises a *true execution freeze* via
     // `SimNetwork::pause` (a GC stall / VM freeze): the leader's tasks and timers
@@ -790,7 +790,7 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
     );
 
     // Resume the old leader: it drains its backlog, hears the newer term, and steps
-    // down cleanly; already deposed the moment it wakes (§8.1).
+    // down cleanly; already deposed the moment it wakes (§5.1).
     net.resume(old_leader);
     sim.run_for(Duration::from_secs(4));
 
@@ -798,14 +798,14 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
     assert_eq!(
         old_sys.leader(),
         Some(new_leader),
-        "the woken leader accepted the newer term and is a follower: already deposed (§8.1)",
+        "the woken leader accepted the newer term and is a follower: already deposed (§5.1)",
     );
     // The clean part the freeze guarantees: the wakeup forced NO re-election, because
     // the frozen leader never climbed its term. The new leader kept leading.
     assert_eq!(
         surv.leader(),
         Some(new_leader),
-        "the stale wakeup did not disrupt the new leader (no clock-based fencing needed, §8.1)",
+        "the stale wakeup did not disrupt the new leader (no clock-based fencing needed, §5.1)",
     );
     assert_eq!(
         b.leader(),
@@ -820,6 +820,6 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
     assert_eq!(
         max_term(&recorder),
         term_after_election,
-        "the woken leader forced no re-election: a clean step-down on rejoin (§8.1)",
+        "the woken leader forced no re-election: a clean step-down on rejoin (§5.1)",
     );
 }

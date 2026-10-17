@@ -1,5 +1,7 @@
-//! A standalone multi-process deployment of persistent machines (machine spec):
-//! lightweight VMs you address by name, reach over SSH, and cannot lose.
+//! A standalone multi-process deployment of persistent machines: lightweight
+//! VMs you address by name, reach over SSH, and cannot lose. The runnable
+//! walkthrough is `./demo-machine.sh` at the repository root; this binary is
+//! what it drives.
 //!
 //! ```text
 //! machine-standalone node   --id 1 --machine firecracker --fc-kernel … \
@@ -11,11 +13,23 @@
 //! machine-standalone egress dev-box --admin 127.0.0.1:7701 --allow 93.184.216.0/24
 //! ```
 //!
-//! `node` hosts machine entities and opens SSH front doors. The rest are
-//! one-shot commands issued through a node's admin socket (see [`admin`] for
-//! why they are not cluster members themselves); each becomes an ordinary
-//! journaled entity command, because provisioning and access policy *are*
-//! journal events (machine §3), not an administrative side channel.
+//! `node` hosts machine entities on a TCP cluster and opens SSH front doors;
+//! `--help` lists every flag. The rest are one-shot commands issued through a
+//! node's admin socket (see [`admin`] for why they are not cluster members
+//! themselves); each becomes an ordinary journaled entity command, because
+//! provisioning and access policy *are* journal events (machine §3), not an
+//! administrative side channel.
+//!
+//! The deployment supplies every plug point the machine crates leave open:
+//! the runtime binding (`--machine firecracker|docker|fake` picks the
+//! `machine_host::MachineHost` behind the hosted binding, or the fake), the
+//! front door's two halves ([`authority`] answers `MachineAuthority` with the
+//! machine entity's commands on its leader and refuses machines this node does
+//! not lead; [`backend`] answers `ChannelBackend` from the node's own guests),
+//! and the node's `EgressConfig` from the `--egress-*` flags (feature `net`).
+//! [`node`] wires them into one cluster member with an in-process door.
+//!
+//! Specified by `docs/machine-spec.md`.
 
 mod admin;
 mod authority;
@@ -138,7 +152,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     node::run(opts).await
 }
 
-/// The node's egress configuration (machine §5.2) from its three flags, or
+/// The node's egress configuration (machine §2.6) from its three flags, or
 /// `None` when egress is off. An uplink turns it on and needs a pool beside it:
 /// nodes sharing a host must not carve guest addresses from one pool, so there
 /// is no default.

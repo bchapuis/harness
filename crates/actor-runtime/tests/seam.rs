@@ -1,4 +1,4 @@
-//! Unit-level checks of the production runtime seam (spec §4.6): the tokio clock
+//! Unit-level checks of the production runtime seam (spec §2.12.1): the tokio clock
 //! advances and sleeps, OS entropy yields independent streams, and the spawner
 //! actually runs launched tasks to completion.
 

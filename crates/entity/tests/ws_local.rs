@@ -1,4 +1,4 @@
-//! End-to-end workspace facet tests on the `Local` tier (spec §7.11): captured
+//! End-to-end workspace facet tests on the `Local` tier (spec facets §4.1): captured
 //! file deltas committing atomically with the command, zero-record captures of
 //! an unchanged tree, exclusion of regenerable caches, the checkpoint manifest +
 //! delta-record rehydration round-trip, and the E20 discard-and-rebuild path.
@@ -104,7 +104,7 @@ impl EntityHandler<Drop_> for Studio {
 }
 
 /// Read a file straight off the materialized directory, a pure read: no
-/// capture, no record, no commit (§7.5).
+/// capture, no record, no commit (§6).
 #[derive(Clone, Serialize, Deserialize)]
 struct Get {
     path: String,
@@ -187,7 +187,7 @@ fn captured_writes_survive_hibernation_and_unchanged_trees_commit_nothing() {
             Ok(1),
         );
         // Re-writing identical bytes: content hash unchanged, nothing staged,
-        // nothing committed (the read path, §7.5).
+        // nothing committed (the read path, §6).
         assert_eq!(
             entity
                 .ask(Put {

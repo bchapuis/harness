@@ -1,7 +1,7 @@
 //! The gateway's client-facing error model.
 //!
 //! The failure layers stay distinct on the wire, exactly as the agent runtime keeps
-//! them apart (entity §12, actor §14): a *transport or durability* failure of reaching or
+//! them apart (entity §9, actor §8): a *transport or durability* failure of reaching or
 //! committing a command (an [`EntityError`]) becomes a retryable or upstream HTTP
 //! status here; a turn the session *rejected* ([`SubmitReject`], a reused turn id
 //! with different content) is the client's own permanent mistake, a `409`; an
@@ -81,7 +81,7 @@ impl GatewayError {
 }
 
 impl From<EntityError> for GatewayError {
-    /// Map a transport/durability failure to an HTTP status (entity §12, actor §14):
+    /// Map a transport/durability failure to an HTTP status (entity §9, actor §8):
     ///
     /// - `Call(Timeout)` → `504`: the deadline lapsed reaching/committing.
     /// - `Call(Unreachable | MailboxFull)`, `Unavailable`, `NotLeader` → `503`,
@@ -104,7 +104,7 @@ impl From<PromptError> for GatewayError {
     /// A rejected turn is `409 Conflict`: the session holds a different turn
     /// under that id (`turn_conflict`) or is not of the addressed kind
     /// (`kind_mismatch`). Permanent, so a client must change the request, not
-    /// retry it (agent spec §7.4). Every other failure maps as an
+    /// retry it (agent spec §5.3). Every other failure maps as an
     /// [`EntityError`].
     fn from(e: PromptError) -> GatewayError {
         match e {

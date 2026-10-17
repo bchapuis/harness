@@ -1,9 +1,9 @@
-//! Sharding, replication, and the node (spec §7.1, §7.2, §7.6, §7.7).
+//! Sharding, replication, and the node (spec storage §3.1, §4, §6, §7).
 //!
 //! What makes an entity's journal survive a node: the partition of a type's
 //! namespace into shards, the map that allocates them, the transport a shard
 //! leader quorum-appends over, and the per-node runtime that hosts the whole
-//! thing. A single-node deployment (the `Local` tier, §7.4) names nothing here.
+//! thing. A single-node deployment (the `Local` tier, storage §2.2) names nothing here.
 //!
 //! This is the half of the crate that knows about *placement*; [`crate::store`]
 //! is the half that knows about *durability*, and neither knows what an entity
@@ -18,7 +18,7 @@ pub use crate::system::FailureDomains;
 pub use crate::system::ShardId;
 pub use crate::system::shard_for;
 
-/// The replica-store protocol (spec §7.2, §8): the messages a shard leader sends a
+/// The replica-store protocol (spec storage §4, §5): the messages a shard leader sends a
 /// replica's store, one per [`ReplicaTransport`] method, public because the trait's
 /// signatures carry them.
 pub mod replica {
@@ -34,7 +34,7 @@ pub mod replica {
     pub use crate::replica_store::SweepBlobs;
 }
 
-/// The alarm index's runtime vocabulary (spec §7.16): the per-shard entity that
+/// The alarm index's runtime vocabulary (spec facets §4.5): the per-shard entity that
 /// lets an alarmed entity hibernate without losing its deadline, and the commands
 /// its driver speaks to it.
 pub mod alarm_index {

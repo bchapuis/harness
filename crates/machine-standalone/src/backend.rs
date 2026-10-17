@@ -1,4 +1,4 @@
-//! The front door's transport half (machine §5.1): one byte stream per channel
+//! The front door's transport half (machine §2.5): one byte stream per channel
 //! to the guest agent, over whatever this node holds its guests with.
 //!
 //! The door does not know the mechanism. It asks the node's
@@ -10,7 +10,7 @@
 //! answers:
 //!
 //! - The machine's activation is on **another node**. A guest is node-local and
-//!   the cross-node relay is machine §8's deferred work, so this node's door
+//!   the cross-node relay is machine §7's deferred work, so this node's door
 //!   cannot bridge it; the client should reach the leader's door.
 //! - The node runs the **fake binding** (`--machine fake`). There is no guest
 //!   at all: the fake runtime dirties disk blocks and answers pause/capture, so
@@ -67,7 +67,7 @@ impl ChannelBackend for LocalBackend {
                         format!(
                             "{machine}: {e}; this machine's activation is on another node, and a \
                              front door bridges only the machines its own node leads (machine \
-                             §8's cross-node relay is not built). Reconnect to the leader's door."
+                             §7's cross-node relay is not built). Reconnect to the leader's door."
                         ),
                     ),
                     machine_host::GuestError::Host(e) => std::io::Error::other(e),

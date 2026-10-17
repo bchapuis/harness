@@ -1,4 +1,4 @@
-//! Conformance: swarm testing (spec §18.4, §18.6); single-node and cluster
+//! Conformance: swarm testing (spec §2.12.2; docs/simulation-testing.md); single-node and cluster
 //! workloads swept across seeds under fault injection, with continuous invariant
 //! checking and fault-coverage assertions.
 
@@ -36,7 +36,7 @@ use actor_simulation::sweep_seeds;
 use serde::Deserialize;
 use serde::Serialize;
 
-// === Single-node swarm (spec §18.4, §18.6) ====================================
+// === Single-node swarm (spec §2.12.2; docs/simulation-testing.md) ====================================
 
 // --- Actors used by the workloads ---------------------------------------------
 
@@ -174,7 +174,7 @@ fn concurrent_load_stays_serial_across_seeds() {
 
 #[test]
 fn a_single_seed_replays_identically() {
-    // Reproduction (spec §18.6): the same seed yields the same outcome.
+    // Reproduction (spec §2.12.2): the same seed yields the same outcome.
     let workload = AskStorm {
         actors: 3,
         asks_per_actor: 5,
@@ -223,7 +223,7 @@ fn harness_detects_a_silently_lost_ask() {
     );
 }
 
-// --- Fault-injecting supervision workload (spec §18.3) ------------------------
+// --- Fault-injecting supervision workload (docs/simulation-testing.md) ------------------------
 
 /// A service whose handler panics at seed-controlled points (`buggify`) and
 /// restarts. Whatever the scheduling and fault timing, every call must still
@@ -249,7 +249,7 @@ impl Message for Work {
 
 impl Handler<Work> for Flaky {
     async fn handle(&mut self, msg: Work, ctx: &Ctx<Self>) -> u64 {
-        // Inject a fault on roughly one call in four (spec §18.3).
+        // Inject a fault on roughly one call in four (docs/simulation-testing.md).
         if ctx.system().entropy().buggify(1, 4) {
             panic!("injected fault");
         }
@@ -287,7 +287,7 @@ fn flaky_service_survives_injected_faults_across_seeds() {
     }
 }
 
-// === Cluster swarm (spec §18.3, §18.6) ========================================
+// === Cluster swarm (spec §2.12.2; docs/simulation-testing.md) ========================================
 
 struct Greeter;
 
@@ -328,7 +328,7 @@ fn swarm_swim() -> SwimConfig {
 /// Each node hosts and publishes a greeter; node 0 repeatedly discovers and
 /// calls them, tolerating whatever failures the nemesis induces. Parameterized by
 /// membership `mode` so the *same* workload and nemesis sweep the static,
-/// gossip-based, registry-based, and leader-based control planes (spec §9.4):
+/// gossip-based, registry-based, and leader-based control planes (spec §6.4):
 /// the safety invariants must hold under every mode.
 struct DiscoverAndCall {
     nodes: usize,
@@ -401,12 +401,12 @@ fn discover_and_call_holds_across_seeds_under_faults() {
 
 #[test]
 fn discover_and_call_holds_across_seeds_in_registry_mode() {
-    // The same chaos under the **registry-based** control plane (spec §9.4.2):
+    // The same chaos under the **registry-based** control plane (spec §6.4.2):
     // the detector is observe-only, so a crashed node is never auto-downed; its
     // in-flight calls complete by timeout rather than the node-down cascade. The
     // safety invariants (no silent loss, serial, lifecycle, down-terminal) must
     // still hold on every seed, with the registry sync itself faulted (latency
-    // and stale reads, spec §18.3).
+    // and stale reads, docs/simulation-testing.md).
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
@@ -428,7 +428,7 @@ fn discover_and_call_holds_across_seeds_in_registry_mode() {
 
 #[test]
 fn discover_and_call_holds_across_seeds_in_leader_mode() {
-    // The same chaos under the **leader-based** control plane (spec §9.4.3):
+    // The same chaos under the **leader-based** control plane (spec §6.4.3):
     // the nemesis crashes and partitions voters, forcing elections and quorum
     // loss mid-traffic. The safety invariants: now including one-leader-per-term
     // (invariant #22's election-safety half); must hold on every seed.
@@ -448,7 +448,7 @@ fn discover_and_call_holds_across_seeds_in_leader_mode() {
 
 #[test]
 fn discover_and_call_holds_across_seeds_in_static_mode() {
-    // And under the **static** control plane (spec §9.4): no detector at all, so
+    // And under the **static** control plane (spec §6.4): no detector at all, so
     // membership never changes under the nemesis and discovery never re-converges.
     // Calls to crashed nodes complete by timeout; the safety invariants must hold
     // with no failure detection in the loop.
@@ -462,7 +462,7 @@ fn discover_and_call_holds_across_seeds_in_static_mode() {
     }
 }
 
-// --- Death-watch under the nemesis (spec §12, §8.1; invariant #11) ------------
+// --- Death-watch under the nemesis (spec §2.5, §5.1; invariant #11) ------------
 
 // A remotely-addressable actor that stops or fails on demand.
 struct Target;
@@ -512,7 +512,7 @@ const TARGETS: Key<Target> = Key::new("watch-targets");
 /// Node 0 watches every other node's target, then drives those targets to stop
 /// or fail while the nemesis independently crashes and partitions nodes. Three
 /// causes of `Terminated` then race per target: a graceful stop frame, a fault,
-/// and a synthesized `NodeDown` (spec §8.1 step 4). This drives the death-watch
+/// and a synthesized `NodeDown` (spec §5.1 step 4). This drives the death-watch
 /// paths (local delivery, cross-node frame forwarding, and node-down synthesis)
 /// across the whole fault space, where the standing safety invariants
 /// (no-silent-loss, serial, lifecycle, down-terminal) must still hold.
@@ -621,7 +621,7 @@ fn watch_under_chaos_upholds_safety_invariants_across_seeds() {
 #[test]
 fn watch_under_chaos_upholds_safety_invariants_in_leader_mode() {
     // The leader-mode twin: `NodeDown` synthesis is driven by quorum-committed
-    // `Down` entries instead of the coordinator's policy (spec §9.4.3 item 4),
+    // `Down` entries instead of the coordinator's policy (spec §6.4.3 item 4),
     // racing graceful stops and faults across the same fault space.
     let workload = WatchUnderChaos {
         nodes: 3,
@@ -638,7 +638,7 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
     // Each watcher here watches its target exactly once, so it must observe at
     // most one `Terminated`: even as graceful-stop, fault, and node-down causes
     // race across the fault space. (This is *not* the general invariant: watching
-    // the same target twice legitimately yields two signals, spec §12. It is a
+    // the same target twice legitimately yields two signals, spec §2.5. It is a
     // workload-specific guard against `TerminatedDelivered` being emitted more
     // than once per real delivery, e.g. once where a node forwards the signal to
     // a remote watcher and again where it actually lands.)
@@ -674,7 +674,7 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
     );
 }
 
-// --- Restart churn (spec §9.4.3 item 2, §18.3) ---------------------------------
+// --- Restart churn (spec §6.4.3 item 2, §10) ---------------------------------
 
 /// Leader-mode traffic while voters restart every round: each restarted voter
 /// reloads its persisted term, vote, and log through the per-node storage seam.
@@ -745,7 +745,7 @@ fn restart_churn_upholds_election_safety_across_seeds() {
     }
 }
 
-// --- Cluster singleton under the nemesis (utilities spec §4, invariant U2) ----
+// --- Cluster singleton under the nemesis (utilities spec §2.3, invariant U2) ----
 
 /// A singleton instance that greets and stops on its handoff message.
 struct Highlander;
@@ -762,7 +762,7 @@ impl Handler<Greet> for Highlander {
     }
 }
 
-/// The singleton's handoff message (utilities spec §4 item 2).
+/// The singleton's handoff message (utilities spec §2.3 item 2).
 #[derive(Clone, Serialize, Deserialize)]
 struct Halt;
 impl Message for Halt {
@@ -784,9 +784,9 @@ const SINGLETON: &str = "swarm-highlander";
 ///
 /// "Live" is judged by the *actor's* lifecycle, not the manager's report. A
 /// manager emits `SingletonStopped` when it observes the termination, on its
-/// next tick (utilities spec §5), so an instance that stops in the last tick of
+/// next tick (utilities spec §3), so an instance that stops in the last tick of
 /// a run is gone while its `Stopped` is still one tick away. `ResignId` is
-/// emitted synchronously as the identity is released (core spec §4.2 step 5),
+/// emitted synchronously as the identity is released (core spec §3.1 step 5),
 /// which is the ground truth the count wants. Taking either event as the end of
 /// an activation drops that false positive and keeps every real one: a stopped
 /// activation nobody re-activated still leaves the count at zero and fails.
@@ -837,7 +837,7 @@ impl actor_simulation::Invariant for SingletonConverged {
 /// nemesis (whose rounds end within ~7s of virtual time), then heals and lets
 /// views reconverge, so the at-quiescence exactly-one check is sound: a run
 /// that ended mid-partition could legally hold two instances. Parameterized by
-/// `mode` so the same chaos sweeps all four control planes (spec §9.4); in
+/// `mode` so the same chaos sweeps all four control planes (spec §6.4); in
 /// static mode the anchor simply never moves, and the checks still hold.
 struct SingletonChaos {
     nodes: usize,

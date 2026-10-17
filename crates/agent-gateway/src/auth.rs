@@ -1,9 +1,9 @@
 //! Tenant authentication at the gateway edge: a bearer token names the principal
-//! a request acts as (design: `docs/multi-tenant-edge.md`).
+//! a request acts as (specified by `docs/edge-spec.md`).
 //!
 //! The trust boundary is the gateway. A request presents a token in its
 //! `Authorization: Bearer` header; the gateway verifies it here, at the edge,
-//! never in an entity, whose fold must stay pure (entity §4.1), to a
+//! never in an entity, whose fold must stay pure (entity §3.1), to a
 //! [`PrincipalId`]. Every session that request then addresses is scoped under
 //! that principal by [`scoped_session`], so one tenant can never name another's
 //! entities.
@@ -113,7 +113,7 @@ pub fn bind_is_loopback(bind: &str) -> bool {
 
 /// Verify a bearer token, returning the principal it authenticates, or `None`
 /// if the token is unknown or malformed. Runs at the gateway edge, so it may be
-/// stateful and impure (unlike an entity fold).
+/// stateful and impure (unlike an entity fold). Its contract is edge §2.2.
 pub trait TokenVerifier: Send + Sync {
     fn verify(&self, token: &str) -> Option<PrincipalId>;
 }
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn a_delegated_child_key_is_addressable_by_no_principal() {
         // The shape `derive_child` mints under the parent key `alice/demo`:
-        // each component netstring-framed (agent spec §8.1).
+        // each component netstring-framed (agent spec §6.1).
         let child = "10:alice/demo/3:t-1/5:tu_42";
         let alice = PrincipalId::parse("alice").unwrap();
         // Not under alice, though her name appears inside it.

@@ -1,4 +1,4 @@
-//! The production binding, end to end (feature `guest`, machine §2.1): boot the
+//! The production binding, end to end (feature `guest`, machine §2.3): boot the
 //! machine base image, reach the guest agent, round-trip the workspace volume
 //! through the guest's tmpfs (machine §3), pause and resume at a quiescent point
 //! (machine §4), kill.
@@ -122,7 +122,7 @@ async fn probe(args: &[&str]) -> bool {
 /// Boot a machine on `mechanism` and exercise everything the entity drives
 /// through the binding seam.
 async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str) {
-    // The machine writes its drive in place (entity §7.15's departure); the test
+    // The machine writes its drive in place (facets §4.4's departure); the test
     // copies the base image so reruns start clean, standing in for the disk
     // facet's materialization.
     let scratch = tempfile::tempdir().expect("tempdir");
@@ -134,9 +134,8 @@ async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str)
         // Shorter than the default minute: a failure here should not stall the
         // suite, and both mechanisms serve well inside it on a working host.
         HostedRuntimeConfig {
-            node: "e2e".to_string(),
             ready_timeout: Duration::from_secs(45),
-            egress: None,
+            ..HostedRuntimeConfig::new("e2e")
         },
     );
     let runtime = provider

@@ -35,6 +35,7 @@
 //! `conformance_catalogue.rs` instead, because a Rust catalogue lives in a
 //! `tests/` module only its own crate can import.
 
+pub mod architecture;
 pub mod catalogue;
 pub mod citations;
 pub mod identifiers;
@@ -124,16 +125,25 @@ pub const DOCUMENTS: &[DocSpec] = &[
         scanned: true,
     },
     DocSpec {
-        id: "wal",
-        path: "docs/wal-spec.md",
-        aliases: &["wal"],
+        id: "entity",
+        path: "docs/entity-spec.md",
+        aliases: &["entity"],
+        unprefixed: Unprefixed::Own,
+        scanned: true,
+    },
+    // The entity's storage half: journal and store seams, fence, replication,
+    // shards, snapshots, and blobs.
+    DocSpec {
+        id: "entity-storage",
+        path: "docs/entity-storage-spec.md",
+        aliases: &["storage", "entity-storage"],
         unprefixed: Unprefixed::Own,
         scanned: true,
     },
     DocSpec {
-        id: "entity",
-        path: "docs/entity-spec.md",
-        aliases: &["entity"],
+        id: "entity-facets",
+        path: "docs/entity-facets-spec.md",
+        aliases: &["facets", "entity-facets"],
         unprefixed: Unprefixed::Own,
         scanned: true,
     },
@@ -153,12 +163,11 @@ pub const DOCUMENTS: &[DocSpec] = &[
         unprefixed: Unprefixed::Own,
         scanned: true,
     },
-    // §5 relates the tier model to the agent runtime's own §5, and cites into it bare.
     DocSpec {
         id: "sandbox",
         path: "docs/sandbox-spec.md",
         aliases: &["sandbox"],
-        unprefixed: Unprefixed::OwnThen(&["agent"]),
+        unprefixed: Unprefixed::Own,
         scanned: true,
     },
     DocSpec {
@@ -204,9 +213,17 @@ pub const DOCUMENTS: &[DocSpec] = &[
     },
     DocSpec {
         id: "edge",
-        path: "docs/multi-tenant-edge.md",
-        aliases: &["multi-tenant-edge"],
-        unprefixed: Unprefixed::Other(&["agent"]),
+        path: "docs/edge-spec.md",
+        aliases: &["edge", "multi-tenant-edge"],
+        unprefixed: Unprefixed::Own,
+        scanned: true,
+    },
+    // The one-page map of components and seams; it cites every spec with a prefix.
+    DocSpec {
+        id: "architecture",
+        path: "docs/architecture.md",
+        aliases: &["architecture"],
+        unprefixed: Unprefixed::Own,
         scanned: true,
     },
     DocSpec {
@@ -278,9 +295,10 @@ pub const CRATES: &[CrateSpec] = &[
         name: "actor-simulation",
         cites: &["actor"],
     },
+    // Specified by its own rustdoc: a bare citation there has no document to name.
     CrateSpec {
         name: "wal",
-        cites: &["wal"],
+        cites: &[],
     },
     CrateSpec {
         name: "compat",

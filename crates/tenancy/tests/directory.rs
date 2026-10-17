@@ -1,4 +1,4 @@
-//! The directory entity on the single-node `Local` tier (entity §7.4).
+//! The directory entity on the single-node `Local` tier (storage §2.2).
 //!
 //! Drives a principal's [`Directory`] through the public `EntityRef` API only:
 //! record ownership with listing metadata, enumerate it, query by type, forget

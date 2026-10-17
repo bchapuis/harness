@@ -1,4 +1,4 @@
-//! The production [`Clock`]: real wall-clock time backed by tokio (spec §4.6).
+//! The production [`Clock`]: real wall-clock time backed by tokio (spec §2.12.1).
 //!
 //! The framework's [`Instant`] is a logical u64-nanos value, independent of
 //! [`std::time::Instant`]. [`TokioClock`] captures a monotonic baseline at

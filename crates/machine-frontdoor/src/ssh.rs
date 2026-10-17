@@ -1,13 +1,21 @@
 //! The SSH server: a `russh` handler that terminates SSH against the
 //! machine's journaled policy and bridges each channel to the guest agent
-//! (machine §5.1).
+//! (machine §2.5).
 //!
 //! Authentication is publickey-only, checked at [`Handler::auth_publickey`]
-//! against [`MachineAuthority::authorizes`] (M4). A channel becomes live on
-//! its `exec`/`shell`/`subsystem` request: the handler opens a
-//! [`ChannelBackend`] stream, spawns a guest→host reader and a host→guest
-//! writer, and thereafter forwards `data`/`eof`/`window-change`/`signal`
-//! callbacks as [`proto`](machine_proto) frames. The guest's exit status closes the channel.
+//! against [`MachineAuthority::authorizes`] (M4). The attachment it journals
+//! names the authenticating key, not the client's word ([`principal`]). Two
+//! refusals stay distinguishable to the client: a key the policy does not
+//! authorize is an ordinary publickey failure, while a refusal by
+//! [`MachineAuthority::attach`] (this node does not lead the machine, the
+//! machine is unreachable) also disconnects with the authority's reason, so
+//! an authorized user is told where to go rather than "permission denied".
+//!
+//! A channel becomes live on its `exec`/`shell`/`subsystem` request: the
+//! handler opens a [`ChannelBackend`] stream, spawns a guest→host reader and a
+//! host→guest writer, and thereafter forwards
+//! `data`/`eof`/`window-change`/`signal` callbacks as
+//! [`proto`](machine_proto) frames. The guest's exit status closes the channel.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,13 +23,17 @@ use std::sync::Arc;
 use entity::EntityName;
 use russh::Channel;
 use russh::ChannelId;
+use russh::Disconnect;
 use russh::Sig;
+use russh::keys::HashAlg;
+use russh::keys::PublicKey;
 use russh::server::Auth;
 use russh::server::Config;
 use russh::server::Handler;
 use russh::server::Msg;
 use russh::server::Session;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use machine_host::vsock::recv_frame;
 use machine_host::vsock::send_frame;
@@ -34,7 +46,7 @@ use crate::FrontDoorError;
 use crate::MachineAuthority;
 
 /// Terminate SSH on `stream` for `machine`, bridging channels to its guest
-/// agent (machine §5.1). Presents the machine's journaled host key at KEX and
+/// agent (machine §2.5). Presents the machine's journaled host key at KEX and
 /// runs to connection close.
 pub async fn serve_connection<A, B, S>(
     stream: S,
@@ -57,13 +69,18 @@ where
     });
     // The attachment id is shared with the handler so the entrypoint can
     // journal the detach after the connection closes (the handler is consumed
-    // by `run_stream`, machine §5.1).
+    // by `run_stream`, machine §2.5).
     let attachment: Arc<std::sync::Mutex<Option<u64>>> = Arc::new(std::sync::Mutex::new(None));
+    // The session handle exists only once `run_stream` returns, after the
+    // handler has moved into the session, so it reaches the handler through a
+    // oneshot the handler awaits only when it has a refusal to deliver.
+    let (session_tx, session_rx) = oneshot::channel();
     let handler = FrontDoorHandler {
         machine: machine.clone(),
         authority: Arc::clone(&authority),
         backend,
         attachment: Arc::clone(&attachment),
+        session: Some(session_rx),
         pty: None,
         env: Vec::new(),
         channels: HashMap::new(),
@@ -71,6 +88,7 @@ where
     let session = russh::server::run_stream(config, stream, handler)
         .await
         .map_err(|e| FrontDoorError(format!("ssh handshake: {e}")))?;
+    let _ = session_tx.send(session.handle());
     let outcome = session.await;
     // The connection closed (cleanly or with an error): journal the detach.
     // Take the id out from under the lock before awaiting, so no guard spans
@@ -91,11 +109,29 @@ struct PtyParams {
     rows: u16,
 }
 
+/// The principal an attachment journals for a connection authenticated by
+/// `key` (M4): the key's SHA-256 fingerprint, the form the machine's
+/// authorized-key set is keyed by, so the journal joins each attachment to the
+/// key that made it. The SSH user name is the client's own assertion and rides
+/// beside it, in parentheses, for the operator reading the journal; it never
+/// stands alone, because the client chooses it freely.
+fn principal(user: &str, key: &PublicKey) -> String {
+    let fingerprint = key.fingerprint(HashAlg::Sha256);
+    if user.is_empty() {
+        fingerprint.to_string()
+    } else {
+        format!("{fingerprint} ({user})")
+    }
+}
+
 struct FrontDoorHandler<A, B> {
     machine: EntityName,
     authority: Arc<A>,
     backend: Arc<B>,
     attachment: Arc<std::sync::Mutex<Option<u64>>>,
+    /// The connection's session handle, delivered once `run_stream` returns;
+    /// taken by the first refusal that disconnects with a reason.
+    session: Option<oneshot::Receiver<russh::server::Handle>>,
     pty: Option<PtyParams>,
     /// `env` requests accepted so far, consumed by the `exec` that follows.
     env: Vec<(String, String)>,
@@ -205,7 +241,7 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::PublicKey,
+        public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         // Possession is proven by russh (the signature); the front door
         // checks *membership* against the machine's journaled set (M4). No
@@ -213,12 +249,33 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
         if !self.authority.authorizes(&self.machine, public_key).await {
             return Ok(Auth::reject());
         }
-        match self.authority.attach(&self.machine, user).await {
+        let principal = principal(user, public_key);
+        match self.authority.attach(&self.machine, &principal).await {
             Ok(attachment) => {
                 *self.attachment.lock().expect("attachment lock") = Some(attachment);
                 Ok(Auth::Accept)
             }
-            Err(_) => Ok(Auth::reject()),
+            Err(refusal) => {
+                // The key is authorized, so a bare rejection would tell its
+                // holder the wrong thing. Disconnect with the authority's
+                // reason after the rejection goes out. Spawned, because the
+                // session delivers the disconnect from the same loop that is
+                // awaiting this callback.
+                if let Some(session) = self.session.take() {
+                    tokio::spawn(async move {
+                        if let Ok(handle) = session.await {
+                            let _ = handle
+                                .disconnect(
+                                    Disconnect::ByApplication,
+                                    refusal.to_string(),
+                                    String::new(),
+                                )
+                                .await;
+                        }
+                    });
+                }
+                Ok(Auth::reject())
+            }
         }
     }
 

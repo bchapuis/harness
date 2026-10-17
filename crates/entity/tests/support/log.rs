@@ -1,7 +1,7 @@
 //! An appendable log entity and the reference subscription reconciler.
 //!
 //! Shared because two suites drive the same object and the same reconciliation
-//! rule: `subscription_faults.rs` scripts individual §14 fault cases against it,
+//! rule: `subscription_faults.rs` scripts individual §11 fault cases against it,
 //! and `subscription_swarm.rs` sweeps it under the nemesis. An independently
 //! maintained second copy of a reconciler drifts into agreeing with whatever the
 //! code does (docs/simulation-testing.md).
@@ -74,7 +74,7 @@ impl EntityHandler<Append> for LogEntity {
     }
 }
 
-/// The backfill read (the §7.3 `load` a subscriber reconciles against): records
+/// The backfill read (the storage §2.1 `load` a subscriber reconciles against): records
 /// after `from`, as `(seq, value)`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReadFrom {

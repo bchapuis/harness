@@ -1,29 +1,42 @@
-//! Persistent machines (machine spec): a durable lightweight VM as an entity.
+//! Persistent machines: a durable, name-addressed lightweight VM as an entity.
 //!
-//! A **machine** is an entity plus two things: durable storage (the rootfs as a
-//! disk facet, entity §7.15, and `/workspace` as a workspace facet, entity §7.11)
-//! and a network seam (machine §5). Everything else (identity, the journal,
-//! the single-writer fence, placement, virtual activation, idle hibernation,
-//! lossless failover) is inherited from the entity unchanged (machine §1). This
-//! crate supplies the entity half:
+//! A **machine** is an entity whose durable state is a raw disk (the rootfs, a
+//! disk facet, facets §4.4) and a synced `/workspace` (a workspace facet,
+//! facets §4.1), reached over SSH, and whose live guest is disposable.
+//! Identity, the journal, the single-writer fence, placement, activation, idle
+//! hibernation, and failover are the entity's, unchanged. This crate is the
+//! entity half of the machine; the SSH front door is `machine-frontdoor`, the
+//! guest mechanisms are `machine-host`, and the guest-agent wire is
+//! `machine-proto`.
 //!
-//! - [`Machine`], the entity: `Facets = (Disk, Alarm, Ws)`, facet-0 state holding
-//!   only metadata (keys, host key, egress policy, sizing, intervals; machine
-//!   §3), and the session-grained durability discipline of machine §4.
-//! - [`MachineRuntimeProvider`]/[`MachineRuntime`], the runtime binding seam:
-//!   the entity drives boot, pause-for-capture, resume, and kill through it, so
-//!   the deterministic simulation runs a
-//!   [`FakeRuntimeProvider`](runtime::fake::FakeRuntimeProvider) while
-//!   production runs a [`HostedRuntimeProvider`](runtime::hosted::HostedRuntimeProvider)
-//!   over whichever mechanism the node's `machine_host::MachineHost` is; a
-//!   microVM or a container (machine §2.1, sandbox §3.5).
+//! Seams:
 //!
-//! The network seam has two halves, and both read the journaled state this
-//! crate defines (authorized keys, host key, egress policy, attachments). The
-//! SSH front door (machine §5.1, M4) lives in `machine-frontdoor`. Policy-bound
-//! egress (machine §5.2, M6) lives here: the hosted binding realizes a
-//! machine's journaled policy at boot as a per-machine tap and ruleset, on a
-//! node configured with an [`EgressConfig`].
+//! - [`Machine`] implements the entity's `Entity` with `Facets = (Disk, Alarm,
+//!   Ws)`: metadata-only facet-0 state ([`MachineState`]), the journal
+//!   ([`MachineEvent`]), and the command surface front doors and operators use
+//!   ([`Provision`], [`Attach`], [`Detach`], [`DoorPolicy`], [`AddKey`],
+//!   [`RevokeKey`], [`SetEgress`], [`Status`], and the workspace file commands).
+//! - [`MachineRuntimeProvider`] and [`MachineRuntime`], the runtime binding the
+//!   entity drives its guest through (boot, pause, resume, kill, workspace push
+//!   and pull). A plug point: a node injects one provider into the entity
+//!   factory. The simulation binds [`fake::FakeRuntimeProvider`]; production
+//!   binds `hosted::HostedRuntimeProvider` (feature `host`), which holds its
+//!   guest through whichever `machine_host::MachineHost` the node was
+//!   configured with.
+//! - [`EgressPolicy`], journaled per machine, and [`EgressConfig`], a node's
+//!   egress plumbing: the egress half of the network seam (M6), realized by the
+//!   hosted binding at boot.
+//!
+//! Mechanism. The `entity` module holds the session-grained durability
+//! discipline: the checkpoint alarm is the whole capture cadence and the
+//! session lease at once (every fire is a fenced append), and one capture
+//! spine pulls the workspace, quiesces the guest, captures the disk in the same
+//! batch, and resumes. `runtime::hosted` maps the binding onto `machine-host`
+//! and `machine-proto`, bounding every exchange with the guest agent in size
+//! and time. `net` generates each machine's egress ruleset as a pure function
+//! and, behind feature `net` on Linux, installs it with a per-machine tap.
+//!
+//! Specified by `docs/machine-spec.md`.
 
 // The docs link the hosted binding, which resolves only with `host` on. CI
 // checks them with every feature, so a narrower build warns.

@@ -2,7 +2,7 @@
 //!
 //! Defines reusable actors and messages that work on *both* the single-node
 //! `SimSystem` and the multi-node `SimNode` (the actors are generic over the
-//! system type: generic actors are allowed by the spec, §1.2), plus builders
+//! system type: generic actors are allowed by the spec, §1.1), plus builders
 //! for the common system topologies. The cluster suites also share a few
 //! `SimNode`-only fixtures: `Echo`, `Watcher`, and the `drive` window. Each
 //! conformance test file pulls this in with `mod support;`.
@@ -283,7 +283,7 @@ pub fn local(seed: u64) -> (Simulation, SimSystem) {
     (sim, system)
 }
 
-/// A single-node system whose event stream is recorded (spec §16).
+/// A single-node system whose event stream is recorded (spec §2.7).
 pub fn local_recorded(seed: u64) -> (Simulation, SimSystem, Recorder) {
     let sim = Simulation::new(seed);
     let recorder = Recorder::new();
@@ -294,7 +294,7 @@ pub fn local_recorded(seed: u64) -> (Simulation, SimSystem, Recorder) {
 }
 
 /// A network for a multi-node cluster; call `.join(node)` to bring nodes up.
-/// `swim` enables gossip-based membership (spec §9.4.4) with conservative
+/// `swim` enables gossip-based membership (spec §6.4.4) with conservative
 /// downing when `Some`; `None` runs static mode without a detector.
 pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) {
     let sim = Simulation::new(seed);
@@ -316,7 +316,7 @@ pub fn drive<T: Send + 'static>(
     sim.run_for_output(settle, future)
 }
 
-// --- Linearizability: the shared register object (spec §18.4) ----------------
+// --- Linearizability: the shared register object (docs/simulation-testing.md) ----------------
 //
 // Shared by `conformance_linearizability.rs` (single-node scenarios) and
 // `conformance_linearizability_swarm.rs` (the cluster sweep), so both decide a
@@ -325,7 +325,7 @@ pub fn drive<T: Send + 'static>(
 // The mutating operations carry an **idempotency key** (`ReqId`), which is what
 // makes the object linearizable when it is reached across a faulted network.
 // The framework's delivery guarantee is at-most-once *at the caller* (spec
-// §7.2): a frame the wire duplicates is handled twice by the recipient, and the
+// §4): a frame the wire duplicates is handled twice by the recipient, and the
 // caller resolves against whichever reply survives. For a `Cas` the two
 // handlings answer differently (the first flips the value and returns `true`,
 // the second finds it already flipped and returns `false`), so a caller whose
@@ -337,10 +337,10 @@ pub fn drive<T: Send + 'static>(
 // --- The register actor -------------------------------------------------------
 
 // A system-generic register so the same actor runs on `SimSystem` and
-// `SimNode` (generic actors are allowed by the spec, §1.2).
+// `SimNode` (generic actors are allowed by the spec, §1.1).
 
 /// A caller's name for one mutating call *attempt*: the idempotency key of
-/// spec §7.2. Unique per (client, operation), and identical across every copy
+/// spec §4. Unique per (client, operation), and identical across every copy
 /// of the same request the wire may deliver.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ReqId {

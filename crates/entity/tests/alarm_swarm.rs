@@ -1,10 +1,10 @@
-//! Alarms under the cluster fault swarm (entity §7.16, invariant **E21**).
+//! Alarms under the cluster fault swarm (facets §4.5, invariant **E21**).
 //!
 //! `alarm.rs` and `alarm_cluster.rs` assert at-most-once firing through *scripted*
 //! scenarios: a clean run, a cancel, a re-arm, one leader crash. This file
 //! applies the same property the V&V way: a [`ClusterWorkload`] swept across
 //! seeds while the nemesis injects partitions, crashes, pauses, heals, loss,
-//! duplication, and delay, with a [`Checker`] watching the §13 event stream live.
+//! duplication, and delay, with a [`Checker`] watching the §10 event stream live.
 //!
 //! **What makes E21 observable here.** Each entity is armed exactly once and
 //! receives no other mutating command for the rest of the run, so `TimerState`'s
@@ -201,7 +201,7 @@ fn config() -> EntityConfig {
         shards: SHARDS,
         // Long enough that an entity does not hibernate between its arm and its
         // deadline, though the pending-alarm veto would hold it resident anyway
-        // (§7.16).
+        // (facets §4.5).
         idle_after: Duration::from_secs(600),
         snapshot_every: 8,
         ..EntityConfig::default()
@@ -219,7 +219,7 @@ impl ClusterWorkload for AlarmSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (§7.6); every node is a control voter so the map group can form.
+        // (storage §6); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -379,7 +379,7 @@ fn the_alarm_swarm_is_reproducible() {
 /// The other half of the swarm's claim, on a clean cluster: an armed alarm
 /// actually *does* fire. Without this, `fired <= 1` would be satisfied by a
 /// fixture that never fires at all, and the swarm would be green while asserting
-/// nothing, the failure mode §2.1 is about.
+/// nothing, the failure mode §1 is about.
 #[test]
 fn one_arm_fires_exactly_once_without_faults() {
     use actor_simulation::SimNetwork;

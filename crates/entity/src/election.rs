@@ -1,13 +1,13 @@
-//! The per-shard leader-election group (spec §7.1, §8).
+//! The per-shard leader-election group (spec storage §3.1, §5).
 //!
 //! A shard's placement is a small Raft group of its *R* replicas (the
 //! **leader-election group**) that elects one leader per term and records the
-//! replica set. It holds **no entity data** (§7.1). Its only role is to answer "who
+//! replica set. It holds **no entity data** (storage §3.1). Its only role is to answer "who
 //! may write this shard's entities, and under which term," and that term is the
-//! single-writer fencing token every per-entity append carries (§8).
+//! single-writer fencing token every per-entity append carries (storage §5).
 //!
 //! [`LeaderElection`] is the thin wrapper the journal sees over that group, built on
-//! the same `actor-cluster` Raft the control plane uses (actor §9.4.3). The group is
+//! the same `actor-cluster` Raft the control plane uses (actor §6.4.3). The group is
 //! created and reconfigured by [`shardmap`](crate::shardmap); this wrapper only reads
 //! its leadership and term.
 
@@ -17,7 +17,7 @@ use actor_core::NodeId;
 
 use crate::journal::Term;
 
-/// The leadership and term of one shard's leader-election group (spec §8).
+/// The leadership and term of one shard's leader-election group (spec storage §5).
 pub(crate) struct LeaderElection<R: RaftConsensus> {
     consensus: R,
     group: GroupId,
@@ -26,7 +26,7 @@ pub(crate) struct LeaderElection<R: RaftConsensus> {
 
 impl<R: RaftConsensus> LeaderElection<R> {
     /// Wrap the shard's leader-election `group` on `consensus`. The group must
-    /// already be created (`shardmap` does so as the allocation commits, §7.6).
+    /// already be created (`shardmap` does so as the allocation commits, storage §6).
     pub(crate) fn new(consensus: R, group: GroupId) -> LeaderElection<R> {
         let self_node = consensus.node();
         LeaderElection {
@@ -36,14 +36,14 @@ impl<R: RaftConsensus> LeaderElection<R> {
         }
     }
 
-    /// Whether this node currently leads the shard, the single-writer gate (§8):
+    /// Whether this node currently leads the shard, the single-writer gate (storage §5):
     /// only the leader appends; a follower's append is fenced with `NotLeader`.
     pub(crate) fn is_leader(&self) -> bool {
         self.consensus.group_is_leader(self.group)
     }
 
     /// The shard's current term, the fencing token stamped on every per-entity
-    /// append (§8). `None` on a node with no engine or not in the group.
+    /// append (storage §5). `None` on a node with no engine or not in the group.
     pub(crate) fn term(&self) -> Option<Term> {
         self.consensus.group_term(self.group).map(Term::new)
     }

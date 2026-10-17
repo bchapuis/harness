@@ -39,7 +39,7 @@ use tokio::io::BufReader;
 use crate::authority::NodeMachine;
 
 /// How long an admin-issued entity command waits. Provisioning imports the base
-/// image whole (entity §7.15), so it gets the long end.
+/// image whole (facets §4.4), so it gets the long end.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Serialize, Deserialize)]

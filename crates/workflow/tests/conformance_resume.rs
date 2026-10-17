@@ -1,4 +1,4 @@
-//! Differential resume (workflow spec §3.1, §4.4): W1 and W6, decided by comparing
+//! Differential resume (workflow spec §3.1, §4.3): W1 and W6, decided by comparing
 //! independent computations of the same desired set.
 //!
 //! The workflow's central claim is that resume is not a special case: the desired
@@ -39,7 +39,7 @@ const SLOW: Duration = Duration::from_secs(30);
 
 /// The desired set an offline fold of the entity's journal computes: `apply` over
 /// every committed record, then the consumer's `pending`. Reads the journal
-/// through the public read path (entity §7.5), so it sees exactly the committed
+/// through the public read path (entity §6), so it sees exactly the committed
 /// prefix and nothing an activation held in memory.
 fn folded_outstanding(
     sim: &Simulation,

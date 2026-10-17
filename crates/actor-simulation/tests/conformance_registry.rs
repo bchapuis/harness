@@ -1,4 +1,4 @@
-//! Conformance: **registry-based** membership (spec §9.4.2); the control plane
+//! Conformance: **registry-based** membership (spec §6.4.2); the control plane
 //! delegated to an external registry.
 //!
 //! The authoritative member set lives in a registry the cluster reads but does
@@ -7,9 +7,9 @@
 //! registry mutation ever declares `down`. The operator drives the lifecycle by
 //! mutating the registry: register (admission *is* the entry), the reversible
 //! `drain`/`resume` cordon, and deregistration (the terminal removal, spec
-//! §8.1). These tests pin that behavior (the Kubernetes node-lifecycle model)
+//! §5.1). These tests pin that behavior (the Kubernetes node-lifecycle model)
 //! against the simulated registry with seeded latency, staleness, and outage
-//! (spec §18.2, §18.3).
+//! (spec §2.12.2, §10).
 
 mod support;
 
@@ -61,7 +61,7 @@ fn registry_cluster(sim: &Simulation, nodes: &[NodeId]) -> (SimRegistry, SimNetw
 
 #[test]
 fn admission_is_the_registry_entry() {
-    // Spec §9.4.2 item 2: a node is admitted by *appearing in the registry*; the
+    // Spec §6.4.2 item 2: a node is admitted by *appearing in the registry*; the
     // `joining` state is unused. Register C, bring it up knowing only seed A, and
     // the whole cluster converges on C `Up` at the entry's revision; no node ever
     // observes C as `joining`.
@@ -103,13 +103,13 @@ fn admission_is_the_registry_entry() {
             .events()
             .iter()
             .any(|e| matches!(e, Event::MemberJoining { node, .. } if *node == C)),
-        "the joining state is unused in registry mode (spec §9.4.2 item 2)",
+        "the joining state is unused in registry mode (spec §6.4.2 item 2)",
     );
 }
 
 #[test]
 fn drain_then_resume_round_trips_cluster_wide() {
-    // The reversible cordon (spec §9.4.2 item 5): the operator drains B in the
+    // The reversible cordon (spec §6.4.2 item 5): the operator drains B in the
     // registry, the whole cluster (B included) converges on `Draining`; a later
     // resume returns it to `Up`.
     let sim = Simulation::new(2);
@@ -178,7 +178,7 @@ fn drain_then_resume_round_trips_cluster_wide() {
 
 #[test]
 fn a_node_under_maintenance_keeps_its_membership() {
-    // The motivating case (spec §9.4.2 item 4): a node down for maintenance must
+    // The motivating case (spec §6.4.2 item 4): a node down for maintenance must
     // not be evicted. Drain B, then take it fully offline (a maintenance outage).
     // It goes `unreachable` on the detector axis but stays a member (never
     // `down`, never pruned), and its status is preserved for when it returns.
@@ -222,7 +222,7 @@ fn a_node_under_maintenance_keeps_its_membership() {
 
 #[test]
 fn the_detector_never_downs_a_node_in_registry_mode() {
-    // Spec §9.4.2 item 4 and invariant #16, unconditionally: the registry mode
+    // Spec §6.4.2 item 4 and invariant #16, unconditionally: the registry mode
     // carries no downing policy at all; there is nothing to even misconfigure.
     // A partitioned node only ever becomes `unreachable`; downing is the
     // registry's alone.
@@ -241,15 +241,15 @@ fn the_detector_never_downs_a_node_in_registry_mode() {
     );
     assert!(
         !a.membership().is_down(B),
-        "only a registry mutation declares down (spec §9.4.2 item 4)",
+        "only a registry mutation declares down (spec §6.4.2 item 4)",
     );
 }
 
 #[test]
 fn deregistration_is_terminal_and_runs_the_cascade() {
-    // Deregistration is the deliberate, terminal removal (spec §9.4.2 items 3–4,
+    // Deregistration is the deliberate, terminal removal (spec §6.4.2 items 3–4,
     // invariant #15): its revision finalizes `down` and runs the node-down
-    // cascade (spec §8.1) (watchers get `NodeDown`, in-flight and subsequent
+    // cascade (spec §5.1) (watchers get `NodeDown`, in-flight and subsequent
     // calls fail `Unreachable`), and the node never returns, not even if the
     // same `NodeId` is re-registered.
     let sim = Simulation::new(5);
@@ -267,7 +267,7 @@ fn deregistration_is_terminal_and_runs_the_cascade() {
     });
     sim.run_for(Duration::from_millis(200)); // the remote watch registers
 
-    // The operator API on any node dispatches to the registry (spec §9.4.2).
+    // The operator API on any node dispatches to the registry (spec §6.4.2).
     let operator = a.clone();
     let acknowledged = drive(&sim, Duration::from_millis(200), async move {
         operator.decommission(B).await
@@ -291,7 +291,7 @@ fn deregistration_is_terminal_and_runs_the_cascade() {
 
     // `down` is terminal (invariant #15): re-registering the same `NodeId` does
     // not resurrect it; terminal stickiness orders before the stamp rule.
-    // Rejoining after down is a *new identity* (spec §9.1).
+    // Rejoining after down is a *new identity* (spec §6.1).
     registry.register(B);
     sim.run_for(Duration::from_secs(1));
     assert!(
@@ -304,7 +304,7 @@ const ECHOES: Key<Echo> = Key::new("echoes");
 
 #[test]
 fn draining_a_node_routes_service_discovery_away_from_it() {
-    // Load-shedding (spec §9.4.2 item 5, §13 #4): an `Echo` registered on B is
+    // Load-shedding (spec §6.4.2 item 5, §2.6 #4): an `Echo` registered on B is
     // discoverable cluster-wide, but once the operator drains B a lookup routes
     // around it; the registration survives (it is not pruned like a `down`
     // node's), so a later resume restores it. The node stays a member throughout.
@@ -355,7 +355,7 @@ fn draining_a_node_routes_service_discovery_away_from_it() {
 fn the_operator_api_works_from_any_node() {
     // There is no designated leader to command: the registry is the single
     // writer, so the operator API dispatches to it from *any* node (spec
-    // §9.4.2). B's drain of C is as authoritative as anyone's.
+    // §6.4.2). B's drain of C is as authoritative as anyone's.
     let sim = Simulation::new(6);
     let (_registry, net) = registry_cluster(&sim, &[A, B, C]);
     let a = net.join(A);
@@ -379,7 +379,7 @@ fn the_operator_api_works_from_any_node() {
 
 #[test]
 fn registry_unavailability_pauses_changes_only() {
-    // Spec §9.4.2 item 6: while the registry is unreachable no membership
+    // Spec §6.4.2 item 6: while the registry is unreachable no membership
     // *changes* land, but the data plane keeps running on the last-synced view,
     // and the outage is never treated as evidence about peer liveness.
     let sim = Simulation::new(8);
@@ -422,7 +422,7 @@ fn registry_unavailability_pauses_changes_only() {
 
 #[test]
 fn a_stale_and_laggy_registry_still_converges() {
-    // Invariant #14 under registry faults (spec §18.3): with every fetch
+    // Invariant #14 under registry faults (docs/simulation-testing.md): with every fetch
     // delayed and half of them served stale, the sync loop's monotonic-revision
     // guard absorbs the staleness and the cluster still converges on the
     // registry's latest state; a stale read can never revert a newer decision.
@@ -468,7 +468,7 @@ fn a_stale_and_laggy_registry_still_converges() {
 #[test]
 fn a_registry_decision_converges_under_transport_faults() {
     // Registry decisions reach nodes by sync, and stamped entries also ride the
-    // ordinary gossip as a safe accelerant (spec §9.4.2 item 1), under heavy
+    // ordinary gossip as a safe accelerant (spec §6.4.2 item 1), under heavy
     // transport faults both paths merge to the same stamped state.
     let sim = Simulation::new(10);
     let faults = FaultPolicy {
@@ -513,7 +513,7 @@ fn a_network_partitioned_node_still_syncs_the_registry() {
     // The registry is an *external* authority: a node partitioned from its peers
     // still reaches it, so a terminal decision lands even where gossip cannot;
     // unlike gossip-based mode, peer connectivity is not the control plane's
-    // dissemination path (spec §9.4.2).
+    // dissemination path (spec §6.4.2).
     let sim = Simulation::new(11);
     let (registry, net) = registry_cluster(&sim, &[A, B, C]);
     let a = net.join(A);

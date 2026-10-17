@@ -1,22 +1,72 @@
-//! The agent runtime (agent-spec.md): compound AI sessions run as **entities** on
-//! a mutualized cluster. An agent is an entity ([`entity`]) plus a self-driving
-//! loop, a model seam, and a sandbox; identity, the journal, the single-writer
-//! fence, placement, activation, hibernation, and lossless failover are inherited
-//! from the entity unchanged.
+//! The agent runtime: compound AI sessions (loops of model calls, tool calls,
+//! and delegation) run as entities on a shared cluster. A session is an
+//! [`entity`] whose activation drives itself as a [`workflow`]: identity, the
+//! journal, the single-writer fence, placement, activation, hibernation, and
+//! failover are the entity's, and the derive-launch-settle cycle is the
+//! workflow's. This crate adds the transcript and its fold, two seams, kinds,
+//! budgets, delegation, and cancellation. Specified by `docs/agent-spec.md`.
 //!
-//! The design in one sentence (§2.1): **the entity is the session; the activation
-//! and the sandbox are disposable; the seams are the only world.** The loop runs
-//! as the entity's activation behavior: serial, journaled, effect-free outside
-//! its two seams (the [`Model`] and the [`Sandbox`]) and the entity's own journal,
-//! with every tool effect landing in one isolated environment per session (§5.1).
-//! Time, randomness, task spawning, transport, and the journal come from entity
-//! and the core seams, so one seed reproduces an entire multi-node agentic run
-//! (§12).
+//! # Seams
+//!
+//! - [`Model`]: inference, one request and one response. Production adapters
+//!   build on the [`http`] kit: a deployment supplies [`http::HttpPost`] (the
+//!   socket), an adapter crate a [`http::Protocol`] (the wire format), and
+//!   [`http::ProtocolModel`] joins them under a bounded, seeded retry.
+//! - [`SandboxProvider`] and [`Sandbox`]: the isolated environment every
+//!   declared tool except `delegate` runs in, one per activation, opened
+//!   lazily and called at the [`Tier`] each tool declares.
+//! - [`Kind`], [`Kinds`], [`ToolDecl`], [`ToolRegistry`]: a deployment's agent
+//!   types; the registry is the allowlist a call dispatches against.
+//! - [`Harness`] and [`SessionRef`]: the client view (prompt, cancel, tail,
+//!   follow) for applications, the HTTP edge, and delegating parents.
+//! - [`Record`] and [`AgentEvent`]: the journal schema every reader depends
+//!   on, and the checker-facing event vocabulary.
+//!
+//! The session type implements [`entity::Entity`] and [`workflow::Workflow`].
+//!
+//! # Mechanism
+//!
+//! The session entity (module `agent`) folds [`Record`]s into its state
+//! (module `session`) and implements the workflow: `desired` computes the
+//! effects committed state calls for (the step's model call, its tool calls
+//! and delegations, owed cancels), `perform` runs one effect on the seams, and
+//! `settle` folds its outcome into records. Ahead of every tick an
+//! environment pre-pass (`Agent::reconcile`) settles what no fold can express:
+//! opening the sandbox, journaling a tier acquisition, reporting a lost
+//! workspace. After each sandboxed call the workspace facet is captured, so
+//! the call's file delta commits with its outcome.
+//!
+//! The client view (module `client`) hosts one entity type per kind through
+//! the entity's `entities_named` factory, injecting the node's seams, and
+//! implements the attach protocol `prompt` and a delegation's child wait
+//! share: an ephemeral reply mailbox per submit attempt, re-submitted under
+//! the same `TurnId`. Every operation is launched through the system's
+//! `Spawner` and timed by its `Clock`, so one seed reproduces a multi-node run
+//! under simulation.
 //!
 //! ```ignore
-//! let h = Harness::builder(system, &kinds).host_all(model, sandboxes).build();
-//! let s = h.session("researcher", SessionId::new("report-42"));
-//! let out = s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus.")).await;
+//! // A kind, identical on every node; the registry is the allowlist.
+//! let researcher = Kind::new("You are a research agent.")
+//!     .tool("read_file", "Read a workspace file", &READ_SCHEMA, Tier::Workspace)
+//!     .delegates_to(&["researcher"])
+//!     .sandbox(SandboxProfile::image("workspace:base"))
+//!     .entity(EntityConfig { shards: 16, ..EntityConfig::default() })
+//!     .budget(Budget::new(200_000, 50));
+//! let kinds = Kinds::new().register("researcher", researcher);
+//!
+//! // Per node: one harness, with the model and sandbox seams injected.
+//! let h = Harness::cluster(system, &kinds, model, sandboxes);
+//!
+//! // Any node: address the session by name; its shard leader hosts it.
+//! let s = h.session("researcher", SessionId::new("report-42"))?;
+//! match s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus.")).await {
+//!     Ok(Ok(completion)) => println!("{}", completion.text()),
+//!     Ok(Err(run_error)) => eprintln!("run ended: {run_error}"),
+//!     // A caller bug (the TurnId reused for other content): fix, never retry.
+//!     Err(PromptError::Rejected(reject)) => eprintln!("{reject}"),
+//!     // Ambiguous or transient: re-prompting the same TurnId is safe.
+//!     Err(PromptError::Entity(e)) => eprintln!("retry t-1: {e}"),
+//! }
 //! ```
 
 mod agent;

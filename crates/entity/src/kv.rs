@@ -1,12 +1,12 @@
-//! The KV facet (spec §7.13): an ordered map of small values on the entity.
+//! The KV facet (spec facets §4.2): an ordered map of small values on the entity.
 //!
-//! The smallest **logical facet** (§7.12): its records are `Put`/`Delete`
+//! The smallest **logical facet** (facets §3): its records are `Put`/`Delete`
 //! operations under the kv tag, folded into an ordered map; its
 //! composite-snapshot contribution is the encoded map; its blob roots are the
 //! ids of **spilled** values. An entity declares it with `type Facets = (Kv, …)`
 //! and reaches it through [`EntityCtx::kv`](crate::EntityCtx::kv).
 //!
-//! **Staging (§7.12).** Writes stage in a per-command overlay: reads through the
+//! **Staging (facets §3).** Writes stage in a per-command overlay: reads through the
 //! handle see committed-plus-staged (read-your-staged-writes), and the staged
 //! operations become the command's tagged records; committed atomically with
 //! the entity's events and every other facet's records (E19), or dropped for
@@ -14,14 +14,14 @@
 //!
 //! **Transparent spill.** A value above [`INLINE_MAX`] is stored in the entity's
 //! blob area (durable on a write quorum *before* the map references it, the
-//! §7.10 discipline) and the map keeps only its [`BlobId`]; `get` fetches it
+//! storage §9 discipline) and the map keeps only its [`BlobId`]; `get` fetches it
 //! back, verified by content (E17). Spilled ids are the facet's root set (F3),
 //! so a deleted or overwritten key's spilled bytes become orphans reclaimed by
 //! the next [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) sweep, which unions the
 //! facet roots so a sweep can never drop a *live* spilled value.
 //!
-//! Native rather than sugar over SQL (§7.13): no C dependency, the form lives in
-//! memory, and it runs unchanged under deterministic simulation (§14).
+//! Native rather than sugar over SQL (facets §4.2): no C dependency, the form lives in
+//! memory, and it runs unchanged under deterministic simulation (§11).
 
 use actor_core::join_all_results;
 use std::collections::BTreeMap;
@@ -46,12 +46,12 @@ use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
 
 /// Values at or below this many bytes are stored inline in the map; larger
-/// values spill to the entity's blob area (spec §7.13). The bound keeps the
+/// values spill to the entity's blob area (spec facets §4.2). The bound keeps the
 /// composite snapshot small (the map is re-encoded whole at every snapshot)
 /// while sparing small values a blob round-trip.
 pub const INLINE_MAX: usize = 64 << 10; // 64 KiB
 
-/// The KV facet marker (spec §7.13): declare `type Facets = (Kv, …)` and reach
+/// The KV facet marker (spec facets §4.2): declare `type Facets = (Kv, …)` and reach
 /// the map through [`EntityCtx::kv`](crate::EntityCtx::kv).
 pub struct Kv;
 
@@ -65,7 +65,7 @@ enum KvValue {
     Spilled { id: BlobId, len: u64 },
 }
 
-/// One kv record (spec §7.13): the unit of durable change under the kv tag.
+/// One kv record (spec facets §4.2): the unit of durable change under the kv tag.
 #[derive(Serialize, Deserialize)]
 enum KvOp {
     Put { key: String, value: KvValue },
@@ -78,7 +78,7 @@ pub struct KvForm {
     map: BTreeMap<String, KvValue>,
 }
 
-/// The per-command stage (spec §7.12): the staged writes as an overlay
+/// The per-command stage (spec facets §3): the staged writes as an overlay
 /// (`Some` = staged put, `None` = staged delete) giving the handler
 /// read-your-staged-writes. It drains into one record per touched key (last
 /// write to a key wins, exactly as the fold would resolve the sequence).
@@ -141,9 +141,9 @@ impl Facet for Kv {
     }
 }
 
-/// The handler-facing kv accessor (spec §7.13), obtained from
+/// The handler-facing kv accessor (spec facets §4.2), obtained from
 /// [`EntityCtx::kv`](crate::EntityCtx::kv). Reads see committed-plus-staged;
-/// writes stage into the current command's atomic batch (§7.12).
+/// writes stage into the current command's atomic batch (facets §3).
 pub struct KvHandle<'a, G: Entity, I>
 where
     G::Facets: HasFacet<Kv, I>,
@@ -154,9 +154,9 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's KV map (spec §7.13). Compiles exactly when the entity declares
+    /// The entity's KV map (spec facets §4.2). Compiles exactly when the entity declares
     /// the [`Kv`] facet (`type Facets = (Kv, …)`): the E10 discipline applied
-    /// to storage. Writes are valid only inside a command handler (§7.12).
+    /// to storage. Writes are valid only inside a command handler (facets §3).
     pub fn kv<I>(&self) -> KvHandle<'_, G, I>
     where
         G::Facets: HasFacet<Kv, I>,
@@ -174,7 +174,7 @@ where
     G::Facets: HasFacet<Kv, I>,
 {
     /// Resolve `key`'s current value through the overlay: a staged put or
-    /// delete wins over the committed map (read-your-staged-writes, §7.12),
+    /// delete wins over the committed map (read-your-staged-writes, facets §3),
     /// and reduce it with `read`, without cloning the stored bytes.
     fn resolve<R>(&self, key: &str, read: impl FnOnce(Option<&KvValue>) -> R) -> R {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
@@ -195,9 +195,9 @@ where
         }
     }
 
-    /// Stage `key = value` into the current command's batch (§7.12). A value
+    /// Stage `key = value` into the current command's batch (facets §3). A value
     /// above [`INLINE_MAX`] spills to the entity's blob area first: durable on a
-    /// write quorum before the map references it (§7.10); if the command later
+    /// write quorum before the map references it (storage §9); if the command later
     /// fails, the spilled bytes are an orphan the next sweep reclaims.
     pub async fn put(&self, key: impl Into<String>, value: Vec<u8>) -> Result<(), EntityError> {
         let stored = if value.len() > INLINE_MAX {
@@ -225,7 +225,7 @@ where
 
     /// The committed keys with `prefix` overlaid with this command's staged
     /// puts and deletes, in key order, each projected through `project`: the
-    /// one implementation of the prefix walk (read-your-staged-writes, §7.12);
+    /// one implementation of the prefix walk (read-your-staged-writes, facets §3);
     /// a staged `Some` wins over the committed value, a staged `None` deletes.
     /// `project` decides what a hit costs: the value itself, or nothing.
     fn merged<V>(&self, prefix: &str, project: impl Fn(&KvValue) -> V) -> BTreeMap<String, V> {
@@ -255,7 +255,7 @@ where
         })
     }
 
-    /// The keys with `prefix`, in order, through the overlay (§7.13). Projects
+    /// The keys with `prefix`, in order, through the overlay (facets §4.2). Projects
     /// to `()`: it never touches the values, so a large inline payload under
     /// the prefix costs nothing here (unlike [`list`](Self::list)).
     pub fn keys(&self, prefix: &str) -> Vec<String> {
@@ -267,7 +267,7 @@ where
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, EntityError> {
         let entries = self.merged(prefix, KvValue::clone);
         // `join_all_results`, not `try_join_all`: a short-circuiting join drops
-        // the fetches still in flight and abandons their asks (core spec §18.5 #1).
+        // the fetches still in flight and abandons their asks (core spec §10 #1).
         join_all_results(entries.into_iter().map(|(key, value)| async move {
             Ok(match value {
                 KvValue::Inline(bytes) => (key, bytes),

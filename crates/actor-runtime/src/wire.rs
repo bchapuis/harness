@@ -1,14 +1,14 @@
-//! Length-delimited framing of transport messages on a byte stream (spec §7).
+//! Length-delimited framing of transport messages on a byte stream (spec §2.13).
 //!
 //! Each message goes out as a `u32` big-endian length prefix followed by the
 //! codec-encoded [`Wire`] bytes. Reading enforces a maximum size and surfaces a
 //! malformed or oversized message as an [`io::Error`]; the caller tears down the
-//! **association**, not the node (spec §7). The handshake [`Hello`] preamble uses
+//! **association**, not the node (spec §2.13). The handshake [`Hello`] preamble uses
 //! the same framing.
 //!
 //! [`Wire`] is the transport's own envelope: it carries either an actor
 //! [`Frame`] (handed up to the cluster) or an [`Endpoints`](Wire::Endpoints)
-//! table (consumed by the transport itself for address discovery, spec §9.3).
+//! table (consumed by the transport itself for address discovery, spec §2.13).
 
 use std::io;
 use std::net::SocketAddr;
@@ -28,13 +28,13 @@ use tokio::io::AsyncWriteExt;
 
 /// Upper bound on a single encoded message. A larger length prefix is rejected
 /// as malformed before any allocation, so a hostile or corrupt peer cannot force
-/// a huge buffer (spec §7, §15).
+/// a huge buffer (spec §2.13, §9).
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
-/// The association handshake preamble (spec §7.1): the wire version the sender
+/// The association handshake preamble (spec §2.14): the wire version the sender
 /// speaks, its node identity and the address peers should dial it back on, the
 /// codec it speaks, and a shared cluster secret. The receiver rejects the
-/// association on any mismatch (§7, §15) and learns the advertised address.
+/// association on any mismatch (§2.13, §9) and learns the advertised address.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
     pub version: Version,
@@ -47,7 +47,7 @@ pub struct Hello {
 /// A transport-level message on an established association. Actor traffic is a
 /// [`Frame`]; [`Endpoints`](Wire::Endpoints) carries a `(node, address)` table
 /// for dynamic address discovery: the transport consumes it and never hands it
-/// up to the cluster (spec §9.3).
+/// up to the cluster (spec §2.13).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Wire {
     Frame(Frame),
@@ -202,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_length_prefix_is_rejected_without_allocating() {
         // A length prefix beyond the cap must error on read, not attempt a huge
-        // allocation: a hostile peer cannot wedge the node (spec §7, §15).
+        // allocation: a hostile peer cannot wedge the node (spec §2.13, §9).
         let (mut a, mut b) = tokio::io::duplex(64);
         a.write_all(&(MAX_FRAME_LEN + 1).to_be_bytes())
             .await

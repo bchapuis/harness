@@ -1,10 +1,10 @@
-//! The disk facet under the cluster fault swarm (spec §7.15, §14; V&V
+//! The disk facet under the cluster fault swarm (spec facets §4.4, entity §11; V&V
 //! checklist #4, #5, #7).
 //!
 //! `tests/disk_local.rs` proves the facet's contract on the `Local` tier; this
 //! file hosts a disk-only entity on the leader-based clustered system and sweeps
 //! it across seeds while the nemesis injects partitions, crashes, heals, loss,
-//! duplication, and delay (actor §18.3). What that uniquely exercises:
+//! duplication, and delay (docs/simulation-testing.md). What that uniquely exercises:
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose image is rebuilt from the composite-snapshot manifest
@@ -60,7 +60,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use support::Exercised;
 
-/// 1 MiB: the facet's fixed block size (spec §7.15).
+/// 1 MiB: the facet's fixed block size (spec facets §4.4).
 const BLOCK: u64 = 1 << 20;
 /// The base image: two blocks, the second partial.
 const IMAGE_BYTES: u64 = BLOCK + BLOCK / 2;
@@ -88,7 +88,7 @@ impl Entity for DiskBox {
 }
 
 /// Provision on first touch, then write a deterministic stamp into the live
-/// image and run the capture command (§7.15): one command, one manifest
+/// image and run the capture command (facets §4.4): one command, one manifest
 /// record, committing through the quorum path (E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Stamp {
@@ -112,7 +112,7 @@ impl EntityHandler<Stamp> for DiskBox {
         use std::io::Seek;
         use std::io::Write;
         let disk = ctx.disk();
-        // Provision lazily (the machine's first-activation import, §7.15): the
+        // Provision lazily (the machine's first-activation import, facets §4.4): the
         // import stages this command's one manifest, so the stamp itself waits
         // for the next command on a fresh entity.
         if disk.image_bytes().expect("size") == 0 {
@@ -131,7 +131,7 @@ impl EntityHandler<Stamp> for DiskBox {
     }
 }
 
-/// Read eight bytes at `offset` from the live image: a pure read (§7.5).
+/// Read eight bytes at `offset` from the live image: a pure read (§6).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadStamp {
     offset: u64,
@@ -167,7 +167,7 @@ impl EntityHandler<ReadStamp> for DiskBox {
 // --- The workload ---------------------------------------------------------------
 
 /// Stamp-and-read disk traffic against a handful of entities under the nemesis,
-/// driven through the public `EntityRef` API only (actor §18.4). A faulted call
+/// driven through the public `EntityRef` API only (docs/simulation-testing.md). A faulted call
 /// is recorded as nothing and the client moves on.
 ///
 /// One scratch directory serves every run and every simulated node (the facet

@@ -1,10 +1,10 @@
-//! Workloads and the swarm runner (spec §18.4, §18.6).
+//! Workloads and the swarm runner (spec §2.12.2; docs/simulation-testing.md).
 //!
 //! A [`Workload`] drives the cluster through its public API; the runner executes
 //! it under a seeded [`Simulation`], with a per-seed [`FaultConfig`] sampled from
 //! the same stream, while a [`Checker`] watches the event stream. A failing run
 //! is reported as a [`RunFailure`] carrying the seed that replays it
-//! deterministically (spec §18.6).
+//! deterministically (spec §2.12.2).
 
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ use crate::invariant::default_invariants;
 /// The concrete system a simulated workload runs on.
 pub type SimSystem = LocalSystem<SimClock, SimEntropy, SimSpawner>;
 
-/// A test scenario expressed against the cluster's public API (spec §18.4).
+/// A test scenario expressed against the cluster's public API (simulation-testing §2).
 ///
 /// `run` builds actors and drives traffic; the runner then advances the
 /// simulation to quiescence and checks the workload's [`invariants`]. A workload
@@ -42,14 +42,14 @@ pub trait Workload: Send + 'static {
     /// the simulation to full quiescence afterwards.
     fn run(&self, system: SimSystem) -> BoxFuture<'static, ()>;
 
-    /// Invariants checked continuously and at quiescence (spec §18.5). Defaults
+    /// Invariants checked continuously and at quiescence (spec §10). Defaults
     /// to [`default_invariants`].
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         default_invariants()
     }
 }
 
-/// A seed-sampled fault configuration for a single-node run (spec §18.3).
+/// A seed-sampled fault configuration for a single-node run (docs/simulation-testing.md).
 ///
 /// A single-node workload runs on a [`LocalSystem`] with no transport or
 /// membership, so the only fault dimension here is the bounded mailbox capacity,
@@ -73,7 +73,7 @@ impl FaultConfig {
     }
 }
 
-/// A failing run, with everything needed to replay it (spec §18.6). The
+/// A failing run, with everything needed to replay it (spec §2.12.2). The
 /// `(workload, seed)` pair alone replays a single-node or cluster run
 /// deterministically, since the seed regenerates the run's faults.
 #[derive(Clone)]
@@ -108,7 +108,7 @@ impl std::fmt::Display for RunFailure {
 
 impl std::error::Error for RunFailure {}
 
-/// Every seed a sweep failed at, and how many it ran (spec §18.6).
+/// Every seed a sweep failed at, and how many it ran (spec §2.12.2).
 ///
 /// CI stops at the first failure, so this carries one [`RunFailure`] and prints
 /// exactly as one; under `SWARM_CONTINUE=1`
@@ -260,7 +260,7 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
     }
 }
 
-/// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
+/// Sweep a workload across many seeds (swarm testing, spec §2.12.2), stopping at
 /// the first failing seed so it can be replayed, or, under `SWARM_CONTINUE=1`,
 /// running to the end and reporting every one.
 ///

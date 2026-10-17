@@ -1,6 +1,6 @@
 //! A three-node leader cluster hosting `Fanout`, for the suites whose scenarios
 //! are shard-leader moves: a crash between a launch and its settled record
-//! (§4.4), a migration under an effect in flight (§6), and the fault swarm.
+//! (§4.3), a migration under an effect in flight (§6), and the fault swarm.
 //!
 //! Mirrors entity's `clustered_entities.rs` harness: SWIM plus a self-hosted Raft
 //! control plane, two shards so names distribute across leader-election groups,
@@ -38,7 +38,7 @@ pub const C: NodeId = NodeId::new(3);
 /// Two shards, no idle hibernation within a scenario, and no snapshots: every
 /// rehydration replays the journal, and `conformance_resume.rs`'s offline fold
 /// reads every record through the public read path, which a snapshot would
-/// truncate beneath it (entity §9).
+/// truncate beneath it (storage §8).
 pub fn config() -> EntityConfig {
     EntityConfig {
         shards: 2,
@@ -54,7 +54,7 @@ pub fn host_with(node: &SimNode, seam: &Seam, config: EntityConfig) -> Entities<
 }
 
 /// Host `Fanout` through `node` under `config`, every activation sharing `seam`:
-/// the form whose node a scenario keeps, to hand its shards off (entity §8.3).
+/// the form whose node a scenario keeps, to hand its shards off (storage §5.3).
 pub fn host_on(
     node: &EntityNode<SimNode>,
     seam: &Seam,
@@ -153,7 +153,7 @@ impl Cluster {
 
     /// Ask `key`'s entity through the anchor, retrying across the window in which
     /// a restarted node's gateway is still coming up and a stale redirect names a
-    /// leader that is gone (entity §5.4).
+    /// leader that is gone (entity §4.4).
     ///
     /// Every attempt costs the same four seconds of virtual time whether it
     /// replies at once or is refused: the scenarios' crash points are tuned
@@ -164,7 +164,7 @@ impl Cluster {
     ///
     /// Retrying a write after an ambiguous failure may commit it twice, which is
     /// why `Fanout::apply` folds a repeated `Requested` idempotently (entity
-    /// §2.2): the fixture is safe to re-ask by construction, not by luck.
+    /// §1.1): the fixture is safe to re-ask by construction, not by luck.
     pub fn ask<M>(&self, sim: &Simulation, key: &str, msg: M) -> M::Reply
     where
         M: Message + Clone + Send + 'static,

@@ -1,4 +1,4 @@
-//! Conformance: serialization & dispatch (spec §4.4, §5, §15); the dispatch
+//! Conformance: serialization & dispatch (spec §2.10, §2.11, §9); the dispatch
 //! registry is the deserialization allowlist. Also exercises the single-node
 //! loopback wire dispatch path: encode → registry lookup → decode/enqueue →
 //! handler runs → reply encoded → decoded back.
@@ -70,7 +70,7 @@ impl Handler<WireGreet> for WireGreeter {
     }
 }
 
-/// An authorizer that rejects exactly one message manifest (spec §15).
+/// An authorizer that rejects exactly one message manifest (spec §9).
 struct Deny(&'static str);
 impl Authorizer for Deny {
     fn authorize(&self, _peer: NodeId, _recipient: &ActorId, manifest: &str) -> bool {
@@ -85,7 +85,7 @@ fn the_dispatch_registry_is_an_allowlist() {
 
     // Registered manifests dispatch; an unregistered one has no entry, so the
     // receive loop turns it into `Unhandled` and never builds an off-list type
-    // from network bytes (spec §5, §15, invariant #8).
+    // from network bytes (spec §2.11, §9, invariant #8).
     assert!(registry.dispatch("conf.Greet").is_some());
     assert!(registry.dispatch("conf.Stop").is_some());
     assert!(registry.dispatch("conf.Get").is_none());
@@ -95,7 +95,7 @@ fn the_dispatch_registry_is_an_allowlist() {
 #[test]
 fn an_unauthorized_ask_is_rejected_as_a_system_failure() {
     // The authorizer denies `conf.Get`; the call is rejected as a system failure
-    // and never reaches the actor (spec §15).
+    // and never reaches the actor (spec §9).
     let sim = Simulation::new(1);
     let net = SimNetwork::new(&sim).with_authorizer(Arc::new(Deny("conf.Get")));
     let node_a = net.join(NodeId::new(1));
@@ -132,10 +132,10 @@ fn an_authorized_message_is_delivered_a_denied_one_is_not() {
     assert_eq!(count, Ok(0), "the denied Inc never reached the actor");
 }
 
-// Codec agreement at the association handshake (spec §5 #2, §7.1) is a property
+// Codec agreement at the association handshake (spec §2.11 #2, §2.14) is a property
 // of the real transport's handshake, which the in-memory simulator does not have
 // (it routes frames directly, and only the payload exercises the wire codec:
-// spec §18.2). It is covered against the production TCP transport by
+// spec §2.12.2). It is covered against the production TCP transport by
 // `actor-runtime`'s `a_codec_disagreement_is_rejected_at_the_handshake`.
 
 #[test]
@@ -180,7 +180,7 @@ fn message_round_trips_through_the_dispatch_registry() {
 #[test]
 fn unregistered_manifest_is_rejected() {
     // The registry is the allowlist: an unknown manifest has no entry, which the
-    // receive loop turns into CallError::Unhandled (spec §4.4, §5).
+    // receive loop turns into CallError::Unhandled (spec §2.10, §2.11).
     let mut registry = HandlerRegistry::<WireGreeter>::default();
     WireGreeter::register(&mut registry);
     assert!(registry.dispatch("test.Greet").is_some());
@@ -215,7 +215,7 @@ fn malformed_payload_is_a_serialization_error() {
 #[test]
 fn a_remote_ask_with_an_undecodable_payload_is_a_serialization_error() {
     // The receiving node fails to decode the payload; the caller must learn
-    // that as `Serialization` (spec §8), not as a `DeadLetter` from a reply
+    // that as `Serialization` (spec §5), not as a `DeadLetter` from a reply
     // channel the receiver let drop.
     let (sim, net) = support::cluster(3, None);
     let node_a = net.join(NodeId::new(1));

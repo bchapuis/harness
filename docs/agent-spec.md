@@ -1,683 +1,372 @@
 # Agent: Specification
 
-**Status:** Draft v5
-**Scope:** A distributed agentic runtime: compound AI systems (agent loops of model calls, tools, and control logic) run as **entities** on a mutualized cluster. An agent session is an entity ([`entity-spec.md`](entity-spec.md)) with a self-driving loop and two seams, the **model** and the **sandbox**.
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, and **MAY** carry the meanings defined in RFC 2119. Sections of this document are cited as plain **§N**; other documents carry a prefix: **entity §N**, **workflow §N**, **actor §N**, **sandbox §N**, **edge §N**, **machine §N**. Invariants defined here are **A1–A7** (§10).
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
+## 1. Scope
 
-Sections of the entity specification are cited as **entity §N** (its invariants as **E1–E21**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N**, the cluster utilities ([`cluster-utilities-spec.md`](cluster-utilities-spec.md)) as **util §N**, and the sandbox specification ([`sandbox-spec.md`](sandbox-spec.md)) as **sandbox §N**. Sections of this document are plain **§N**. Invariants defined here are **A1–A7**, kept apart from the entity catalogue (E1–E21, plus the facet contract F1–F4), the core catalogue (core §18.5), and the sandbox catalogue (S1–S5).
+The agent runtime runs compound AI sessions (loops of model calls, tool calls, and delegation) on a shared cluster. A session is an entity (entity §1) whose activation drives itself: a workflow (workflow §2) whose effects are model calls, sandboxed tool calls, child submissions, and owed cancels. Identity, the journal, the fence, placement, activation, hibernation, and failover are the entity's (entity §3–§7); deriving, launching, and settling effects is the workflow's (workflow §3, §4). The agent adds the transcript and its fold, two seams (the model, §2.1, and the sandbox, §2.3), kinds, budgets, delegation, and cancellation.
 
-> **Design stance.** An entity is an actor plus a name-based virtual identity, an event-sourced journal, and a durability barrier on the reply (entity §1). **An agent is an entity plus three things**: a self-driving loop, a model seam, and a sandbox. Everything else (identity, journal, fence, placement, activation, hibernation, failover) is the entity's, unchanged.
->
-> The agent adds one isolation boundary, between **control** and **effect**. Above it, the **loop is the entity's activation behavior**: serial, journaled, touching the world only through the model seam (§4), the sandbox seam (§5.3), and the journal. Where an entity waits for a command, an agent is **autonomous**: its activation drives itself model→tools→model until a run reaches a terminal outcome. Below the boundary, **effects live in a sandbox**: one isolated environment per session, colocated with the shard leader (entity §5.2), where tools run arbitrarily without endangering the node or another session (§5.1).
->
-> An agent **remains an actor**: a session is addressed by name with `ask`/`tell` (entity §4.3), and an agent is defined by configuring a *kind*, not by writing a loop. The two new seams join the entity's virtualized journal, clock, entropy, transport, and spawner (entity §14, core §4.6), so one seed reproduces an entire multi-node run: model outputs, tool faults, crashes, elections, and resumes.
-
----
-
-## 1. Scope and layering
-
-The agent runtime runs, on **mutualized infrastructure**, the workload of a single-user agent process: long-lived sessions interleaving model calls, tool use, and delegation. Three ideas organize it, each discharged by the entity layer:
-
-- **A session is a compound AI system, not a model call** (Zaharia et al., [*The Shift from Models to Compound AI Systems*](https://bair.berkeley.edu/blog/2024/02/18/compound-ai-systems/), 2024): the loop is explicit, journaled, and supervised; model and tools sit behind seams (§4, §5).
-- **What a session keeps must live outside the loop** (Anthropic, [*Effective harnesses for long-running agents*](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents), 2025): each activation starts with no memory of the last, so progress must persist in a durable artifact the next one reads. That artifact is **the entity's journal** (entity §7): the session *is* its journal, the activation a disposable fold of it (entity §1, §9), and anything not journaled is lost.
-- **One isolation boundary, deliberately placed** (§5.1): the loop runs in the activation, so a waiting session holds no thread and, once hibernated, no memory (entity §10), while tool effects run in its sandbox. This is the *agents as infrastructure* move (Cloudflare, [*Project Think*](https://blog.cloudflare.com/project-think/), 2026): a durable, addressable session that costs nothing while idle, with effects contained by the architecture rather than by trust in the model.
-
-Everything here is built **on top of** the entity (entity §1–§16) and modifies neither it nor the layers beneath: **actors, messages, supervision, and death watch** (core §3–§12) host the activation and carry every agent interaction as a typed message with a hand-written manifest (core §4.4), and the **event stream** (core §16, entity §13) carries the agent's observability events through the core's application-event extension point (§10.4).
-
-The core non-goals (core §1.2) hold: the agent runtime never transparently retries a message with side effects, never places a quorum on the message path (the entity's quorum is on the durability path, entity §7.2), and never masks a failure. Where it makes a retry safe, it does so with an explicit idempotency key (the `TurnId`, §7.4), as core §7.2 prescribes and entity §2.2 requires.
-
-The **persistent machine** ([`machine-spec.md`](machine-spec.md)) is a sibling consumer of the entity: an entity plus a durable disk (entity §7.15) and a network seam (machine §5), reached over SSH, reusing the sandbox's Firecracker `Native` mechanics (sandbox §3.5), with no run loop, model seam, or sandbox seam. The machine spec owns the difference; nothing here changes.
+Model adapters (`agent-anthropic`, `agent-openai`) implement the model seam; sandbox providers implement the sandbox seam under the tier model (sandbox §1); the HTTP edge is a cluster client of the client view (edge §1). The persistent machine (machine §1) is a sibling consumer of the entity, with no run loop and no model seam.
 
 ### 1.1 Non-goals
 
-- **A model gateway.** One configured model implementation per request; provider routing, A/B serving, and quota brokering are not the runtime's concern.
-- **Prompt management.** System prompts and tool descriptions are application data the runtime stores and transmits, not templates it provides.
-- **Exactly-once tool execution.** A tool call is at-most-once per attempt (entity §2.2); across a crash-resume boundary recovery is explicit and per-tool (§5.5), never silent.
-- **An isolation technology.** The spec mandates *that* effectful tools execute behind the `Sandbox` seam (§5.3), not *how*: process, container, or microVM is the provider's choice. A tool declares the capability tier its calls require (§5.6); each tier's realization is the provider's, bound by sandbox §3.
-- **A new consensus mechanism.** No Raft group, shard, or fence of its own: durability, ordering, and single-writer safety are the entity's (entity §7, §8).
-- **Multi-tenant economics.** Quotas, fair scheduling, and billing live above the runtime (§13); budgets (§9) bound a run's spend, not a tenant's share.
-- **Context-window management.** A transcript that exceeds the model's context fails the run explicitly (§4.3); compaction is future work (§13).
-- **Retrieval, vector stores, UI.** Applications build these as tools (§5) or clients (§7).
+- **A model gateway:** routing, A/B serving, and quota brokering across models.
+- **Prompt management:** system prompts and tool descriptions are application data, stored and transmitted.
+- **Exactly-once tool execution:** a call is at-most-once per attempt (entity §1.1); recovery across a crash is explicit and per tool (§4.4).
+- **An isolation technology:** process, container, or microVM is the provider's choice (sandbox §1.1).
+- **Consensus of its own:** no Raft group, shard, or fence beyond the entity's.
+- **Multi-tenant economics:** a budget (§7.1) bounds a run, not a tenant.
+- **Context-window management:** an over-long transcript fails the run (§2.1).
 
----
+## 2. Seams
 
-## 2. The session is an entity
+### 2.1 The model (`Model`)
 
-### 2.1 Anatomy
-
-A session is one durable thing and two disposable ones (entity §1):
-
-- the **entity** *is* the session: its journal is the durable, totally ordered, single-writer record log (entity §7), and its identity (`EntityName`) is permanent. Only its loss loses the session.
-- the **activation** is the fold of the journal plus the in-flight run, on the shard leader (entity §5.2). Stopping it loses nothing; the next activation, wherever the shard is led, rebuilds it by snapshot-plus-replay (entity §9).
-- the **sandbox** is one isolated environment, colocated with the activation, where effects land; its working state is useful but never authoritative (§5.3), and losing it never loses the session (§5.5).
-
-Each session concept is exactly one entity primitive:
-
-| Session concept | Entity primitive |
-|---|---|
-| `SessionId` | `EntityName`: `(entity_type = KindId, key)` (entity §5.1) |
-| Record (a transcript entry) | the entity's `Event` (entity §3) |
-| Session state, `state = fold(records)` | the entity's `State`, folded by `apply` (entity §4.1) |
-| Write-ahead append, durable before effect | the entity's **output gate** (entity §6) |
-| Single-writer fence | the shard's Raft leader; one leader per term (entity §8) |
-| Owner node / host / placement | the shard leader / gateway (entity §5) |
-| Activation, fold, resume | rehydration: snapshot + replay (entity §9, §10) |
-| Idle stop | hibernation (entity §10) |
-| Lossless failover | quorum read-repair of each entity's head under the new leader (entity §8, E14) |
-
-The loop reaches the world only through the **model** (§4), the **sandbox** (§5.3), and the **entity's journal** (entity §7); time, randomness, spawning, and transport come from the core seams (core §4.6, §7).
-
-```text
-                      client (any node)                               §7.4
-                         │  Submit { session, turn }  →  EntityRef::ask
-                         │  routed: name → shard → leader (entity §5.4)
-                         ▼
-                       Shard leader's gateway                         entity §5.3
-                         │  get-or-activate the entity (exactly-once, E6)
-                         ▼
-       ┌──────── the loop: the entity's activation (§3) ────────┐
-       │   state = fold(journal) · serial · no inline I/O      │
-       │   autonomous: drives itself model→tools→model         │
-       └────┬──────────────────┬──────────────────┬───────────┘
-            │                  │                  │
-            ▼                  ▼                  ▼
-     Model seam (§4)   the entity journal    Sandbox seam (§5.3)
-     one inference     (entity §6, §7):      ══ isolation boundary (§5.1) ══
-     call per step     records, fenced,     one environment per session,
-                       output-gated         colocated with the leader:
-                                            shell, files, processes, network
-```
-
-### 2.2 Vocabulary
-
-| Term | Definition |
-|---|---|
-| **Session** | One agent conversation, **realized as an entity**: a durable identity (`SessionId` = `EntityName`), the journal, and, while active, one activation on the shard leader. Survives restarts, hibernation, and leadership moves; an `ActorId` does not (entity §1). |
-| **Record** | One journal entry, the entity's `Event` (entity §3); the transcript is the sequence of records and session state a fold over them (§6). The word avoids "event", which the observability stream uses (§10.4). |
-| **Kind** | A named agent definition (`KindId` → system prompt, toolset, sandbox profile, model parameters, default budget, delegation allowlist). The `KindId` is the session's `entity_type` (entity §5.1); every node registers the same kinds (§7.1). |
-| **Turn** | One submitted input: a user prompt or a parent's delegation (§8), carrying a client-chosen `TurnId`, the idempotency key (§7.4). |
-| **Run** | The model→tools→model loop a turn triggers, until a terminal outcome; identified by the turn's `TurnId`. |
-| **`RunCompleted`** | The `tell` carrying a run's outcome (`Result<Completion, RunError>`) to each registered reply-to when `RunEnded` commits (§7.3). The `RunEnded` record is the source of truth; the notification is delivery. |
-| **Step** | One loop iteration: one model call plus the resolution of every tool call and delegation it requested. |
-| **Activation** | The entity's live instance on its shard leader (entity §5), running the loop; the unit E6 and A5 count. |
-| **Model** | The inference seam (§4), implemented by `agent-anthropic` (Anthropic Messages API), `agent-openai` (OpenAI-compatible Chat Completions), and a scripted model in simulation. |
-| **Tool** | A capability the model may invoke, declared to the runtime; all but the built-in `delegate` execute in the sandbox (§5.2). |
-| **Sandbox** | The isolated environment bound to one activation behind the third seam (§5.3): the only place sandboxed tools run and their effects land. |
-| **Tier** | A named **capability** set a tool call requires and an activation acquires, journaled before first use (§5.6); semantics in sandbox §2. Unrelated to the entity's `Local`/`Quorum` *durability* tiers (entity §7.4). |
-| **Budget** | A run's spending limit (model tokens and steps), from which child budgets are carved (§9). |
-| **Root** | The parentless ancestor of a delegation tree, recorded in every `SessionCreated` (§10.3); its `SessionId` names the tree. Correlation metadata only: nothing routes or folds on it. |
-
-Identity is layered as the entity layers it: `SessionId` (= `EntityName`: durable, application-chosen) → `ActorId` (one activation, system-assigned, core §3.6) → `TurnId` (one run). The runtime owns only the first mapping, as a naming convention; entity owns name→shard→leader resolution (entity §5.4).
-
----
-
-## 3. The agent: an autonomous entity
-
-An active session is the entity's activation on its shard leader (entity §5.2): an ordinary actor (core §3) whose private state is the folded transcript plus the in-flight run, reachable only through its handlers (core §3.5). The agent adds **autonomy**: the activation drives itself, issuing model and tool calls and feeding their outcomes back, until the run reaches a terminal outcome.
-
-### 3.1 The run loop
-
-Runs serialize through the session's **turn queue**, a fold projection (§6.2): every accepted turn is journaled at once (`TurnSubmitted`, §7.3) and waits in acceptance order; when no run is live, the loop starts the head by committing **`TurnStarted`**, the one transition that begins a run, the only place the turn's content enters the model-visible transcript, and the commit that fires `RunStarted` (§10.4). At most one run is live per session; because the queue is journal-derived, an acked turn survives crash, hibernation, and migration like the run ahead of it (§7.5).
-
-A run advances in **steps**. Each step:
-
-1. checks the budget (§9.1); if exhausted, the run ends with `RunError::BudgetExhausted`;
-2. issues one model call carrying the transcript (§4.2);
-3. if the response is a final assistant message, journals it and ends the run with `Ok(Completion)`;
-4. otherwise journals the model response (intent before effect, §6.3), then executes every requested tool call (§5) and delegation (§8);
-5. journals each outcome as it arrives; when all are resolved, begins the next step.
-
-A run MUST end in exactly one terminal outcome, journaled as its `RunEnded` record (A2): `Ok(Completion)`, `RunError::BudgetExhausted`, `RunError::Cancelled`, or `RunError::Model(…)` (a model failure no retry policy absorbed, §4.3). A terminal outcome *is* a committed record, so durability failure cannot be one: it surfaces as the entity's outer `EntityError::Unavailable` and **pauses** the run (§6.4, §7.5). `RunError` is an application error and travels as a value (core §3.2 rule 4, entity §4.2), in the `RunCompleted` notification, **not** the `Submit` reply; transport and durability failures stay in the `EntityError` on the `Submit` ack (§7.3).
-
-### 3.2 The loop drives itself but never blocks on I/O
-
-The loop is **message-driven** (core §6, entity §6): the activation MUST NOT await the model, a tool, or a durable append inline. It launches each external operation through `Spawner` (core §4.6) and receives the outcome as an ordinary message; a step is a state the fold tracks, not a stack frame. **I/O lives in the loop, never inside `apply`**, which MUST be pure because it is replayed (entity §4.1).
-
-**The cycle is the workflow's** (workflow §3.2, §3.3, §4): this runtime implements `Workflow`, with `pending` the desired set as a pure function of committed state (`desired.rs`), `perform` one effect on the seams, and `settle` the fold of one outcome. The environment reconciliation of §5.4–§5.6 runs as a **pre-pass ahead of every tick**, because no fold can express it.
-
-Three consequences, each inherited:
-
-- **The input gate orders the run.** While an append is in flight, the entity admits no new command to the session (entity §6), so a `Cancel` (§9.2) takes effect at a message boundary and never observes half-committed state.
-- **The output gate is the write-ahead barrier.** A model response, tier acquisition, tool outcome, or terminal outcome is released to the next step (or a `Submit` caller) only after its record commits on a shard quorum (entity §6). The runtime's write-ahead discipline (§6.3) is this gate and nothing more.
-- **Straggling outcomes are discarded.** The activation MUST discard, not journal, an outcome that arrives after its run has ended (a cancelled run's late tool result, §9.2) or after the activation stepped down on a non-contiguous commit (entity §6, the contiguity guard).
-
-### 3.3 Supervision, restart, and migration
-
-Supervision (core §11) governs the activation's faults. The entity host keeps the default `Stop` directive (core §11.2), so a faulted activation stops and the gateway prunes it (entity §10); recovery is the entity's rehydration (entity §9, §10) in three guises:
-
-- a **re-activation after a fault**, on the same leader, triggered by the next message (entity §10);
-- a **migration** follows shard leadership (entity §8.3): the activation rehydrates on the new leader, losing no acknowledged record (E14);
-- a **resume after node failure** is the same rehydration, triggered on a new leader by the next message (§7.5).
-
-All three are snapshot-plus-replay, so the activation behaves byte-identically to one that never stopped, given the same subsequent model and tool outcomes (A1, over E2/E3).
-
----
-
-## 4. The model seam
-
-### 4.1 The trait
+A plug point: a model adapter implements it, and the run loop calls it once per step (§3.2).
 
 ```rust
-/// Inference: one request, one response; no streaming in v1 (§13). The first agent-runtime seam.
 pub trait Model: Send + Sync + 'static {
-    async fn complete(&self, req: ModelRequest) -> Result<ModelResponse, ModelError>;
+    fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>>;
 }
 ```
 
-The seams' methods are written `async fn` here and at the sandbox seam (§5.3); the crate spells them as methods returning `BoxFuture`, because every seam is held as a trait object (`Arc<dyn Model>`, `Arc<dyn SandboxProvider>`, `Arc<dyn Sandbox>`) and `async fn` in a trait is not object-safe.
+`ModelRequest` carries the kind's system prompt, its `ModelParams` with `max_tokens` clamped to the run's remaining tokens (§7.1), the toolset's interfaces (`ToolSpec`), and the transcript as a sequence of `Entry` values. `ModelResponse` carries the assistant content, zero or more `ToolCall`s, and the call's `Usage`. `ModelError` distinguishes `RateLimited`, `Overloaded`, `ContextOverflow`, `InvalidRequest`, and `Api`.
 
-`ModelRequest` carries the kind's system prompt, its model parameters with `max_tokens` already clamped to the run's remaining budget (§9.1 item 2), the toolset's declarations (name, description, input schema), and the folded transcript. The clamped ceiling is the request's only `max_tokens`, so an adapter cannot send the kind's unclamped one by mistake. `ModelResponse` carries the assistant content, zero or more tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
+The runtime MUST build each request as a deterministic function of committed state and the kind (§8.4), MUST assign every returned `ToolCall` with an empty id one deterministic in the step and position, and ends the run with `RunError::Model` on any `ModelError` it receives (§3.2). An implementation:
 
-Like `Transport` (core §7) and `EntityJournal` (entity §7.3), the runtime depends only on the trait. In production `ProtocolModel` implements it over an injected `HttpPost` (§12.1), with `agent-anthropic` and `agent-openai` supplying the protocols; the simulator supplies a **scripted model**, a deterministic function of the request and the seed (§12.2).
+- MUST present every `Entry` in transcript order, MUST pair each `Entry::ToolResult` with the call its `CallId` names, and MUST present `Entry::WorkspaceReset` as input content the runtime authored, never as a tool result, since it answers no call. It SHOULD render it as `WORKSPACE_RESET_NOTICE`.
+- MUST send `params.max_tokens` as the output ceiling, and no larger one.
+- MUST return in `usage` the usage the provider reports: budgets count nothing else (§7.1).
+- MUST give returned calls ids unique within the run, or leave them empty.
+- MUST map an over-long transcript to `ContextOverflow` and a request the provider calls malformed to `InvalidRequest`.
+- MAY retry internally, a completion having no side effect (actor §1.1), but MUST NOT retry `ContextOverflow` or `InvalidRequest`, and MUST bound every other retry so that `complete` resolves in finite logical time.
+- MUST take all timing from `Clock` and all randomness from `Entropy` (actor §2.12.1).
 
-### 4.2 Determinism rules
+### 2.2 The HTTP adapter kit (`HttpPost`, `Protocol`)
 
-1. A `Model` implementation MUST take all timing from `Clock` and all randomness from `Entropy` (core §4.6); `ProtocolModel` (§12.1) pre-draws its whole backoff schedule so the completion future owns no entropy handle. The runtime crate MUST NOT read the wall clock, spawn OS threads, use an unseeded RNG, or open a socket: `HttpPost` is a trait a deployment implements (core §18.1).
-2. Model output is nondeterministic in production, so the contract is scoped like the network's and the journal's: given the same seed, **the simulated model** returns byte-identical responses, and everything downstream of a fixed response sequence is reproducible (A1).
+Two plug points inside the model seam, so that a production adapter is a wire format and nothing else. `ProtocolModel` implements `Model` over them: encode through the protocol, post through the socket, classify the reply, and retry within §2.1's bounds, with backoff timed by `Clock` and jittered by `Entropy`. `AnthropicModel` (protocol `Messages`) and `OpenAiModel` (`ChatCompletions`) are aliases of it.
 
-### 4.3 Failure
+- `HttpPost`, supplied by the deployment, is the one socket operation: POST a body to a path under its base URL, and return the status and body, or an `HttpError` for an exchange that did not complete. It MUST resolve every post, under a timeout of its own, and SHOULD NOT retry: the shell's policy is the one retry bound.
+- `Protocol`, supplied by an adapter crate, is the wire format: the path, the key-bearing headers, the request encoding (bound by §2.1's transcript obligations), and `classify` onto `ModelResponse` or `ModelError`. Retrying is the shell's decision: `RateLimited`, `Overloaded`, and `Api` retry; `ContextOverflow` and `InvalidRequest` never do.
 
-`ModelError` distinguishes at least `RateLimited`, `Overloaded`, `ContextOverflow`, `InvalidRequest`, and `Api(String)`. A `Model` implementation MAY retry internally under a bounded policy with backoff from `Clock`/`Entropy`; a completion request is side-effect-free, so this respects core §1.2. A failure that survives the policy ends the run with `RunError::Model(…)`: journaled, reported, never swallowed (core §8).
+`agent-http` is plumbing behind the standalone deployment's `HttpPost`, not a seam.
 
----
+### 2.3 The sandbox (`SandboxProvider`, `Sandbox`)
 
-## 5. Tools and the isolation boundary
-
-### 5.1 The boundary
-
-A run splits across one boundary:
-
-| In the entity's activation: the **loop** | In the sandbox: the **effects** |
-|---|---|
-| control flow: steps, budgets, delegation | tool execution: shell, files, processes, network |
-| model calls, through the `Model` seam (§4) | working state: processes and regenerable caches; the workspace's durable subtree is the session's own facet (entity §7.11, §5.5) |
-| the fold and the journal, through the entity (entity §6, §7) | everything a tool's side effects touch |
-
-Above the boundary the loop is serial, journaled, and cheap, the mutualization premise of §1 (activation is local and consensus-free, entity §7.8); below it, a tool may do anything *inside* its session's sandbox and nothing outside it. Actor isolation (core §3.5) protects sessions' state from one another; sandbox isolation protects the node and other sessions' effects from tools.
-
-**Why the boundary cuts here.** With **no sandbox**, one session's `rm -rf` or runaway build takes down the node (a shard leader hosting many entities, entity §5.2) and every co-located session; with the **loop inside the sandbox**, every session pays for isolation to host control flow that mostly waits, and the loop becomes as opaque to the runtime as the tools; with **a sandbox per tool call**, consecutive calls lose the checkout, build cache, or running server the previous step produced.
-
-Hence one sandbox **per session**, opened lazily per activation (§5.3) and colocated with the shard leader (entity §5.2): coarse enough to keep working state across calls, fine enough that no effect escapes its session. The directory the sandbox runs over is the session's **workspace facet** (entity §7.11): each tool call's file delta commits atomically with its `ToolOutcome` record, and every activation, including one on a new leader, rematerializes the directory from the journal. What remains working state is the *environment* (processes, containers, held tiers, regenerable excluded trees), whose mid-activation loss §5.5 puts on the record. The facet's durable cap (64 MiB, the entity's `MAX_TREE_BYTES`) bounds the capture: a call whose post-call capture exceeds it is reported to the model as `ToolError::Sandbox` (§5.4) with its file delta unpersisted, an application outcome the model trims rather than a run failure.
-
-### 5.2 Declarations and the registry
-
-Every tool is **declared**; the model and the loop need its interface wherever it executes:
+A plug point: a deployment supplies a provider per hosted kind, and each activation holds at most one `Sandbox` from it. This section is the runtime's side; the provider's side and the tier semantics are the sandbox specification's (sandbox §2, §3).
 
 ```rust
-pub struct ToolDecl {
-    pub name: String,           // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
-    pub description: String,
-    pub input_schema: Value,     // the tool's JSON Schema, as a `serde_json::Value` the model is shown (§4.1)
-    pub tier: Tier,              // the capability set the call requires (§5.6); part of the kind's digest (§7.1)
-    pub on_orphan: OnOrphan, // the declared recovery policy for an orphaned call (§5.5)
-    pub timeout: Option<Duration>, // per-call bound; the agent runtime default applies when absent (§5.3)
-}
-
-/// Resume's policy for an orphaned call: intent journaled, outcome not (§5.5).
-/// The workflow's type, re-exported (workflow §3.1): a declaration's recovery
-/// policy is exactly what a `Pending` carries. `Reexecute`: blind re-execution is
-/// safe (idempotent, or dedups like `delegate`, §8.1); `Interrupt`: resolve as
-/// ToolError::Interrupted and let the model decide whether to retry.
-pub use workflow::OnOrphan;
-
-/// The capability set a tool call requires (§5.6); full semantics in sandbox §2.
-pub enum Tier {
-    Workspace, // the session's scoped filesystem, through host-implemented typed tools; no guest code
-    Compute,   // arbitrary guest code over the workspace; no network, no ambient clock or entropy
-    Network,   // compute, plus egress to the profile's allowlist (§5.3)
-    Native,    // OS processes and native binaries inside the confined environment
-}
-```
-
-Tiers are capability sets, not rungs of a ladder: a kind's cap is a *set* of tiers, not a maximum, so a kind MAY hold `Native` without `Network` (sandbox §2.2).
-
-A kind's `ToolRegistry` is a hand-built list of declarations, like `HandlerRegistry` (core §4.4) and the entity's dispatch registry (entity §5.5): explicit, inspectable, and the **allowlist**. A tool call dispatches by name against the registry and nothing else; no path leads from model output to code outside the declared set.
-
-Every requested tool call carries a **`CallId`**, unique within its run (the model API's tool-use id, or one the runtime assigns on receipt), journaled with the call's intent (§6.3). Outcomes reference it, orphaned-call resolution matches by it (§5.5), and child-session derivation is keyed by it (§8.1).
-
-Every declared tool is **sandboxed**: its call dispatches through the `Sandbox` seam (§5.3) and executes nowhere else. The one exception is the built-in **`delegate`** (§8), which executes in the loop because a delegation is control flow (a child `Submit`), not an effect. v1 exposes no extension point for loop-executing tools (§13).
-
-### 5.3 The sandbox seam
-
-```rust
-/// Provisioning of isolated execution environments. The third agent-runtime seam.
-/// `workspace` is the session's workspace-facet directory (entity §7.11),
-/// rematerialized by the entity before the open: the sandbox runs over it and
-/// never owns its durability.
 pub trait SandboxProvider: Send + Sync + 'static {
-    async fn open(&self, session: &SessionId, profile: &SandboxProfile, workspace: &Path)
-        -> Result<Arc<dyn Sandbox>, SandboxError>;
+    fn open(&self, session: &SessionId, profile: &SandboxProfile, workspace: &Path)
+        -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>>;
 }
 
-/// One environment, bound to one activation, colocated with the shard leader.
 pub trait Sandbox: Send + Sync + 'static {
-    /// Execute one declared, sandboxed tool call to completion inside the
-    /// environment, at the call's declared tier (§5.2, §5.6).
-    async fn call(&self, tier: Tier, name: &str, input: Value) -> Result<Value, ToolError>;
-    /// Tear down processes and working state, across every provisioned tier. Idempotent.
-    async fn release(&self);
+    fn call(&self, tier: Tier, name: &str, input: Value) -> BoxFuture<'static, Result<Value, ToolError>>;
+    fn release(&self) -> BoxFuture<'static, ()>;
 }
 ```
 
-1. **Lazy, per tier.** An activation opens its sandbox on its first sandboxed call; a session that never needs one never pays for one. Each call carries its declared tier (the seam hands the sandbox no registry), and the provider builds a tier's environment on the first call carrying it (§5.6).
-2. **Bound per activation.** At most one live sandbox per activation, and deactivation MUST release it (A7), whether by migration, hibernation, or a forced step-down on a non-contiguous commit (entity §6). The sandbox never migrates; a new leader opens a fresh one (§5.5).
-3. **Launched, never awaited inline** (§3.2): outcomes return as messages, bounded by a per-tool timeout from `Clock`: the call's declared `timeout` (§5.2), else a configurable runtime default (SHOULD default to about **5 minutes**). The timeout bounds the *outcome*, not the effect: the sandbox-side process MAY still be writing when the `Timeout` outcome is journaled, so the workspace capture that commits with it (entity §7.11) can be **torn**. The journal stays consistent (it records what the directory held at capture), the next call's capture diffs against the last committed index and folds in whatever the straggler finished, and the model reacts with the timeout in view.
-4. **Profiled.** The kind's `SandboxProfile` (image or toolchain, resource limits, network policy) is deployment configuration, agreed cluster-wide like the kind (§7.1). It carries the kind's **tier cap** (the tiers its sessions may hold, §5.6) and, when the cap includes `Network`, that tier's egress allowlist (sandbox §3.3), which a `TierAcquired` record grants by reference, never inline. Declaring a tool whose tier the cap excludes is a configuration error, surfaced at registration as loudly as a duplicate name; the cap defaults to exactly the tiers the declared tools require.
-5. **Technology-opaque, within a tier.** Process, container, or microVM is the provider's choice; the scripted sandbox is one more implementation (§12). *Which capabilities a call holds* is declared, journaled, and agreed (§5.6), never improvised by the provider. The seam sees one `Sandbox`; tiers are provisioned within it.
+The runtime:
 
-### 5.4 Tool failure is a transcript value
+- MUST open the sandbox lazily, on the activation's first sandboxed call, over the session's workspace-facet directory (facets §4.1), materialized by rehydration before any call can reach the open.
+- MUST hold at most one live sandbox per activation and release it on every deactivation: hibernation, migration, or forced step-down (A7). A sandbox never migrates.
+- MUST pass each call's declared tier, and only declared, cap-checked tiers (§4.5).
+- MAY issue every call of a step concurrently on one `Sandbox` (sandbox §2.1).
+- MUST bound each call's outcome by the declared `timeout`, else a runtime default, timed by `Clock` (§4.3).
+- MUST, when an open fails, resolve every call that needed the sandbox as `ToolError::Sandbox` and retry the open on the next sandboxed call; an open failure never fails the run.
+- MUST, on `ToolError::EnvironmentLost`, release the binding and journal `WorkspaceReset` before the next model call (§4.4).
 
-A failing tool does not fail the run. The runtime journals its `ToolError` (timeout, sandbox-side crash, failed delegation (§8.2), unknown tool name, or malformed arguments) as the call's outcome and **returns it to the model** as the tool result; the only abnormal run endings are the three `RunError` outcomes of §3.1. Unknown and malformed calls are synthesized outcomes, and the registry-as-allowlist guarantees nothing ran. Malformed is structural, not schematic: the loop rejects before dispatch a call whose input is not a JSON object (or a `delegate` input that does not deserialize, §8.1), but does not validate against `input_schema`, which is interface metadata for the model (§4.1) and digest-covered agreement (§7.1); validation beyond shape belongs to the executing tool, whose rejection is its own `ToolError` outcome.
+`SandboxProfile` is the kind's sandbox configuration: a provider-interpreted image, the tier cap, the `Network` tier's egress allowlist, and `ComputeLimits`. It is covered by the kind digest (§5.1), and a `TierAcquired` record grants the allowlist by reference, never inline.
 
-### 5.5 Crash, loss, and resume (no silent loss)
+### 2.4 Kinds and tools (`Kind`, `Kinds`, `ToolDecl`, `ToolRegistry`)
 
-A tool call's **intent** is journaled before execution and its **outcome** after (§6.3); a crash, hibernation, or migration between the two leaves an *orphaned call*. On the next activation (entity §10, §7.5):
+A plug point: a deployment defines its agent types. A `Kind` is a system prompt, `ModelParams`, a `ToolRegistry`, a `SandboxProfile`, a default `Budget`, a delegation allowlist, and the `EntityConfig` of its entity type; `Kinds` maps each `KindId` (an entity type, entity §4.1) to its kind. A `ToolDecl` gives a tool's name, description, input schema, `Tier`, `OnOrphan` policy (workflow §3.1), and optional timeout.
 
-- an orphaned call declared `OnOrphan::Reexecute` MUST be re-executed, in a fresh sandbox if the old one is gone (and may fail for that reason, per §5.4);
-- an orphaned call declared `Interrupt` MUST be resolved as `ToolError::Interrupted` and fed to the model (§5.4), so the *model* decides whether to retry the side effect.
+- The `ToolRegistry` is the allowlist: a call dispatches by name against it and nothing else. `ToolRegistry::declare` MUST reject a duplicate name.
+- Every declared tool is sandboxed, except the built-in `delegate` (§6.1), present iff the delegation allowlist is non-empty, which runs in the loop because a delegation is control flow, not an effect.
+- The tier cap is a set, checked by membership (sandbox §3.2): `Kinds::register` MUST reject a tool whose tier the cap excludes. An unset cap is exactly the tiers the declared tools require.
+- A sandboxed tool's name, tier, and input are the provider's (sandbox §2.2): a deployment MUST declare a sandboxed tool only as its provider answers it, and SHOULD register the provider's own declarations verbatim.
+- The kind's digest MUST cover the whole definition, each tool's tier, and the effective cap (§5.1).
 
-The same settling path maps every `EffectError` variant to a tool outcome: `Interrupted` to `ToolError::Interrupted`; `Failed` (a `perform` that panicked, or a cancel the loop could not send, workflow §4.3) to `Sandbox`; `Timeout` and `Lost` to `Timeout` and `EnvironmentLost`. The runtime produces only the first two; a tool's own timeout and a lost environment arrive as the `ToolError` the call returns.
+### 2.5 The client view (`Harness`, `SessionRef`)
 
-An orphaned call is not always dead. The fence guarantees one *transcript* (entity §8) but cannot recall a launched effect: a deposed leader not yet aware of it (the read-your-leader window, entity §7.5) may still be *executing* a slow call when the new leader resolves it, so a `Reexecute` may run concurrently with the original, and a model retrying after `ToolError::Interrupted` may duplicate a side effect still in progress. The window is the duration of the in-flight call, not a round-trip: the deposed-leader cost of entity §11, made concrete for effects. `delegate` alone is rescued by construction: its re-execution is a child `Submit` with the same `TurnId`, which dedups into an attach (§7.4, §8.1).
+The consumer-facing boundary, used by applications, the HTTP edge (edge §2.4), and delegating parents (§6.1). A `Harness` is one node's view of the session namespace: `Harness::builder` chooses per kind whether the node hosts it (runs its entity type with the node's seams) or only routes to it, and `Harness::client` builds a routing-only cluster client. `Harness::session` returns a `SessionRef` over the session's `EntityRef` (entity §2.2), with no I/O.
 
-The sandbox is **not session state**: the fold never reads it, and the runtime never reconstructs a lost *environment* (processes, containers, tier grants). The workspace's **durable subtree** survives hibernation, migration, and crash-failover by construction (§5.1, entity §7.11). Anything outside that capture (excluded trees like `target/`, running servers, in-memory state) must outlive the sandbox through a tool: push a branch, upload an artifact, return a result the loop journals. Per core §1.2, the runtime never re-fires a non-idempotent side effect on its own authority.
+- `Harness::session` MUST return `UnknownKind` as a value for a kind the node neither hosts nor routes: kind names arrive from outside.
+- `SessionRef::prompt` submits a turn and awaits its `RunOutcome` within the submit deadline (`prompt_within` takes an explicit one). It fails with `PromptError::Rejected` for a permanent rejection (§5.3) or `PromptError::Entity` for a failure to reach the session or commit the turn. A lapsed deadline MUST surface as `PromptError::Entity(EntityError::Call(CallError::Timeout))`, and the run continues.
+- `prompt` MUST NOT transparently retry a failed submit (actor §1.1). It MAY re-submit the same `TurnId` when the attempt's reply mailbox drops without an outcome.
+- `SessionRef::cancel` cancels the run a `TurnId` names (§7.2); `SessionRef::tail` and `SessionRef::follow` read committed records without activating the session (§8.2).
 
-Nor may the *model* be left pretending. A routine reactivation (hibernation §7.2, migration §3.3, crash-failover) journals **no reset**: the durable subtree is rematerialized before the sandbox opens, so the model's picture of its files stays true. A **mid-activation environment loss** (the provider returned `EnvironmentLost`: processes, excluded trees, and held tiers gone, durable files intact) is different: the activation MUST journal a **`WorkspaceReset`** record before the next model call and surface it in that request. The record answers no `CallId`, so it enters the request as runtime-authored input content rather than a tool result.
+### 2.6 The session wire (`Submit`, `Cancel`, `RunCompleted`)
 
-Tier loss follows the same rule at two granularities, surfaced and never silently repaired:
+An internal boundary, crossing nodes, between `SessionRef` (or a delegating parent's node) and the session entity. The message types are private to the crate, and of the wire only `SubmitReject` is public. The manifests are interop constants every node agrees on.
 
-- **The whole environment is lost.** A fresh sandbox resets **every** tier. The held set restarts at `Workspace` in the activation that journals `WorkspaceReset` (§5.6), and re-acquisition is re-journaled: within one run the journal reads `TierAcquired`, the tool outcome, `WorkspaceReset`, then `TierAcquired` again before the next call at that tier.
-- **One tier is lost while the sandbox survives.** Calls that needed it fail as `ToolError` outcomes (§5.4); nothing is journaled about the tier. The provider MAY re-provision it lazily under the acquisition this activation already journaled, and MUST NOT grant a tier the activation never journaled (sandbox §4).
-
-### 5.6 Execution tiers
-
-A **tier** is a named capability set a tool call requires: `Workspace`, `Compute`, `Network`, or `Native` (§5.2). This document owns the contract (declaration, record, cap, agreement); the sandbox specification owns what each tier grants and withholds (sandbox §2) and what a provider MUST guarantee to offer it (sandbox §3).
-
-1. **Opening grants `Workspace` and nothing else.** A session that never acquires more holds a directory's worth of capability.
-2. **Acquisition is journaled, intent before effect.** Before the first call at a tier the activation does not yet hold, the loop journals a **`TierAcquired { turn, tier }`** record (the output gate, entity §6). The record is the audit trail (when did this session first run guest code, first touch the network?) and the policy hook (§13).
-3. **Held tiers are additive and environment-scoped.** No call revokes a tier; the held set resets to `Workspace` only when the loop journals `WorkspaceReset` after a mid-activation `EnvironmentLost` (§5.5), and a fresh activation starts from `Workspace`. Held tiers are working state; only the acquisition records survive.
-4. **The cap is unreachable by construction.** Declared tools are checked against the cap at registration (§5.3 item 4), and dispatch reaches declared tools only (§5.2), so acquisition beyond the cap cannot be requested. Construction discharges the invariant (sandbox §6 S4); the loop performs no runtime check.
-5. **Agreement.** Each tool's tier and the profile's cap are covered by the kind digest (§7.1): cluster-wide agreement, never a node-local choice.
-6. **A record, not an event.** Acquisition is durable, user-facing audit (§10.1), with no §10.4 event; the acquisition ordering of sandbox §6 S4 is verified by journal audit of `TierAcquired` records.
-
----
-
-## 6. Durability is the entity's
-
-This document specifies **no journal seam**: durability is the entity's journal (entity §7), ordering and single-writer safety its Raft leader (entity §8), and the write-ahead barrier its output gate (entity §6). The mechanism, the trait, and the two **durability** tiers (single-node, sharded-Raft) are entity §7.3–§7.4; this section states only how the agent uses them.
-
-### 6.1 Records are the entity's events
-
-Each **record** is an entity `Event` (entity §3), appended in `Seq` order, totally ordered per session, durable on a shard quorum. The record types: `SessionCreated`, `TurnSubmitted` (a turn accepted into the queue, §7.3), `TurnStarted` (the queue's head began its run, §3.1), `ModelResponse`, `TierAcquired`, `ToolOutcome` (carrying a `CallId`), `ChildRun`, `WorkspaceReset`, `RunEnded`, and `CancelDelivered` (a propagated cancel's delivery receipt, §9.2). `apply` (entity §4.1) folds them into session state and MUST be pure and deterministic (E2): it runs on the commit path and on every replay, and the agent's non-determinism (model output, tool effects) enters only *as committed records*.
-
-### 6.2 State is a fold; the fence is Raft
-
-A session's state MUST be a pure, deterministic function of its journal prefix, `state = fold(records)` (entity §1, E3); nothing outside the fold influences later behavior except new messages. Replay is therefore resume (§3.3, §7.5).
-
-The single-writer guarantee is the entity's: only the shard leader appends, Raft elects one leader per term, and a deposed leader cannot commit (entity §8, E1). When two nodes transiently believe they lead a shard, the minority reaches no quorum and the transcript never forks; the contiguity guard (entity §6) steps down any activation whose in-memory head can no longer be trusted, and the forced step-down releases the sandbox (§5.3 item 2), emitting the entity's `Deactivated` (entity §13) and the runtime's `SandboxReleased` (§10.4).
-
-### 6.3 Write-ahead discipline is the output gate
-
-Within a step, the entity's output gate (entity §6) holds each effect until its record commits on a quorum:
-
-- a **turn's acceptance** (`TurnSubmitted`) before the `Submit` ack releases (§7.3), and the **run start** (`TurnStarted`) before the run's first model call issues (§3.1);
-- a **model response** before any of its tool calls execute (intent before effect, §5.5), each call identified by its `CallId` (§5.2); a model call is side-effect-free and needs no intent record;
-- a **tier acquisition** (`TierAcquired`) before the first call at a tier not yet held (§5.6);
-- a **tool or delegation outcome** before the next step shows it to the model;
-- the **terminal outcome** (`RunEnded`) before any `RunCompleted` carries it (§7.3): the notification is sent from the tick after the commit, or, for a re-submission of an ended turn, from the fold's recorded outcome, so a caller never holds a completion the journal could lose.
-
-The barrier is entity §6 (E5); the runtime adds only *which records* a step writes and in what order.
-
-### 6.4 Durability failure
-
-A shard that cannot reach a quorum returns `AppendOutcome::Unavailable` (entity §7.3, §11): the entity pauses writes, the activation steps down, and the in-flight record does not commit. The loop MUST NOT proceed past an uncommitted record, and since it cannot journal a terminal outcome either, the run **pauses** rather than ends. The caller's pending reply resolves as `EntityError::Unavailable` (or its `ask` deadline lapses, core §14.2), and the run stays orphaned until the shard recovers and a message reaches the session, which resumes it from the last committed record (§7.5). This is the entity's CP stance (entity §2.2, E11): pause, never fork, never mask the loss, never invent an outcome that cannot be recorded.
-
----
-
-## 7. Sessions across the cluster
-
-A session's cluster life is the entity's life cycle (entity §10), and only the journal survives it: **created** (first turn) → **activated** on its shard leader (rehydrate → fold → run) → **serving** (§3) → **deactivated** (hibernation, migration, or step-down) → **rehydrated** by the next leader (§7.5). The runtime adds no placement, host, or resume protocol.
-
-### 7.1 Kinds
-
-Every node's runtime is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). A `KindId` is an `entity_type` (entity §5.1), and the kind carries that type's `EntityConfig` (shard count, replication factor, idle window, snapshot policy; entity Appendix A). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session MUST be resumable on any node, so every node MUST register every kind. `SessionCreated` pins the session's kind and a **digest** of its definition (§10.5), covering among other fields each tool's tier and the profile's tier cap (§5.6). The per-kind factory captures the definition, so activating a hosted type needs no lookup; `HarnessBuilder::host` panics in the call itself for a kind the registry lacks (so the error points at the line naming the kind, not at `build`), and `Harness::session` returns `UnknownKind` for a kind the node's directory neither hosts nor routes (§7.4). A missing kind is a deployment error surfaced before any run starts (nothing journaled, no `RunStarted`), never a silent fallback.
-
-Registration is knowledge; a node's **directory**, the kinds it *hosts* (serves, with seams injected) plus those it only *routes to* (the cluster-client path, entity §5.3), is per-node deployment shape. Harness construction MUST reject a directory that does not close over delegation: every hosted kind's delegation allowlist must be in the directory, because the parent's node launches the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its route for the child's kind. Otherwise every delegation to that kind would fail per call, and an owed cancel would wait for a better-configured node to lead the shard (A4's liveness). Rejecting at build makes the gap a deployment error, never a mid-run discovery.
-
-### 7.2 Placement, activation, and hibernation
-
-Placement is the entity's: the name hashes to a shard, the shard map gives its leader, and the session activates there (entity §5.1, §5.2, §5.4). The runtime defines no host registry or placement function. The gateway (entity §5.3) gets-or-activates the session exactly once per node (E6) and routes commands to it.
-
-The leader activates a session lazily on the first message: rehydrate (entity §9) → fold → run. Activation takes no consensus; on the clustered tier it costs one quorum head-recovery round trip, then reads locally (entity §7.8, §9).
-
-**Hibernation (idle stop).** After a configurable idle interval the leader MAY hibernate a session (entity §10): mutate nothing, snapshot to bound the next replay, release the sandbox (A7), and drop the activation. It MUST NOT hibernate a session whose run is live or whose queue holds an accepted turn (§3.1). Hibernation needs no flush (everything worth keeping is a record); the environment's processes and containers go with the sandbox, and the workspace's durable subtree rematerializes on reactivation (entity §7.11, §5.5). `idle_after` SHOULD default to **minutes**, the entity default (entity §10), not the Durable Objects eviction window it is modelled on: reactivation costs a quorum head-recovery plus a snapshot-bounded replay, and memory is not the resource under pressure. The idle timeout trades sandbox cost, the expensive shared resource, against environment continuity (warm containers, build caches).
-
-**Stale-leader redirect.** A command reaching a node that no longer leads the shard receives `NotLeader(hint)` (entity §5.4, §8); the runtime retries at the hinted node's gateway within the caller's deadline, ordinary Raft client redirection made safe by the `TurnId` (§7.4).
-
-### 7.3 The wire contract
-
-A session is addressed as an entity, and its commands are entity commands (entity §4.2) with hand-written manifests (core §4.4):
-
-| Command | Reply (`M::Reply`) | Manifest |
+| Message | Reply | Manifest |
 |---|---|---|
-| `Submit { kind, turn, parent?, reply_to: Option<ActorRef<…>> }` | `Result<Accepted, SubmitReject>`† | `agent.Submit` |
+| `Submit { kind, turn, parent, reply_to }` | `Result<Accepted, SubmitReject>` | `agent.Submit` |
 | `Cancel { turn }` | `()` | `agent.Cancel` |
+| `RunCompleted { session, turn, outcome }` | none: a `tell` | `agent.RunCompleted` |
 
-The session is the entity name the command is addressed to, not a payload field (entity §5.4). `parent` carries a delegating parent's lineage (§8.1, §10.3) and is absent on a root submit.
+- `Submit` replies with an ack, `Accepted { turn, status }` (`Started`, `Attached`, or `Ended`), released only when the turn's `TurnSubmitted` commits (entity §5): an acked turn is durable.
+- `kind` rides every `Submit` and MUST equal the addressed entity's type; the first accepted `Submit` creates the session. `parent` carries a delegating parent's `Lineage`. `reply_to` is transient routing: never journaled, and outside the equality check (§5.3).
+- `RunCompleted` MUST reach each registered reply-to only after `RunEnded` commits, as at-most-once delivery under the subscriber discipline of workflow §2.7; the record, not the notification, is the source of truth.
+- Only `Submit` and `Cancel` are accepted from the network; the workflow's `Tick` and `Settled` are local-only, so no peer can inject an outcome.
 
-Reading a run is **not** a session command: `tail` (§10.2) rides the entity's gateway-level event read (entity §7.5), a framework built-in like `subscribe`, so it appears in no allowlist and never touches the activation.
+### 2.7 The journal schema (`Record`, `RecordBody`)
 
-†`Submit` replies with an **ack, not the run's outcome**: `Accepted { turn: TurnId, status: Started | Attached | Ended }`, released when the `TurnSubmitted` record commits (an output-gated reply, entity §6), so **an acked turn is durable** in the fold's queue (§3.1). `Started` means "newly accepted", whether the run begins now or behind the queue; there is no separate queued status. The `Err` arm, `SubmitReject` (`KindMismatch` or `ContentConflict`, §7.4), is an *application* failure carried as a value, distinct from the transport `EntityError` outside the reply (core §3.2, §14): a caller-contract violation is permanent, where a peer move could clear a transport failure. Each command goes through `EntityRef::ask` (entity §4.3), which surfaces `EntityError` (`NotLeader`, `Unavailable`, an unregistered manifest; entity §12) outside the reply. `Cancel` commits one `RunEnded { Cancelled }` record and acks, ending the live run or a still-queued turn (§9.2).
+An internal boundary between the session, the only writer, and every reader: `tail`, the edge's record stream, the terminal client, reconstruction (§8.4). A `Record` is the entity's event (entity §1.2): a `RecordBody` plus `at_nanos`, the writing leader's `Clock` reading.
 
-The run's outcome travels separately, as a notification the activation `tell`s when `RunEnded` commits:
+| Record | Meaning |
+|---|---|
+| `SessionCreated` | Kind, kind digest, lineage, and the tree's root (§5.1, §8.3). Always first. |
+| `TurnSubmitted` | A turn accepted into the queue: content, resolved budget, whether the budget was explicit (§5.3). |
+| `TurnStarted` | The queue's head turn began its run (§3.2). |
+| `ModelResponse` | One response: content, requested calls with their `CallId`s, usage. |
+| `TierAcquired` | The activation's first call at a tier is about to execute (§4.5). |
+| `ToolOutcome` | One tool or delegation outcome, by `CallId`. |
+| `ChildRun` | A delegation's intent: child kind, session, turn, carved budget (§6.1). |
+| `WorkspaceReset` | The environment the transcript asserts is gone (§4.4). |
+| `RunEnded` | The turn's one terminal outcome (§3.2). |
+| `CancelDelivered` | A propagated cancel reached a child (§7.2). |
 
-| Notification | Payload | Delivered to |
+`apply` MUST be pure and deterministic (entity §3.1, E2): the agent's nondeterminism enters only as committed records. The fold MUST NOT let `at_nanos` influence behavior; it is observational, and virtual under simulation.
+
+### 2.8 The checker stream (`AgentEvent`)
+
+An internal boundary between the runtime and stream checkers. `AgentEvent`s ride the actor event stream as application events (actor §2.7), interleaved with the entity's `Activated`, `Deactivated`, and `LeaderChanged` (entity §10) in one totally ordered, seed-reproducible sequence. They carry no session content, and are the one sanctioned restatement of the journal (§8.1): a continuous checker reads the stream, not per-session journals.
+
+| Event | Fields | Emitted when |
 |---|---|---|
-| `RunCompleted` | `{ session, turn, outcome: Result<Completion, RunError> }` | every reply-to `ActorRef` registered for the run |
+| `RunStarted` | `session`, `turn`, `parent` | the turn's `TurnStarted` committed |
+| `ModelCompleted` | `session`, `turn`, `node` | a model response committed |
+| `ToolCompleted` | `session`, `turn`, `node` | a `ToolOutcome` committed |
+| `RunEnded` | `session`, `turn`, `outcome` | the run's terminal record committed |
+| `SandboxBound` | `session`, `node` | the activation opened its sandbox |
+| `SandboxReleased` | `session`, `node` | that sandbox was released |
 
-`RunCompleted` is a `tell` (core §3.3): fire-and-forget, at-most-once. It is **delivery, not the source of truth** (the `RunEnded` record is, §10.1), so a lost notification is recovered by re-contacting the session (§7.4), never by transparent retry (core §1.2). It is not a §10.4 event: `RunEnded` already marks termination on the checker stream.
+- `RunStarted`, `ModelCompleted`, `ToolCompleted`, and `RunEnded` MUST be emitted only after the record each announces commits, and only by the committing activation: a straggler or a deposed leader's uncommitted work emits nothing.
+- `RunStarted` MUST fire exactly once per `(session, turn)`: a resume emits none (it reads as `Activated` then `ModelCompleted` on a started turn), and a turn cancelled while queued emits neither `RunStarted` nor `RunEnded`.
+- `SandboxBound` and `SandboxReleased` MUST alternate within the entity's `Activated`/`Deactivated` window for the session and node, and a bound sandbox's `SandboxReleased` MUST precede that activation's `Deactivated`.
 
-**Why the outcome is a notification, not the `Submit` reply.** An `ask` reply is a `ReplyHandle` (core §4.5), resolved exactly once *within the delivery of that one message* and not storable across later messages. A run spans many inbound messages (each model and tool outcome, §3.2), so no handle survives until `RunEnded`; the outcome goes instead to a reply-to `ActorRef` the caller placed in the command (core §3.3: "An `ActorRef` MAY be a field of a message"). Attaching to a live run (§7.4) is registering another reply-to.
+### 2.9 Implemented seams: `Entity` and `Workflow`
 
-The `Submit` `ask` returns promptly, and nothing a caller holds bounds the run: budgets (§9) bound tokens and steps, not wall time (tool timeouts, model retries, and child runs compound), so a run MAY outlive any caller. A caller that gives up or crashes leaves the run untouched and recovers the outcome by re-submitting the same `TurnId` (§7.4) or following `tail` (§10.2). There is no status message: a status view (head `Seq`, live run, spend) is a client-side fold over `tail`.
+The session type implements `Entity` (state: the fold of §2.7; facet: the workspace, facets §4.1) and `Workflow`. Its desired set holds every owed cancel and, for a live run, the current step's model call (unless the budget forbids it) or every journaled call lacking an outcome, under its declared `OnOrphan`. Launch, orphan resolution, backoff, stragglers, quiescence, and subscribers are the workflow's (workflow §2.7, §3, §4, §6). The agent's obligations at that seam:
 
-`Submit` carries `kind` on every call, though it binds only on the first (creation is implicit in the first turn); afterwards it is a checked redundancy, rejected on mismatch (§7.4).
+- Its `StepKey` qualifies every step ordinal and `CallId` with the turn, so no key re-enters the desired set (workflow §3.1).
+- It MUST settle the gates the desired set cannot see (a sandbox to open, a tier to acquire, a lost workspace to report) before each tick, never inside a launch (workflow §2.3).
+- Its `can_hibernate` narrows the workflow's twice: never while an accepted turn waits in the queue, never while a sandbox open is in flight (workflow §6).
 
-A read (`tail`, or any future query that emits no record) commits nothing (entity §6 step 2) and is a local, replication-free read of the leader's journal (§10.2). It is **read-your-leader**, not linearizable under partition (entity §7.5): a deposed minority leader not yet fenced MAY serve a slightly stale `tail` until it steps down, though writes never fork. A linearizable read is a deferred entity upgrade (entity §16).
+## 3. Sessions and runs
 
-### 7.4 The client view (`SessionRef`) and idempotent submission
+### 3.1 A session is an entity
 
-```rust
-let h = Harness::cluster(system, &kinds, model, sandboxes);
-//   per node: registers each kind's gateway and injects the model and sandbox seams (§4, §5.3)
-let s = h.session("researcher", SESSION_ID)?;      // an EntityRef<Agent>; a local hash, no I/O (entity §5.1,
-                                                   //   §5.4); Err only for a kind this node neither hosts nor
-                                                   //   routes, a value since kind names arrive from outside
-let out = s.prompt(Turn { id: TURN_ID, content }).await;   // Submit + await RunCompleted (§7.3):
-                                                   //   Result<Result<Completion, RunError>, PromptError>
-```
+A session is one durable thing, its journal, and two disposable ones: the activation (the fold plus the in-flight run, on the shard leader) and the sandbox. Its `EntityName` has the `KindId` as entity type and the `SessionId` as key; a `SessionId` outlives every `ActorId`, and each `TurnId` names one run. A session's state MUST be a pure, deterministic function of its journal prefix (entity §1, E3), so replay is resume. Single-writer safety is the fence's (storage §5, E1), and the contiguity guard's forced step-down (entity §5) releases the sandbox.
 
-`SessionRef` is `EntityRef<Agent>` (entity §4.3) with a thin agent-facing surface. `prompt(turn)` is a **blocking convenience at the edge, not a protocol primitive**: it spins an ephemeral local actor as the reply-to, `Submit`s the turn carrying that ref, and awaits the one `RunCompleted`. `prompt` is `prompt_within` at the runtime's `submit_deadline` (30 s by default), handing the whole wait to one `Submit`-and-attach attempt: a lapse surfaces as `PromptError::Entity(EntityError::Call(CallError::Timeout))`, and `prompt` re-`Submit`s the same `TurnId` only when the attempt's mailbox drops without an outcome, re-registering on whatever activation now hosts the session. Delegation's `run_child` (§8.1) is the cadenced form: each attempt attaches for at most one cadence, and every lapse re-`Submit`s the same `TurnId` until the budget-scaled wait expires. A non-blocking caller `Submit`s with its own reply-to (as a parent agent does, §8.1) or follows `tail`. A lapsed attempt leaks no actor: its mailbox stops with it, and a notification racing that stop is an ordinary lost delivery (§7.3).
+A **turn** is one submitted input (a prompt, or a parent's delegation) carrying a client-chosen `TurnId`, its idempotency key. A **run** is the model-and-tools loop a turn triggers, named by the same `TurnId`. A **step** is one model call plus the resolution of every call it requested.
 
-`prompt` MUST NOT transparently retry a failed `Submit` (core §1.2, entity §2.2). The entity re-issues a command that provably did not commit (`DeadLetter` from a hibernated stale host, `NotLeader`; entity §4.3, §6), but never an *ambiguous* failure (`Unreachable`/`Timeout`), which may have committed before the ack was lost. The **`TurnId`** makes the caller's own re-submission safe:
+### 3.2 The run loop
 
-- a `Submit` whose `TurnId` is already journaled MUST NOT start a second run (one `TurnSubmitted` record, E1): if the turn is queued or its run live, the activation **registers the new reply-to** (`status: Attached`); if it ended, the activation immediately **`tell`s the outcome** recorded in `RunEnded` (`status: Ended`). Dedup and recorded outcome are a fold over the session's records (queued turns included), exact across a resume;
-- registration is race-free: the serial activation orders a re-submission against the `RunEnded` transition (the input gate, entity §6), so a caller is either added to the live run or told the outcome, never neither or both;
-- `reply_to` is **transient routing, not part of the turn**: unjournaled and **excluded from the content-equality check**, so a fresh reply-to on the same `TurnId` is the ordinary re-attach.
+Runs serialize through the session's turn queue, a fold projection: every accepted turn is journaled at once (`TurnSubmitted`) and waits in acceptance order. When no run is live, the session commits `TurnStarted` for the head, the one record that begins a run and the only place a turn's content enters the transcript. At most one run is live per session, and an acked turn survives crash, hibernation, and migration.
 
-**What the equality check covers.** The turn's content **and its literal `budget` field**: a changed budget is not a silent attach, and `None` is not `Some(default)`, so conflict never depends on the kind's *current* default. The digest is fold-local, recomputed from the journaled `TurnSubmitted` (which records the resolved budget and whether it was explicit), and length-prefixed so content and budget cannot collide by juxtaposition. Delegation re-execution re-submits the budget read from the journaled `ChildRun`, re-deriving the same literal (§8.1).
+Each step of a run:
 
-**What the digest is not.** A fast 64-bit content hash guards against *accidental* `TurnId` reuse, not a crafted collision (which would attach rather than conflict): it is a caller-bug detector, not a security boundary, since a caller who can address the session already holds it. A gateway scopes session names by principal for that reason.
+1. checks the budget (§7.1), and if it is exhausted ends the run with `RunError::BudgetExhausted`;
+2. issues one model call (§2.1);
+3. if the response requests no calls, journals it and ends the run with `Ok(Completion)`, in one batch;
+4. otherwise journals the response, then executes every requested tool call (§4.2) and delegation (§6.1);
+5. journals each outcome as it arrives, and begins the next step once all are resolved.
 
-**What a mismatch produces.** A re-submission whose turn differs (`SubmitReject::ContentConflict`) or whose `kind` differs from the entity's type (`SubmitReject::KindMismatch`) is a caller bug: rejected as a value, journaling nothing, never a transport `EntityError`, because it must not be retried (§7.3†). `prompt` returns it typed, as `PromptError::Rejected(SubmitReject)`, beside `PromptError::Entity` for a transport failure, so a caller tells "fix the request" from "retry the same `TurnId`" by matching; the gateway answers it with `409 Conflict`. Delegation's `run_child` folds it into the call's `ToolError::Delegation`, the outcome the parent's model reads (§5.4); a caller that `Submit`s with its own reply-to reads the `Err` arm directly.
+A run MUST end in exactly one terminal outcome, its `RunEnded` record (A2): `Ok(Completion)`, `RunError::BudgetExhausted`, `RunError::Cancelled`, or `RunError::Model`. A `RunError` is an application error carried in `RunCompleted`; transport and durability failures stay `EntityError`s on the `Submit` (§2.6).
 
-The **subscriber set** (reply-tos registered for a live run) is ephemeral activation state, like the held tiers and the sandbox: never journaled, rebuilt by callers re-contacting after a resume.
+The activation MUST NOT await the model, a tool, or an append inline: each operation is launched through `Spawner` and returns as a message (workflow §3.2). The input gate (entity §5) admits a `Cancel` only between appends, and the activation MUST discard an outcome that arrives after its run ended or its activation stepped down (workflow §4.4).
 
-### 7.5 Resume after node failure
+### 3.3 Write-ahead order
 
-When a shard leader fails or is partitioned away, the replicas elect a new leader (entity §8.3), which recovers each entity's committed records from a quorum on first access (entity §8, E14). The next message routed to the shard activates the session there: rehydrate (entity §9, rematerializing the workspace facet), fold (§6.2), resolve orphaned calls (§5.5), and continue any unfinished run. No coordinator hands the session over, and no acknowledged record is lost (E14, A1).
+The entity's output gate (entity §5, E5) holds each effect until its record commits. A step's records commit in this order:
 
-Resumption is **caller-driven**: the entity has no cross-entity enumeration to scan for orphaned work, so an interrupted run resumes only when a message next reaches the session: a caller re-submitting its `TurnId`, a parent's re-executed delegation (§8.1), or a `Cancel` (idempotent on an ended run, and the explicit nudge for cancel propagation the journal still owes, §9.2). The same contact resumes the **queue** (§3.1): the first message drives the dispatcher, which starts a waiting acked turn once no run is live. A run nobody asks after stays interrupted, its cost bounded by its budget (§9.1). A2's liveness is conditional on this contact, and so is A4's for a session whose owed propagation a crash interrupted.
+- `TurnSubmitted` before the `Submit` ack, and `TurnStarted` before the run's first model call;
+- a `ModelResponse` before any call it requested executes (a model call itself needs no intent record);
+- `TierAcquired` before the first call at a tier not yet held;
+- a `ChildRun` before its child `Submit`;
+- each tool or delegation outcome before the next step shows it to the model;
+- `RunEnded` before any `RunCompleted` carries it, sent after the commit or, for a re-submitted ended turn, from the fold's recorded outcome.
 
----
+### 3.4 Durability failure pauses the run
 
-## 8. Sub-agent trees
+A shard without a quorum answers `Unavailable` (storage §2.1, §10): the record does not commit and the activation steps down. The loop MUST NOT proceed past an uncommitted record, and since a terminal outcome is itself a record, the run pauses rather than ends. The caller sees `EntityError::Unavailable` or a lapsed deadline, and the run resumes from its last committed record once the shard recovers and a message reaches the session (§5.4): the entity's CP stance (entity §1.1, E11).
 
-### 8.1 Delegation is a tool
+## 4. Tools and the isolation boundary
 
-The built-in `delegate` is the only tool that executes in the loop rather than the sandbox (§5.2), present in a kind's registry iff the kind permits sub-agents. Its input names a child kind, a prompt, and optionally a budget request. The child kind MUST belong to the parent kind's **delegation allowlist** (§7.1); any other kind is a synthesized `ToolError` (§5.4), so a locked-down kind cannot escalate by delegating to a permissive one. Its execution is a child `Submit`:
+### 4.1 The boundary
 
-1. the parent journals a `ChildRun` record: the carved budget (§9.1) and the child `SessionId` and `TurnId`, both derived deterministically from the parent session, the parent's `TurnId`, and the delegation's `CallId` (§5.2), since one run may delegate many times. The derivation length-prefixes each component, so distinct `(session, turn, call)` triples derive distinct ids even from crafted application-chosen ids. A re-executed delegation re-derives the same pair (§5.5), and cancel propagation reads it from the record (§9.2);
-2. the launched task `Submit`s to the child (an `EntityRef`) with a **reply-to** and **awaits the child's `RunCompleted`** (§7.3), never block-`ask`ing a run that may be arbitrarily long. The await re-attaches on the submit-deadline cadence (each lapse re-registers on whatever activation hosts the child, §7.5; the derived `TurnId` keeps re-attempts safe, A6), bounded in total by a **budget-scaled wait**: a configurable floor plus a configurable per-step allowance × the child's carved `steps` (the floor SHOULD default to about **10 minutes**, the allowance to about the per-tool timeout, §5.3 item 3). Because the step bound is compositional (§9.1 item 3), the carve bounds the whole subtree's model calls. Past the bound the delegation resolves as a synthesized `ToolError` (§5.4) but cancels nothing: the child runs on, its budget the backstop (§9.2 item 3), and since its `ChildRun` now has a journaled outcome, a later cancel of the parent does not propagate to it (§9.2 item 2). A *consecutively unreachable* child is bounded separately by a transport retry limit with backoff (reset by any accepted submit), surfacing the same way. The child is a **full session**: its own entity, journaled, budgeted, placed on its own shard (entity §5), supervised on its leader;
-3. the child's outcome arrives as one more message (§3.2) and becomes the tool's outcome (§5.4): journaled, then shown to the parent's model.
+The loop (control flow, model calls, budgets, delegation, the fold) runs in the activation: serial, journaled, cheap. Tool effects run in the session's sandbox, where a tool may do anything inside and nothing outside. Actor isolation protects sessions' state from one another; sandbox isolation protects the node and other sessions from tools.
 
-Delegation thereby inherits §7 with no new machinery: a child on a crashed leader resumes on the new one (§7.5); a resumed parent finds the delegation orphaned and, `delegate` being `Reexecute`, re-executes it; the child's journaled `TurnId` dedups the re-submission and registers the fresh reply-to (§7.4), so the outcome arrives whether the child is running or done.
+**Rationale:** with no sandbox, one runaway command takes down a node hosting many sessions; with the loop inside the sandbox, every session pays for isolation to host control flow that mostly waits; with a sandbox per call, consecutive calls lose the checkout or build cache the previous step produced. Hence one sandbox per session, opened lazily per activation on the shard leader (entity §4.2).
 
-### 8.2 Tree shape and failure
+### 4.2 Dispatch, and tool failure as a transcript value
 
-- The tree lives in the journals (`ChildRun` / `SessionCreated.parent`), not in a replicated structure; there is no global tree view. Each entity is its own consistency boundary (entity §2.2), and the runtime builds no cross-entity transaction.
-- Each delegation carves from the parent's remaining budget (§9.1), so a tree's total spend is bounded by the root's budget regardless of depth or width (A3).
-- A child's failure is a tool outcome (§5.4): the parent's model sees `RunError` and decides. Failures never propagate as supervision faults: supervision is local (core §11.3), and the tree spans shards and nodes.
+Every requested call carries a `CallId`, unique within its run and journaled with the call's intent; outcomes, orphan resolution, and child derivation key on it. A failing tool does not fail the run: the call's `ToolError` is journaled as its outcome and shown to the model as the tool result.
 
----
+- A call naming a tool outside the registry MUST resolve as `ToolError::UnknownTool`. An input that is not a JSON object, or a `delegate` input that does not deserialize or names a kind outside the allowlist, MUST resolve as `ToolError::InvalidArguments`. Both are synthesized: nothing executes.
+- The loop checks structure only, never the input schema, which is interface metadata for the model; validation beyond shape is the executing tool's own `ToolError`.
 
-## 9. Budgets and cancellation
+### 4.3 The workspace and its capture
 
-### 9.1 Budgets
+The sandbox runs over the session's workspace facet (facets §4.1), rematerialized from the journal by every activation before the sandbox opens.
 
-```rust
-pub struct Budget { pub tokens: u64, pub steps: u32 }
-```
+- After every sandboxed call, success or failure, the runtime MUST capture the workspace, so the call's file delta commits atomically with its `ToolOutcome` (entity E19). A delegation captures nothing, and neither does a call that reported `EnvironmentLost`.
+- A capture over the facet's durable cap MUST resolve the call as `ToolError::Sandbox`, its delta unpersisted: an outcome the model can repair. The next capture diffs against the last committed index, so nothing is skipped.
+- The timeout bounds the outcome, not the effect: a call MAY still be writing when its `Timeout` is journaled, so that capture can be torn. The journal stays consistent with what the directory held, and the next capture folds in what the straggler finished.
+- A capture that finds the workspace root gone MUST resolve the call as `ToolError::EnvironmentLost` (§4.4).
 
-1. Every run has a budget: the turn's explicit budget, else the kind's default. Spend is the model-**reported** usage (§4.1) summed over the run's calls, plus its children's spend. Spend is **a projection of the journal, not separately tracked state**: each `ModelResponse` carries its usage and each `ChildRun` its carve-out, so the fold (§6.2) recomputes spend, and a resumed activation re-derives it exactly by replay (A1).
-2. **Pre-call enforcement.** A model call is issued only while `spent < tokens` and the step count is below `steps`; the request's `max_tokens` MUST be clamped to the remaining token budget, and no call may be issued while the remainder is below a configurable floor. Output overshoot is therefore zero, and total overshoot is bounded by one call's input, a bound that grows with the transcript because input size is known only on response. Exhaustion ends the run with `RunError::BudgetExhausted` (§3.1), recoverable by a new turn with a new budget.
-3. **Carve-outs.** A delegation reserves an explicit slice of the parent's remaining budget, which the child enforces locally with no cross-shard accounting. The bound is compositional: own spend + Σ carve-outs ≤ budget, at every node of the tree (A3).
-4. **What the bound is.** Spend is *journaled* usage. A model call whose response never commits (issued by a leader deposed mid-step, whose record loses to the contiguity guard, entity §6) goes uncounted though the provider bills it: the invoice exceeds recorded spend by exactly the speculative work a leadership change cost.
+### 4.4 Crash, loss, and resume
 
-### 9.2 Cancellation
+A call whose intent is journaled but whose outcome is not when an activation begins is orphaned (workflow §4.3): a `Reexecute` call MUST be re-executed, in a fresh sandbox if need be, and an `Interrupt` call MUST resolve as `ToolError::Interrupted`, so the model decides whether to retry the side effect. The fence guards the transcript, not the world (workflow §3.3): a deposed leader may still be executing a slow call when its successor resolves it, so a re-execution may overlap the original for the duration of that call. Only `delegate` is safe by construction, its re-execution attaching to the same derived `TurnId` (§5.3).
 
-1. `Cancel` is a message (§7.3); since handlers never block on I/O (§3.2) and the input gate admits it between appends (entity §6), it takes effect at the next message boundary, not after the current model call returns. It names the run it cancels (`turn`); naming an ended or unknown run is an idempotent no-op, so a delayed `Cancel` never kills the named run's successor. Naming a **still-queued** turn (§3.1) journals that turn's `RunEnded { Cancelled }` directly: the fold drops the queue entry, subscribers are notified from the recorded outcome, and no `RunStarted`/`RunEnded` event pair fires, since no run began (§10.4).
-2. On cancel, the session journals `RunEnded { Cancelled }`, notifies every registered reply-to with `RunCompleted { outcome: Err(RunError::Cancelled) }` (§7.3), discards the run's later outcome messages (§3.2), and **owes propagation**: folding the terminal record moves each `ChildRun` without a journaled outcome (§8.1) into the fold's *owed-cancels* fact, making each owed child a member of the desired set (workflow §3.1), a `Cancel { turn }` effect launched once per activation and relaunched under backoff until the child acks; each child cancels its own subtree. The owed set is a journal projection, so a crash between the terminal commit and the send loses nothing: the next activation re-derives the debt and re-sends when a message next drives the session (§7.5; a re-sent `Cancel` ticks the cycle explicitly).
-3. Delivery is journaled. A child acks only after its own commit (its `RunEnded { Cancelled }`, or nothing for an ended run), and the parent then journals **`CancelDelivered { turn, call }`**, clearing that owed fact; until then a re-send is a safe no-op (item 1). Each send is at-most-once (core §7.2, entity §2.2), so an unacked send is a failed effect: the workflow backs its key off and relaunches it (workflow §3.4), and at the backoff cap the key rests so the parent may hibernate (workflow §6); the debt stays in the fold, and the next message that drives the session, on this activation or a later one, relaunches it. The guarantee is two-layered: once faults cease and a message reaches the session, propagation completes within bounded logical time (A4); under unhealed faults, the child's **budget is the backstop** (§9.1).
-4. In-flight side effects of a cancelled run (a tool mid-execution, a model call mid-flight) are not undone and MAY complete externally; their outcomes are discarded. The runtime reports what it stopped; it does not pretend to have un-run it.
+The sandbox is not session state: the fold never reads it, and the runtime never reconstructs a lost environment (processes, containers, trees outside the capture, held tiers). What must outlive it does so through a tool or through the workspace's durable subtree. The model MUST NOT be left asserting a world that is gone:
 
----
+- A routine reactivation journals no reset: the durable subtree is rematerialized before the sandbox opens.
+- An environment lost during an activation MUST be put on the record: the activation journals `WorkspaceReset` before the next model call, which presents it (§2.1). The loss comes from the provider answering `ToolError::EnvironmentLost` (sandbox §5.2) or from the runtime's own capture finding the root gone (§4.3); either way the binding is released, and the next sandboxed call opens afresh.
+- Tier loss follows sandbox §5.1: a fresh environment restarts the held set at `Workspace`, and a lost tier fails its calls as `ToolError` outcomes, never silently re-granted.
 
-## 10. Observability
+### 4.5 Execution tiers
 
-Operating agents means seeing what the model said, which tools ran, what a run cost, and how a delegation tree unfolded. The entity's journal already carries all four.
+A tier is a capability set a call requires (`Workspace`, `Compute`, `Network`, `Native`; sandbox §3). The runtime's side:
 
-### 10.1 The journal is the record
+1. Opening grants `Workspace` and nothing else.
+2. Before the first call at a tier the activation does not hold, the loop MUST journal `TierAcquired { turn, tier }` (§3.3), the audit trail of when a session first ran guest code or touched the network.
+3. Held tiers are additive and activation-scoped: the held set resets to `Workspace` when `WorkspaceReset` is journaled, and a fresh activation starts from `Workspace`. Only the acquisition records survive.
+4. The cap is unreachable by construction: tiers are checked at registration (§2.4) and dispatch reaches declared tools only, so the loop performs no runtime cap check (sandbox §6, S4).
+5. Each tool's tier and the profile's cap are digest-covered (§5.1), never a node-local choice.
 
-The journal (entity §7) is the single source of truth for what a session did, and every observation API is normatively a **read of it**. The runtime MUST NOT keep a second durable account of session activity: a parallel trace or audit store would drift from it.
+## 5. Sessions across the cluster
 
-- **Records** are durable and user-facing: transcript, tool calls and outcomes, costs, tree links (§6.1). If an observer needs it, it is a record.
-- **Events** (§10.4) are ephemeral and checker-facing: they describe the *machinery around* sessions (activation, leadership, run pairing) so the A-invariants are checkable over the stream (core §16, entity §13), and carry nothing of a session's content.
+A session's cluster life is the entity's lifecycle (entity §7); the runtime adds no placement, host, or resume protocol.
 
-Each record carries the leader's `Clock` reading at write time, observational metadata the fold (§6.2) MUST NOT let influence behavior. Under simulation it is virtual (core §18.1), so timestamped journals still reproduce byte-identically.
+### 5.1 Kinds and the node directory
 
-### 10.2 Reading a run (`tail`)
+Kinds are agreed cluster-wide like the codec: a session MUST be resumable on any node hosting its kind, so every hosting node MUST register every kind with the same definition. `SessionCreated` pins the session's kind digest, so a reader can tell an exact reconstruction (§8.4) from one a kind change made indicative. The digest detects drift and authenticates nothing.
 
-`SessionRef::tail(from: Seq, limit) → Result<EventHistory<Record>, EntityError>` (§7.4; `EventHistory` is the entity's event-read reply, entity §4.3) returns at most `limit` committed records after `from`, plus the journal's compaction `base`: an idempotent, replication-free **read of the leader's journal** (entity §7.3 `load`) through the entity's gateway-level event read (§7.3). The gateway serves it **without get-or-activating the session**, so polling a hibernated session costs a journal read, never a rehydration or workspace rematerialization. The activation keeps no mirror of the raw records: the fold holds projections only (§6.2), so memory and snapshots hold no second copy of the transcript.
+A node's directory is the kinds it hosts plus those it only routes to (entity §4.3). Building a harness MUST fail for a directory that does not close over delegation, because the parent's node launches child submits and owed cancels through its route for the child's kind (§6.1, §7.2); hosting a kind the registry lacks MUST fail at `HarnessBuilder::host`. A missing kind is a deployment error surfaced before any run, never a mid-run discovery.
 
-`tail` returns the entity's **event projection** (entity §7.5) unchanged, with three consequences for sessions:
+### 5.2 Placement, activation, and hibernation
 
-- **The gaps are the workspace facet's.** The journal interleaves session records with the workspace facet's (entity §7.11, §7.12), leaving gaps in the projection's `Seq`s; they are the same slots the record subscription delivers (entity §7.9), so a follower reconciling `tail` pages against pushed batches compares like with like.
-- **`limit` is bounded twice.** `SessionRef::tail` clamps `limit` to a page cap (SHOULD default to about **1024** records) on top of the gateway's server-side bound (entity §7.5).
-- **`base` becomes an explicit step in the push form.** A long transcript's oldest records eventually exist in no journal (only *history* truncates; the snapshot subsumes them in folded state), and `SessionRef::follow` surfaces this as a `Truncated { base }` step, told *before* the cursor resumes past the gap. The HTTP surface mirrors both forms: a `base` field beside the records page, and a `truncated` stream event whose event id is the base, so a `Last-Event-ID` reconnect resumes after it.
+The session activates on its shard leader on the first message, exactly once per node (E6; entity §4).
 
-It is read-your-leader (§7.3), and an unreachable shard takes observation of its sessions with it until a new leader is elected. Polling follows a live run at the client's cadence; `Submit`-and-await remains the one-shot form.
+- After an idle interval the leader MAY hibernate a session (entity §7), releasing the sandbox (A7). It MUST NOT hibernate a session whose run is live or whose queue holds an accepted turn.
+- A command reaching a node that does not lead the shard receives `NotLeader`, and the runtime retries at the hinted leader within the caller's deadline, safe by the `TurnId`.
 
-A `tail` MUST NOT trigger a write or change any activation lifecycle: it neither wakes a hibernated session nor refreshes an active one's idle clock, so continuous observation does not trade against hibernation's economics (§7.2). `SessionRef::follow` is the push complement: it returns the entity's `Follower` over the session (`EntityRef::follow`, entity §7.9), which rides the record subscription, registering a sink in the activation, and reconciles every pushed batch by `Seq` against the same event read `tail` uses, backfilling on attach, on any gap, after the stream closes, and on a periodic re-sync that catches a silent leader move. `Follower::next` thus yields the exact committed sequence, or `Followed::Truncated { base }` where compaction outran the cursor. Push is the fast path; the journal is the authority.
+### 5.3 Submission and idempotency
 
-### 10.3 Tree correlation
+A `Submit` returns promptly, and nothing a caller holds bounds the run: budgets bound tokens and steps, not wall time, so a run MAY outlive any caller, who recovers the outcome by re-submitting the same `TurnId` or following `tail`. The runtime never re-issues an ambiguous failure (entity §1.1); the `TurnId` makes the caller's own re-submission safe:
 
-Every `SessionCreated` records its **root**: its own `SessionId` without a parent, else the parent's `root` (§8). The field denormalizes the transitive closure of the parent links so any record, event, or log line names its logical request in O(1); with the parent links, it stitches one delegation tree across shards, nodes, journals, and logs, the trace propagation core §16 recommends, with no minted identifier. External trace mapping is future work (§13).
+- A `Submit` whose `TurnId` is already journaled MUST NOT start a second run (A6). A queued or live turn registers the new reply-to (`Attached`); an ended one has its recorded outcome sent at once (`Ended`). Dedup is a fold over the records, exact across a resume.
+- Registration is race-free: the input gate orders a re-submission against `RunEnded`, so a caller is either added to the live run or told the outcome, never neither or both.
+- The equality check covers the turn's content and its literal budget field, so `None` is not `Some(default)` and a conflict never depends on the kind's current default. It is recomputed from the journaled `TurnSubmitted`.
+- A re-submission whose content or budget differs (`SubmitReject::ContentConflict`), or whose `kind` is not the entity's type (`SubmitReject::KindMismatch`), MUST be rejected as a value, journaling nothing. The rejection is permanent and MUST NOT be retried.
+- The check guards against accidental `TurnId` reuse, not a crafted collision: whoever can address a session already holds it. Isolating callers is the edge's job (edge §3.2).
 
-### 10.4 Events (checker-facing)
+The subscriber set is ephemeral (workflow §2.7), rebuilt by callers re-contacting after a resume.
 
-Agent events are the runtime's own typed enum, riding the core stream through its application-event extension point (core §16's `Event::App`) beside the entity's events (`Activated`, `Deactivated`, `LeaderChanged`, `Committed`, …; entity §13): the core owns the mechanism, not the vocabulary. Checkers recover them by downcast from one totally ordered sequence, covered by seed reproducibility (core §18.1).
+### 5.4 Resume
 
-These events restate what the journal holds (`RunStarted` echoes `TurnStarted`, `ModelCompleted` a committed `ModelResponse`), the one sanctioned exception to §10.1: a continuous checker observes the totally ordered core stream, not the per-session journals, so run pairing or a call landing after a run's end must ride the stream to be checkable (the entity makes the same trade for `Committed`, entity §13). The vocabulary is the minimum a stream checker cannot reconstruct from the entity's `Activated`/`Deactivated`/`LeaderChanged`:
+Every recovery is the entity's rehydration (storage §8, entity §7): after a fault, after a migration (storage §5.3), and on a new leader after node failure. The next message activates the session, which rehydrates (rematerializing the workspace), folds, resolves orphaned calls (§4.4), and continues any unfinished run. No acknowledged record is lost (E14), and the resumed activation behaves identically to one that never stopped, given the same subsequent model and tool outcomes (A1).
 
-| Event | Fields | Meaning |
-|---|---|---|
-| `RunStarted` | `session`, `turn`, `parent?` | A run began: the turn's `TurnStarted` committed (§3.1). |
-| `ModelCompleted` | `session`, `turn`, `node` | One model call finished and its response committed, scoped to journaled spend (below): the stream half of A3 is that none follows the turn's `RunEnded`. |
-| `RunEnded` | `session`, `turn`, `outcome` | The run's exactly-one terminal outcome was journaled. |
-| `ToolCompleted` | `session`, `turn`, `node` | One tool call's `ToolOutcome` committed on a live activation on `node` (§5.4). |
-| `SandboxBound` | `session`, `node` | The activation opened its sandbox (first sandboxed call, §5.3). |
-| `SandboxReleased` | `session`, `node` | That sandbox was torn down (hibernation, migration, loss, or step-down). |
+Resumption is caller-driven: an interrupted run or a waiting turn resumes only when a message reaches the session (a re-submitted `TurnId`, a parent's re-executed delegation, or a `Cancel`, which also nudges a propagation still owed, §7.2). A run nobody asks after stays interrupted, its cost bounded by its budget. A2's liveness is conditional on this contact, and so is A4's for a propagation a crash interrupted.
 
-The sandbox pair is *not* derivable from records, because the sandbox is not session state (§5.5). Run boundaries and `ModelCompleted` are the minimum to check A2/A6 and the stream halves of A3/A4 (no `ModelCompleted` after `RunEnded`); the spend bound itself is audited from records (`ModelResponse` usage, `ChildRun` carve-outs; `conformance_budget.rs`), since budgets are not on the stream. `ToolCompleted` lets the run-discipline checker reject a straggler committing after its run ended (§3.2).
+## 6. Delegation
 
-Activation, deactivation, and the fence are observed through the **entity's** events: `Activated`/`Deactivated` (entity §13), `LeaderChanged` for a migration, and E1 over the entity stream (entity §14). `SandboxBound`/`SandboxReleased` MUST alternate within the entity's `Activated`/`Deactivated` window for that session and node (the A7 check), and a bound sandbox's `SandboxReleased` MUST precede that activation's `Deactivated`: the entity host runs the agent's `on_deactivate`, which releases the sandbox and emits the event, before emitting `Deactivated`, and the checker rejects a `Deactivated` with the sandbox still bound.
+### 6.1 Delegation is a tool
 
-`RunStarted` fires exactly once per `(session, turn)`, on the activation that commits `TurnStarted` (§3.1). A resume (§7.5) emits **no** second `RunStarted`; a checker recognizes it as `Activated` followed by `ModelCompleted` on an already-started turn, so there is no `RunResumed` event. A turn cancelled while queued (§9.2) emits **neither** event, since an unpaired `RunEnded` would break A2 pairing. Under a leadership race, the A2 and A6 checkers stay sound by the fence (E1): the turn commits once, so one start is counted. `ModelCompleted` carries its `node` so the A5 checker attributes each call to its activation, and is emitted only for a committed response, so a deposed leader's discarded work (§9.1 item 4) never appears.
+The built-in `delegate` takes a child kind, a prompt, and optionally a budget (`DelegateInput`). The child kind MUST be in the parent kind's delegation allowlist, so a locked-down kind cannot escalate through a permissive one. A delegation:
 
-### 10.5 Reconstruction and derived metrics
+1. journals a `ChildRun`: the carved budget (§7.1), and the child `SessionId` and `TurnId`, derived deterministically from the parent session, its `TurnId`, and the delegation's `CallId`. The derivation length-prefixes each component, so distinct triples derive distinct ids even from crafted ids, and every derived `SessionId` begins with a decimal length followed by `:` (edge §3.3 relies on this);
+2. submits to the child with a reply-to and awaits its `RunCompleted`, re-attaching on the submit-deadline cadence, bounded in total by a budget-scaled wait (a configurable floor plus a configurable allowance per carved step). Past the wait, or after a bounded run of consecutive unreachable attempts, the call resolves as `ToolError::Delegation` and cancels nothing: the child runs on, its budget the backstop;
+3. takes the child's outcome as the call's outcome; a child's `RunError` or `SubmitReject` is a `ToolError::Delegation`.
 
-Session state is a pure fold (§6.2, A1) and a model request a deterministic function of it (§4.1), so the exact `ModelRequest` of any step is **reconstructible from the journal prefix**: debugging a production prompt needs only the journal and the code. Reconstruction is exact only against the same kind, which is why `SessionCreated` records its digest (§7.1): a reader can tell an exact reconstruction from one a mid-session kind change made merely indicative. The digest is a fast 64-bit hash that flags drift but does not authenticate; integrity rests on the journal's custody.
+The child is a full session, with its own entity, journal, budget, and shard. A resumed parent re-executes the orphaned delegation (`Reexecute`), and the child's journaled `TurnId` turns the re-submission into an attach (§5.3), so the outcome arrives whether the child is running or done.
 
-Aggregate metrics (spend per kind and per tree by `root`, run latency, tool failure rates, activation and leadership churn) are RECOMMENDED, not REQUIRED, and SHOULD be **derived** from records and events rather than instrumented separately.
+### 6.2 Tree shape and failure
 
----
+- The tree lives in the journals (`ChildRun`, and `SessionCreated`'s lineage), not in a replicated structure; the runtime builds no cross-entity transaction (entity §1.1).
+- Each delegation carves from the parent's remaining budget, so a tree's spend is bounded by the root's budget whatever its shape (A3).
+- A child's failure is a tool outcome for the parent's model, never a supervision fault: supervision is local (actor §2.4), and the tree spans nodes.
 
-## 11. Conformance
+## 7. Budgets and cancellation
 
-The catalogue is machine-readable alongside the conformance suite (`a_catalogue()`), guarded by the same drift-test pattern as the entity, core, and utilities catalogues. It lists only what is specific to the *agent*, citing entity guarantees in the entity-basis column. The deterministic fold (E2/E3) and single activation (E6) reappear as A1 and A5, adding resume-equivalence and autonomy; the fence (E1) and the write-ahead obligation (§6.3, E5) have **no** agent invariant, being wholly the entity's (E1 is the basis of A5's one leader and A6's single commit).
+### 7.1 Budgets
 
-| # | Invariant | Defined in | Verified by | Entity basis |
-|---|---|---|---|---|
-| A1 | **Deterministic fold and resume.** Session state is a pure fold of the journal; a session resumed from any committed prefix behaves byte-identically to one that never stopped, given the same subsequent model and tool outcomes. | §6.2, §7.5 | differential resume-vs-uninterrupted test (`conformance_resume.rs`); seed-reproducibility sweep (`agent_swarm.rs`: `the_event_stream_reproduces_byte_for_byte_per_seed`) | E2, E3 |
-| A2 | **Run termination.** Every `RunStarted` is followed by exactly one `RunEnded`; once faults cease, partitions heal, and a message reaches the session, no run remains pending past its budget's bound. The `RunEnded` record is the single source of truth; the `RunCompleted` notification is best-effort (`tell`), and a lost one is recovered by re-contact (§7.4), never retried. | §3.1, §7.5, §9 | continuous checker (`agent-run-discipline`, pairing); scenario and swarm sweeps (`conformance_run.rs`, `cluster.rs`) for bounded completion under caller re-submission | E14 (lossless failover) |
-| A3 | **Budget bound.** A run issues no model call after exhaustion; output spend never exceeds the remaining budget at call time; own spend plus children's carve-outs never exceeds the budget, at every level of a delegation tree. | §9.1 | continuous checker (`agent-run-discipline`): no `ModelCompleted` after `RunEnded` (§10.4); journal audit of spend against budget and tree scenario (`conformance_budget.rs`) | (none) |
-| A4 | **Cancellation.** After a cancel is journaled, the run and, once faults cease, every descendant run end `Cancelled` within bounded logical time, issuing no further model calls. | §9.2 | scenario and swarm tests (`conformance_cancel.rs`); crash-window scenario (`cluster.rs`: leader crash between the terminal commit and the propagating send); checker (`agent-run-discipline`) for post-cancel `ModelCompleted` | (none) |
-| A5 | **Single autonomous activation.** A node never runs two concurrent activations of one session; on a converged cluster, at most one activation per session is live; an addressed session activates within bounded logical time of a message reaching its shard leader. | §7.2, §7.5 | continuous checker (`agent-event-grammar`, the per-node half: no model completion outside an activation), inherited entity checker (E6), and the converged and liveness halves of the cluster scenario (`cluster.rs`) | E6, entity §8 |
-| A6 | **Idempotent submission.** A re-submitted `TurnId` never starts a second run: it registers the caller's reply-to for notification, or `tell`s the recorded outcome if the run already ended, under any injected duplication or caller retry. | §7.4 | continuous checker (`agent-run-discipline`, one `RunStarted` per `(session, turn)`); retry scenarios (`conformance_run.rs`) | E1 (one commit) |
-| A7 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces in the journal (`ToolError` outcomes, a `WorkspaceReset` record, §5.5), never as silent corruption. | §5.3, §5.5 | continuous checker (`agent-event-grammar`: `SandboxBound`/`SandboxReleased` within the entity's activation window); crash/loss scenarios (`conformance_sandbox.rs`); cross-session isolation by construction | entity §5.2 (colocation) |
+A `Budget` is a token limit and a step limit.
 
-The sandbox seam's tier obligations are their own catalogue, **S1–S5** (sandbox §6). The runtime is also held to the core and entity testing contracts (core §18.1, §18.3; entity §14): seed-reproducibility of the full event stream including agent events, and fault-coverage accounting proving model faults fired while agent traffic flowed; the entity's own faults are accounted for by its suite.
+1. Every run has a budget: the turn's explicit one, else the kind's default. Spend is the model-reported usage of the run's calls plus its children's carve-outs, and MUST be a projection of the journal, so a resumed activation re-derives it by replay.
+2. A model call is issued only while spend is below the token limit and the step count below the step limit. Its `max_tokens` MUST be clamped to the remaining tokens, and no call is issued while the remainder is below a configurable floor. Output overshoot is therefore zero, and total overshoot at most one call's input. Exhaustion ends the run with `RunError::BudgetExhausted`.
+3. A delegation reserves an explicit slice of the parent's remainder, enforced by the child with no cross-shard accounting: own spend plus carve-outs never exceeds the budget, at every node of the tree (A3).
+4. The bound is on journaled usage: a response that never commits (from a leader deposed mid-step) goes uncounted though the provider bills it.
 
----
+### 7.2 Cancellation
 
-## 12. Testability and deterministic simulation
+1. A `Cancel` names its run by `TurnId` and takes effect at the next message boundary. Naming an ended or unknown run MUST be a no-op, so a delayed `Cancel` never kills a successor. Naming a still-queued turn MUST journal its `RunEnded { Cancelled }` directly: the turn leaves the queue, its subscribers are notified, and no run begins.
+2. Cancelling the live run journals `RunEnded { Cancelled }`, notifies every registered reply-to, discards the run's later outcomes, and owes propagation: the fold moves each `ChildRun` without an outcome into an owed-cancels projection, each a member of the desired set, relaunched under the workflow's backoff (workflow §3.4) until the child acks. The debt is a journal projection, so a crash after the terminal commit loses nothing.
+3. A child acks only after its own commit, and the parent then journals `CancelDelivered`, clearing that debt. At the backoff cap the key rests so the parent may hibernate (workflow §6), and the next message relaunches it. Once faults cease and a message reaches the session, propagation completes within bounded logical time (A4); under unhealed faults the child's budget is the backstop.
+4. In-flight effects of a cancelled run are not undone and MAY complete; their outcomes are discarded.
 
-### 12.1 Seams
+## 8. Observability
 
-The runtime adds **two** seams to those the entity already virtualizes (entity §14, core §18.2); the journal stays the entity's, simulated by driving the real consensus code:
-
-| Seam | Production | Simulation |
-|---|---|---|
-| `Model` (§4) | `ProtocolModel` over an injected `HttpPost`, bound to `agent-anthropic`'s Messages protocol or `agent-openai`'s Chat Completions protocol; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
-| `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: outcomes scripted per call by a closure over the tool's name and input; a toggled open failure, a fixed per-call latency, and crash and environment-loss shapes the script returns as the call's `ToolError` |
-The `agent` crate MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). Its `http` module owns the HTTP seam the production adapters share: `HttpPost`, the one socket operation a deployment implements; the `Protocol` trait, an adapter's wire-format decisions; and `ProtocolModel`, the shared shell with a bounded, jittered retry (policy in `agent::http`). `HttpPost`'s production implementation (the standalone deployment's, on the `agent-http` substrate) is injected at construction. Each production `Model` crate (`agent-anthropic`, `agent-openai`) is a `Protocol` impl plus a `ProtocolModel` alias and nothing else; production sandbox providers are likewise separate crates. Because journal, fence, placement, and resume are the entity's, simulation *runs the real entity host, gateway, shard, and rehydration code* (entity §14) under the same seed; the loop is the only new code on the simulated path.
-
-### 12.2 Fault injection
-
-Under seed control, a simulated agent run MUST be able to inject at least, on top of the core and entity faults (core §18.3, entity §14):
-
-- **Model:** latency, `RateLimited`/`Overloaded` bursts, `ContextOverflow`, unknown tool names, malformed or schema-violating arguments (rejected by the loop and the executing tool respectively, §5.4), pathological tool-call loops (exercising budgets).
-- **Sandbox:** a toggled open failure, a fixed execution latency (a call outliving its timeout, §5.3 item 3), a crash mid-call (§5.5), and environment loss between steps (forcing `WorkspaceReset`). These are scripted per scenario as a function of the call, not drawn from the seed.
-- **Entity (inherited):** shard-leader crash and election mid-write (E1; resume on the new leader, §7.5), shard quorum loss (`Unavailable`, §6.4), eviction mid-command, and a shard split under concurrent writes (entity §7.7).
-- **Topology:** leadership moves under partition and heal (the orphaned-effect race, §5.5), cancellation racing completion across the tree.
+### 8.1 The journal is the record
 
-A run with no faults MUST still pass.
-
----
-
-## 13. Future work
-
-- **Post-commit emission in the workflow.** The events owed once a record commits (§10.4) are staged on the activation by the deciding handler and emitted by the tick after the commit; the workflow engine stages its own the same way (workflow §8, §11), and one staging could serve both. Nothing blocks on it.
-- **Durable alarms for the agent.** A stored timer that re-activates a session to advance a run with no caller present: the basis for scheduled runs, server-side timeouts, and proactive agents. The entity half exists (the alarm facet and its per-shard index, entity §7.16); the runtime integration remains, lifting v1's strictly caller-driven resumption (§7.5).
-- **Scheduler singleton.** Queued and recurring runs feeding ordinary `Submit`s; out of v1, and a natural client of durable alarms.
-- **Linearizable and follower reads.** A `tail` that reflects committed state on the minority side of a partition, via the entity's deferred leader-lease upgrade (entity §7.5, §16); follower reads for read scale ride the same extension.
-- **Sandbox providers, snapshots, and pooling.** The first per-tier provider is `agent-sandbox` (sandbox §3.1–§3.5). Open: a network dataplane behind the profile's allowlist (sandbox §3.3) and warm pools to cut open latency.
-- **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants: the economics of mutualization (§1.1).
-- **Context compaction.** Summarizing the transcript into a journaled checkpoint record from which the fold and the model request start; must preserve A1. The entity's snapshot (entity §9) bounds *replay* cost; compaction bounds *context* cost.
-- **Token streaming.** Streaming partial `Model` output; `complete` is one request, one response (§4.1). Record-level push observation exists (`SessionRef::follow`, §10.2).
-- **Permission gating.** A per-tool authorization hook between intent and execution, the application-level analogue of the entity's per-`(peer, EntityName, manifest)` `Authorizer` (entity §13, core §15): the dynamic, per-call half to the tier cap's static half (§5.6).
-- **Loop-executing tools.** An extension point for tools that run in the loop with effects confined to the seams (ask-the-user, journal queries); v1 has only `delegate` (§5.2).
-- **Code mode.** Exposing the toolset as an API the model *programs against*, the generated program executing at the `Compute` tier (§5.6): fewer declaration tokens and loop round-trips, same boundary.
-- **External trace interop.** Mapping `root`/parent links (§10.3) onto W3C trace-context or OpenTelemetry ids at an external collector's boundary.
-- **Cross-session sagas.** Multi-session workflows above the single-session consistency boundary, built with idempotency as the entity builds cross-entity sagas (entity §16).
+The journal is the single source of truth for what a session did, and every observation API is a read of it. The runtime MUST NOT keep a second durable account of session activity. Records (§2.7) are durable and user-facing; events (§2.8) are ephemeral and checker-facing.
 
----
+### 8.2 Reading a run
 
-## Appendix A: End-to-end example
+`SessionRef::tail` returns a bounded page of committed records after a cursor, with the journal's compaction `base`, as an `EventHistory`: a replication-free read of the leader's journal (entity §6). `SessionRef::follow` returns the entity's `Follower` (entity §6.3), which yields the exact committed sequence, or `Followed::Truncated` where compaction outran the cursor.
 
-```rust
-// --- A kind, identical on every node (§7.1); the registry is the allowlist (§5.2).
-// --- `shell` and `read_file` run in the sandbox at their declared tiers (§5.6); `delegate`
-// --- runs in the loop (§8). The tier cap defaults to {Workspace, Native} (§5.3 item 4).
-let researcher = Kind::new("You are a research agent.")
-    .model(ModelParams::default())
-    .tool("shell", "Run a command in the workspace", &SHELL_SCHEMA, Tier::Native)
-    .tool("read_file", "Read a file from the workspace", &READ_SCHEMA, Tier::Workspace)
-    .delegates_to(&["researcher"])          // the built-in `delegate` tool; allowlisted child kinds (§5.2, §8)
-    .sandbox(SandboxProfile::image("workspace:base"))
-    .entity(EntityConfig {                  // the kind IS an entity type's config (§7.1, entity App. A)
-        shards: 16, replication_factor: 3,
-        idle_after: Duration::from_secs(300), snapshot_every: 4096,
-    })
-    .budget(Budget { tokens: 200_000, steps: 50 });
+- A read MUST NOT write, activate a hibernated session, or refresh an active one's idle clock.
+- A page's `Seq`s are journal slots; the workspace facet's records occupy the gaps (facets §4.1). A cursor below `base` asks for records the snapshot has subsumed, which are not served.
+- Reads are read-your-leader (entity §6): a deposed leader not yet fenced MAY serve a stale page, though writes never fork.
 
-// --- Per node: one Harness; model and sandbox seams injected, the journal the entity's (§7.4).
-let kinds = Kinds::new().register("researcher", researcher);
-let h = Harness::cluster(system, &kinds, model, sandboxes);
+The edge serves both reads over HTTP (edge §2.1).
 
-// --- Any node: address the session by name; the shard leader hosts it (§7.2) ---
-let s = h.session("researcher", SessionId::new("report-42"))?;  // EntityRef<Agent>; Err ⇔ the kind
-                                                                //   is not in this node's directory (§7.4)
-// prompt() = Submit (ack) + await RunCompleted (§7.4); re-prompt the same TurnId to re-attach.
-match s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus on X.")).await {
-    Ok(Ok(completion))                  => println!("{}", completion.text()),
-    Ok(Err(RunError::BudgetExhausted))  => { /* grant a larger budget, resubmit a new turn */ }
-    Ok(Err(run_err))                    => eprintln!("run failed: {run_err:?}"),   // Model | Cancelled
-    Err(PromptError::Rejected(_))       => { /* a caller bug, e.g. the TurnId reused for other
-                                                content: fix the request, never retry (§7.4) */ }
-    Err(PromptError::Entity(EntityError::Unavailable(_)))
-        => { /* shard quorum lost; the run PAUSED, not ended;
-                re-submit the SAME TurnId on recovery (§6.4, §7.5) */ }
-    Err(PromptError::Entity(EntityError::NotLeader(_)))
-        => { /* retries exhausted; refresh shard map and retry */ }
-    Err(PromptError::Entity(EntityError::Call(Unreachable | Timeout)))
-        => { /* safe to re-submit the SAME TurnId: A6 dedups or attaches (§7.4) */ }
-    Err(e)                              => eprintln!("call failed: {e}"),
-}
-```
+### 8.3 Tree correlation
 
-## Appendix B: Crate and module layout
+Every `SessionCreated` records its root: its own `SessionId` without a parent, else the parent's root. With the parent links it names one delegation tree across shards and journals with no minted identifier; nothing routes or folds on it.
 
-```
-agent/                # the agent runtime (this spec): an agent is an entity (§2)
-  agent.rs              #   the Agent entity: Entity/EntityHandler and Workflow impls,
-                        #     perform, settle, and the environment pre-pass (§3, §5.4-§5.6, §6)
-  desired.rs            #   Workflow::pending, the desired set as a pure function of committed
-                        #     state; the Effect it carries to perform; the StepKey naming one (§3.1)
-  config.rs             #   HarnessConfig, the tuning every node agrees on (§7.2, §9.1)
-  session.rs            #   SessionId (= EntityName), TurnId, Turn, Record (= the entity Event),
-                        #     and the fold over records (§2, §6)
-  model.rs              #   Model trait, ModelRequest/Response/Error (§4)
-  http.rs               #   the HTTP seam: HttpPost, HttpResponse/HttpError, the Protocol trait,
-                        #     and ProtocolModel with its seeded, bounded retry (§4.2, §12.1)
-  tool.rs               #   ToolDecl, ToolRegistry, the built-in `delegate` (§5.2, §8)
-  sandbox.rs            #   Sandbox + SandboxProvider seams, SandboxProfile, Tier (§5.3, §5.6)
-  kind.rs               #   Kind, Kinds, the kind→entity-type/EntityConfig binding (§7.1)
-  client.rs             #   Harness + SessionRef (= EntityRef<Agent>): addressing, routing, and the
-                        #     attach protocol behind `prompt` and a delegation's wait (§7.4, §8.1)
-  budget.rs             #   Budget, spend accounting, carve-outs (§9.1)
-  event.rs              #   the agent runtime's checker-facing Event vocabulary (§10.4)
-  testing.rs            #   the continuous A-checkers: run discipline (A2/A3/A4/A6) and effect
-                        #     containment (A5/A7), behind the `testing` feature, not API (§11)
+### 8.4 Reconstruction and metrics
 
-agent-anthropic/      # Protocol impl for the Anthropic Messages API; AnthropicModel is
-                        #   ProtocolModel bound to it (§12.1)
+A model request is a deterministic function of the fold and the kind, so the exact `ModelRequest` of any step is reconstructible from the journal prefix, and `SessionCreated`'s digest says whether the kind in hand is the one the session ran (§5.1). Aggregate metrics (spend per kind and per tree, run latency, tool failure rates) are RECOMMENDED, derived from records and events rather than instrumented separately.
 
-agent-openai/         # Protocol impl for OpenAI-compatible Chat Completions (OpenAI,
-                        #   OpenRouter, vLLM, llama.cpp, …); OpenAiModel is ProtocolModel
-                        #   bound to it (§12.1)
+## 9. Determinism
 
-agent-http/           # hand-rolled HTTP/1.1 client substrate for the deployment binaries;
-                        #   the standalone node's HttpPost implementation is built on it (§12.1)
+The `agent` crate MUST satisfy actor §2.12.2: no wall clock, no OS threads, no unseeded randomness, no socket; every operation is launched through `Spawner`, timed by `Clock`, and randomized by `Entropy`. Model output is nondeterministic in production, so reproducibility is scoped to fixed outcomes: with a scripted model and a scripted sandbox, one seed reproduces a whole multi-node run (model and tool faults, crashes, elections, resumes) through the real entity code (entity §11).
 
-agent-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-std capability
-                        #   handle, Compute by hermetic wasmtime guests (raw modules, or
-                        #   JavaScript via embedded QuickJS, feature-gated), Native by an OCI
-                        #   container or a Firecracker microVM (feature-gated); ships s_catalogue()
+## 10. Invariants
 
-agent-gateway/        # the public multi-tenant HTTP/SSE edge: a routing-only cluster
-                        #   client that terminates tenant auth and addresses each session's
-                        #   entity directly (§7.4)
+Only what is specific to the agent: the fence (E1) and the write-ahead obligation (E5) are wholly the entity's. The Rust copy of this table, with the suites that verify each row, is `agent`'s conformance catalogue.
 
-agent-standalone/     # the node binary: a cluster member hosting the kinds and voting in
-                        #   Raft, with no client-facing protocol of its own
+| # | Invariant | Defined in | Entity basis |
+|---|---|---|---|
+| A1 | **Deterministic fold and resume.** Session state is a pure fold of the journal; a session resumed from any committed prefix behaves identically to one that never stopped, given the same subsequent model and tool outcomes. | §3.1, §5.4 | E2, E3 |
+| A2 | **Run termination.** Every `RunStarted` is followed by exactly one `RunEnded`; once faults cease, partitions heal, and a message reaches the session, no run remains pending past its budget's bound. The record is the source of truth; a lost `RunCompleted` is recovered by re-contact, never retried. | §3.2, §5.4, §7 | E14 (lossless failover) |
+| A3 | **Budget bound.** A run issues no model call after exhaustion; output spend never exceeds the remaining budget at call time; own spend plus carve-outs never exceeds the budget, at every level of a delegation tree. | §7.1 | (none) |
+| A4 | **Cancellation.** After a cancel is journaled, the run and, once faults cease, every descendant run end `Cancelled` within bounded logical time, issuing no further model calls. | §7.2 | (none) |
+| A5 | **Single autonomous activation.** A node never runs two concurrent activations of one session; on a converged cluster at most one is live; an addressed session activates within bounded logical time of a message reaching its shard leader. | §5.2, §5.4 | E6, storage §5 |
+| A6 | **Idempotent submission.** A re-submitted `TurnId` never starts a second run: it registers the caller's reply-to, or delivers the recorded outcome if the run ended, under any duplication or retry. | §5.3 | E1 (one commit) |
+| A7 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed call executes in its issuing activation's sandbox, never another session's; sandbox loss surfaces in the journal (`ToolError` outcomes, `WorkspaceReset`), never as silent corruption. | §2.3, §4.4 | entity §4.2 (colocation) |
 
-agent-tui/            # the terminal client: drives one session over a gateway's HTTP/SSE
-                        #   surface and renders the run's records as a transcript
-```
+The sandbox's tier invariants are their own catalogue (sandbox §6).
 
-Every module of `agent` is private except `http` and `testing`, so each public item has one path: the crate root re-exports the client, kind-definition, and seam surface, while `agent::http` alone holds the kit a deployment implements and an adapter is built from (`HttpPost`, `HttpResponse`, `HttpError`, `Protocol`, `ProtocolModel`, `tool_result_text`).
+## 11. Deferred
 
-`agent` depends on `entity`, and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, placement function, fence, or resume protocol**; the one durable thing it names is the `Record` type (the entity's event) and its `apply` fold. Test-only pieces (scripted model and sandbox, `a_catalogue()`, the conformance suites) live with the tests, dev-depending on `actor-simulation` and the entity's simulation seam. The continuous checkers are the exception: they ship in `testing.rs` behind the `testing` feature because any consumer's swarm can mount them, as the entity's `testing.rs` does. The crate follows the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.
+- **Durable alarms for sessions:** nothing reactivates a session without a caller, so resumption is caller-driven (§5.4); the entity half exists (facets §4.5).
+- **Scheduler singleton:** no queued or recurring runs; it waits on durable alarms.
+- **Linearizable reads:** a minority-side leader may serve a stale `tail` until the entity's leader lease lands (entity §13).
+- **Warm pools and a network dataplane:** every open pays full provisioning, and no provider offers `Network` (sandbox §7).
+- **Multi-tenant scheduling:** no quotas or fair share across tenants.
+- **Context compaction:** an over-long transcript fails the run; a checkpoint record must preserve A1.
+- **Token streaming:** `complete` is one request and one response, so a client sees a step only once it commits.
+- **Permission gating:** no per-call authorization hook; the tier cap is the only, static, gate.
+- **Loop-executing tools:** `delegate` is the only tool that runs in the loop.
+- **Code mode:** the toolset is not an API the model programs against at the `Compute` tier, so every call costs a loop round trip.
+- **External trace interop:** root and parent links (§8.3) are not mapped onto W3C trace-context ids.
+- **Cross-session sagas:** nothing coordinates work above the single-session boundary.
+- **Shared post-commit event staging:** the agent and the workflow each stage events owed after a commit (workflow §2.8).

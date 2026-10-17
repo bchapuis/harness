@@ -1,4 +1,4 @@
-//! Per-shard alarm index + driver tests (entity §7.16): the callerless-across-
+//! Per-shard alarm index + driver tests (facets §4.5): the callerless-across-
 //! failover half of durable alarms.
 //!
 //! Covers the mechanisms that compose it: the [`AlarmIndex`] entity's
@@ -280,7 +280,7 @@ fn driver_reactivates_an_indexed_entity() {
 
 #[test]
 fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it() {
-    // The alarm-hibernation half of §7.16: once the index acks the deadline (the
+    // The alarm-hibernation half of facets §4.5: once the index acks the deadline (the
     // registration ask returns from its commit), the standing alarm no longer pins
     // the entity resident. It hibernates well before the deadline; the driver's
     // sweep re-activates it when the alarm falls due, and its re-armed timer fires

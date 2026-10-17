@@ -1,4 +1,4 @@
-//! Shared simulation invariants over agent events (agent spec §11).
+//! Shared simulation invariants over agent events (agent spec §10).
 //!
 //! The continuous A-checkers: the event grammar that bounds effects to a live
 //! activation (A5/A7), and run discipline over `(session, turn)` (A2/A3/A4/A6).
@@ -19,7 +19,7 @@ use crate::AgentEvent;
 use crate::SessionId;
 use crate::TurnId;
 
-/// The session an entity event names, by its key (§2.2: the `EntityName` key is the
+/// The session an entity event names, by its key (§3.1: the `EntityName` key is the
 /// `SessionId`). Tests use unique session keys, so the key identifies the run.
 fn session_of(name: &EntityName) -> SessionId {
     SessionId::new(name.key())
@@ -27,7 +27,7 @@ fn session_of(name: &EntityName) -> SessionId {
 
 /// **Effect containment and single per-node activation** (A5 per-node half, A7):
 /// activation is the entity's (`Activated`/`Deactivated` strictly alternate per
-/// session and node, entity §13); the agent runtime's `SandboxBound`/`SandboxReleased`
+/// session and node, entity §10); the agent runtime's `SandboxBound`/`SandboxReleased`
 /// alternate **within** that window and the sandbox is released before
 /// deactivation; and a `ModelCompleted` only fires inside a live activation.
 #[derive(Default)]
@@ -50,7 +50,7 @@ impl Invariant for AgentEventGrammar {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // Activation lifecycle from the entity's own events (entity §13).
+        // Activation lifecycle from the entity's own events (entity §10).
         if let Some(entity) = event.as_app::<EntityEvent>() {
             match entity {
                 EntityEvent::Activated { node, name } => {
@@ -116,9 +116,9 @@ impl Invariant for AgentEventGrammar {
 
 /// **Run discipline** (A2 pairing, A6; the stream half of A3 and A4): per
 /// `(session, turn)` exactly one `RunStarted` and at most one `RunEnded`, never
-/// an end without a start. A resume emits no second `RunStarted` (§10.4), and
+/// an end without a start. A resume emits no second `RunStarted` (§2.8), and
 /// `ModelCompleted` is scoped to journaled spend (emitted only after the
-/// response commits, §9.1 item 4), so no completion follows a run's end. The
+/// response commits, §7.1 item 4), so no completion follows a run's end. The
 /// spend bound itself is a journal audit (`conformance_budget.rs`), since the
 /// budget and the carve-outs are records, not stream events.
 #[derive(Default)]
@@ -174,7 +174,7 @@ impl Invariant for RunDiscipline {
 }
 
 /// The default checker set for agent workloads: the core and entity invariants
-/// plus the agent runtime's continuous A-checkers (§11).
+/// plus the agent runtime's continuous A-checkers (§10).
 pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();
     invariants.push(Box::new(AgentEventGrammar::default()));
@@ -183,7 +183,7 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
 }
 
 /// Which A-invariant each agent checker enforces, as `(checker name, A
-/// number)`: the pairing §11's "Verified by" column asserts, stated from the
+/// number)`: the pairing §10's "Verified by" column asserts, stated from the
 /// checker's side.
 ///
 /// Declared here, beside the checkers, because this is the claim an edit to an

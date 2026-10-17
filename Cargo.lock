@@ -3623,7 +3623,6 @@ dependencies = [
  "divan",
  "postcard",
  "serde",
- "spec",
  "tempfile",
  "xxhash-rust",
 ]

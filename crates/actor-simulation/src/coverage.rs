@@ -1,4 +1,4 @@
-//! Fault-injection coverage telemetry (spec §18.3).
+//! Fault-injection coverage telemetry (docs/simulation-testing.md).
 //!
 //! [`FaultStats`] is the *output* side of fault injection: a tally of what a run
 //! actually exercised, so a swarm can assert each fault type fired at least once
@@ -8,7 +8,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-/// A tally of the faults a run actually exercised (spec §18.3). A swarm asserts,
+/// A tally of the faults a run actually exercised (docs/simulation-testing.md). A swarm asserts,
 /// across its seed range, that each fault type fired at least once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FaultStats {
@@ -22,9 +22,9 @@ pub struct FaultStats {
     /// Frames dropped because their directed pair was partitioned or crashed.
     pub blocked: u64,
     /// Registry outage windows the nemesis opened (registry-based mode,
-    /// spec §9.4.2 item 6, §18.3).
+    /// spec §6.4.2 item 6, §10).
     pub registry_outages: u64,
-    /// Registry fetches served a stale snapshot by a seeded roll (spec §18.3).
+    /// Registry fetches served a stale snapshot by a seeded roll (docs/simulation-testing.md).
     pub registry_stale: u64,
 }
 

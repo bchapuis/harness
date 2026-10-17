@@ -1,4 +1,4 @@
-//! Seed-sweep sizing for swarm tests (spec §18.6).
+//! Seed-sweep sizing for swarm tests (spec §2.12.2).
 //!
 //! A sweep serves two jobs that want different seeds: **regression** against a
 //! pinned corpus, which is what CI runs, and **discovery** across fresh seeds in
@@ -14,7 +14,7 @@
 //!
 //! Sizing is a cost class, not a wall clock: reading the host clock to decide
 //! how much to run would make the seeds that executed depend on the machine that
-//! ran them (spec §18.1), and `clippy.toml` bans the call in this crate. Seeds
+//! ran them (spec §2.12.2), and `clippy.toml` bans the call in this crate. Seeds
 //! stay independent under all three sizings, so a narrow run is a smaller sample
 //! of the same corpus rather than a different one.
 //!
@@ -35,6 +35,19 @@
 //!
 //! Unset, a run takes its cost class's width; CI pins `SWARM_SEEDS=full` in its
 //! workflow.
+//!
+//! # Choosing a cost class
+//!
+//! Reclassify a sweep by measuring, not guessing. Run its test binary at two
+//! widths and take the difference, so the binary's fixed start-up cost (about
+//! 0.6 s cold, enough to swamp a cheap sweep) cancels out; warm the binary
+//! first:
+//!
+//! ```text
+//! # per-seed cost = (t32 - t2) / 30
+//! SWARM_SEEDS=2  ./target/debug/deps/<binary>
+//! SWARM_SEEDS=32 ./target/debug/deps/<binary>
+//! ```
 
 use std::ops::Range;
 use std::sync::Once;
@@ -70,7 +83,7 @@ pub fn slow_seeds(declared: Range<u64>) -> Range<u64> {
 /// The seeds to sweep for a fault-coverage assertion.
 ///
 /// A coverage sweep asserts that each fault type fired at least once *across
-/// the declared width* (spec §18.3), so narrowing it would change what the test
+/// the declared width* (docs/simulation-testing.md), so narrowing it would change what the test
 /// claims. These run at their declared width everywhere; only an explicit
 /// `SWARM_SEEDS` changes that.
 pub fn coverage_seeds(declared: Range<u64>) -> Range<u64> {
@@ -134,7 +147,9 @@ fn base_offset() -> u64 {
 ///
 /// CI wants the first failure fast. A soak is mining the seed space for
 /// `(workload, seed)` pairs to write into `corpus.txt`, and halting on the first
-/// one throws away the rest of the run.
+/// one throws away the rest of the run. Worse, corpus seeds replay *ahead* of
+/// every sweep, so without this a workload with a failing seed on record fails
+/// that replay first and explores nothing new until the bug is fixed.
 ///
 /// Off by default (stop at the first failure); `soak.yml` turns it on.
 pub(crate) fn collect_all_failures() -> bool {

@@ -32,7 +32,7 @@ use crate::Workflow;
 use crate::WorkflowEvent;
 use crate::orphan;
 
-/// Where an activation stands with its orphan set (§4.4): one lifecycle,
+/// Where an activation stands with its orphan set (§4.3): one lifecycle,
 /// walked once per activation.
 enum Phase<K> {
     /// No committed state seen yet: nothing is classified.
@@ -50,7 +50,7 @@ enum Phase<K> {
 /// anything that commits nothing: a consumer's own event, or a backoff elapsing.
 /// Like [`Settled`], a **local-only** self-tell: a consumer MUST NOT `accept`
 /// it in its `EntityRegistry`, which is the deserialization allowlist for
-/// *network* commands (entity §5.5). Nothing outside the entity has any business
+/// *network* commands (entity §4.5). Nothing outside the entity has any business
 /// injecting an effect outcome or driving another node's activation.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Tick;
@@ -63,7 +63,7 @@ impl Message for Tick {
 /// The per-activation state the cycle keeps. Never journaled (§3.3, §3.4).
 struct Scope<K: Ord> {
     /// Which keys this activation has launched: entity's launch-once posture
-    /// (entity §7.17) with the engine's own lifetime rule. It is deliberately
+    /// (facets §4.6) with the engine's own lifetime rule. It is deliberately
     /// not entity's `LaunchGuard`, because the two release differently: the
     /// steps facet's guard is reset wholesale when a run ends, where a claim
     /// here is dropped exactly when its key leaves the desired set (§3.2 step 2),
@@ -71,7 +71,7 @@ struct Scope<K: Ord> {
     claims: BTreeSet<K>,
     /// Per-key consecutive unproductive settles and the delay they earn (§3.4).
     backoff: Backoff<K>,
-    /// The orphan set's classification (§4.4), made at the activation's
+    /// The orphan set's classification (§4.3), made at the activation's
     /// **first sight of committed state**: the first tick, or the first handler
     /// that re-enters the cycle, whichever the mailbox delivers first.
     /// Classifying from the earliest state seen is what keeps a command that
@@ -83,7 +83,7 @@ struct Scope<K: Ord> {
     /// rather than recomputing one (§6). `false` until the first tick has run:
     /// an activation that has not resolved its orphan set may not hibernate.
     quiescent: bool,
-    /// `Settled` events awaiting the commit they describe (§8). A settle that
+    /// `Settled` events awaiting the commit they describe (§2.8). A settle that
     /// decided records is emitted from the engine that follows their commit (the
     /// tick `settled` launches), so an append that fails and steps the
     /// activation down takes the staged event with it, and the stream never
@@ -104,7 +104,7 @@ impl<K: Ord> Scope<K> {
 }
 
 /// The engine: one reconciliation engine, held in a workflow entity's behavior
-/// (spec §2.1).
+/// (spec §2.2).
 ///
 /// Internally synchronized, so a consumer holds it as a plain field and reaches
 /// it through `&self` from its handlers and `can_hibernate`: the shape entity's
@@ -125,7 +125,7 @@ impl<D: Workflow> Engine<D> {
     fn lock(&self) -> std::sync::MutexGuard<'_, Scope<D::Key>> {
         // Poisoning would mean a panic inside the cycle itself. `perform` runs
         // outside this lock and its panics are caught at the task boundary
-        // (§4.3), so a poisoned lock is a bug in this crate; recovering the guard
+        // (§4.2), so a poisoned lock is a bug in this crate; recovering the guard
         // keeps one bug from cascading into every later command.
         self.scope.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -138,11 +138,11 @@ impl<D: Workflow> Engine<D> {
     /// clean by specification: the claims are ephemeral (§3.3) and the counts
     /// start at zero (§3.4). The tick is what makes the first tick happen at
     /// all on an entity nobody is about to command: a resumed one with work still
-    /// outstanding, which is the whole of resume (§4.4).
+    /// outstanding, which is the whole of resume (§4.3).
     pub fn on_activate(&self, ctx: &EntityCtx<D>) {
         *self.lock() = Scope::new();
-        // No state to classify from here (entity §4.1: `on_activate` sees no
-        // state); the first handler or the first tick does that (§4.4). A fresh
+        // No state to classify from here (entity §3.1: `on_activate` sees no
+        // state); the first handler or the first tick does that (§4.3). A fresh
         // scope has no at-rest key to wake, so the plain re-entry suffices.
         self.tick_only(ctx);
     }
@@ -180,7 +180,7 @@ impl<D: Workflow> Engine<D> {
     /// (§5) rather than race it.
     ///
     /// The state is what lets the activation's **first** handler classify the
-    /// orphan set (§4.4): a handler sees the committed state *before* its own
+    /// orphan set (§4.3): a handler sees the committed state *before* its own
     /// records, so on a fresh activation that is the rehydrated state exactly, and
     /// the work this command creates is never mistaken for work a previous
     /// activation left in flight.
@@ -188,7 +188,7 @@ impl<D: Workflow> Engine<D> {
     /// A caller-driven tick also **wakes every at-rest key** (§3.4, §6). This is
     /// the line between the engine's own timer re-entering the cycle and someone
     /// asking: a key the engine gave up driving unattended is waiting for exactly
-    /// this message, and the agent runtime draws the same line (agent §9.2 item 3,
+    /// this message, and the agent runtime draws the same line (agent §7.2 item 3,
     /// where the next message to drive the session re-launches an abandoned
     /// propagation).
     pub fn tick(&self, workflow: &D, state: &D::State, ctx: &EntityCtx<D>) {
@@ -201,7 +201,7 @@ impl<D: Workflow> Engine<D> {
         self.tick_only(ctx);
     }
 
-    /// Classify the orphan set (§4.4) if this activation has not yet: the
+    /// Classify the orphan set (§4.3) if this activation has not yet: the
     /// `Interrupt` members of `desired`, the desired set at the first sight of
     /// committed state. `Reexecute` members need no record: the first tick
     /// launches them as it launches anything unclaimed.
@@ -235,7 +235,7 @@ impl<D: Workflow> Engine<D> {
         let desired = workflow.pending(state);
         let now = ctx.system().now();
         let mut scope = self.lock();
-        // The first sight of committed state classifies the orphan set (§4.4),
+        // The first sight of committed state classifies the orphan set (§4.3),
         // if no handler ahead of this tick already did.
         Self::classify(&mut scope, &desired);
 
@@ -248,7 +248,7 @@ impl<D: Workflow> Engine<D> {
         scope.backoff.retain_keys(|k| live.contains(k));
 
         // The orphaned `Interrupt` members still wanted are resolved without a
-        // launch (§4.4): each takes a claim (so no later tick launches it while
+        // launch (§4.3): each takes a claim (so no later tick launches it while
         // its synthesized outcome is in the mailbox), and is settled below. This
         // tick spends the classification: every later member is fresh.
         let mut interrupted = Vec::new();
@@ -279,7 +279,7 @@ impl<D: Workflow> Engine<D> {
         let staged = std::mem::take(&mut scope.staged);
         drop(scope);
 
-        // The settles whose records this tick follows the commit of (§8): out
+        // The settles whose records this tick follows the commit of (§2.8): out
         // first, so on the stream every claim closes before its key can be
         // launched again.
         for event in staged {
@@ -314,13 +314,23 @@ impl<D: Workflow> Engine<D> {
         Vec::new()
     }
 
-    /// Fold one settled outcome (spec §4.2, §4.5): the body of a consumer's
+    /// Fold one settled outcome (spec §4.1, §4.4): the body of a consumer's
     /// `EntityHandler<Settled<Self>>`.
     ///
     /// Discards a straggler (an outcome whose key has left the desired set)
     /// without calling [`Workflow::settle`] and without writing any record (W5).
     /// Otherwise it hands the outcome to the consumer and returns the records the
     /// consumer decided.
+    ///
+    /// Then it re-enters the cycle itself, so a consumer wires nothing more. When
+    /// the settle decided no records, nothing would re-enter on its own: the key is
+    /// backed off, and a task launched through the `Spawner` sleeps the delay on
+    /// the `Clock` and then self-tells a [`Tick`] (§3.2 item 3, §3.4). Otherwise
+    /// (the records are about to commit, or the key has just reached the cap and
+    /// come to rest) it self-tells a [`Tick`] at once, which the entity handles
+    /// after this handler's records commit; at the cap that tick is what concludes
+    /// quiescence. A `Settled` event for records is staged for that tick to
+    /// release, after the commit (§2.8).
     pub async fn settled(
         &self,
         workflow: &D,
@@ -337,7 +347,7 @@ impl<D: Workflow> Engine<D> {
             // An outcome may be the first thing an activation handles: a
             // previous activation's launch reaching this one (§3.3), and it sees
             // the rehydrated state, so it classifies the orphan set like any
-            // first handler (§4.4).
+            // first handler (§4.3).
             Self::classify(&mut scope, &desired);
 
             // The straggler test is the desired set itself, which is why it is
@@ -396,7 +406,7 @@ impl<D: Workflow> Engine<D> {
             committed,
         };
         if committed {
-            // Released by the engine that follows the commit (§8), not here: the
+            // Released by the engine that follows the commit (§2.8), not here: the
             // records are not durable yet, and an append that fails steps the
             // activation down with this still staged.
             scope.staged.push(event);
@@ -456,7 +466,7 @@ impl<D: Workflow> Engine<D> {
     }
 
     /// Self-`tell` a synthesized outcome: the path an orphaned `Interrupt` takes to
-    /// the command barrier (§3.2, §4.4).
+    /// the command barrier (§3.2, §4.3).
     fn deliver(&self, ctx: &EntityCtx<D>, key: D::Key, outcome: Result<D::Outcome, EffectError>) {
         let this = ctx.this();
         ctx.system().launch(Box::pin(async move {

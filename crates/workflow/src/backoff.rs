@@ -1,9 +1,10 @@
 //! Per-key backoff (workflow spec §3.4), and the cap that puts a key **at rest**
 //! (§6).
 //!
-//! An effect that settles unproductively (`Err`, or a settle that returns no
-//! records) and stays in the desired set would otherwise be relaunched by the
-//! very next tick. So the engine holds a per-key count of consecutive
+//! An effect whose settle returns no records, whether its outcome was an `Err` or
+//! an `Ok` the consumer had nothing to journal for, stays in the desired set and
+//! would otherwise be relaunched by the very next tick. A settle that journals
+//! records, a failure's included, is productive: its commit drives the next tick. So the engine holds a per-key count of consecutive
 //! unproductive settles and delays that key's next launch by a capped
 //! exponential backoff, timed by `Clock` and jittered from `Entropy`, so the
 //! delay is virtual and seed-reproducible under simulation.
@@ -25,7 +26,7 @@ use actor_core::Instant;
 /// The first delay, doubled per consecutive unproductive settle (spec §3.4).
 ///
 /// Chosen with [`CAP`] so a transient failure retries promptly and a permanent
-/// one stops holding the activation within one idle window (entity §10 puts
+/// one stops holding the activation within one idle window (entity §7 puts
 /// `idle_after` in minutes): four doublings from 500 ms reach the 8 s cap, at
 /// which point the key is at rest.
 const BASE: Duration = Duration::from_millis(500);
@@ -35,7 +36,7 @@ const BASE: Duration = Duration::from_millis(500);
 const CAP: Duration = Duration::from_secs(8);
 
 /// The delay after `failures` consecutive unproductive settles, before jitter:
-/// the core's capped exponential schedule (core §11.2), so the engine and the
+/// the core's capped exponential schedule (core §2.4), so the engine and the
 /// supervisor back off the same way. Saturates at [`CAP`] rather than
 /// overflowing: the engine has no attempt bound, so `failures` is unbounded by
 /// design.
@@ -134,7 +135,7 @@ impl<K: Ord> Backoff<K> {
     /// and *someone asking*. The agent runtime draws the same line: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session (on this same activation or a later one) re-launches the
-    /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that
+    /// send" (agent §7.2 item 3). A key at rest is waiting for exactly that
     /// message, so the count starts over when it arrives.
     pub fn wake(&mut self) {
         self.entries.retain(|_, e| e.until.is_some());

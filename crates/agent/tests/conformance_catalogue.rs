@@ -1,4 +1,4 @@
-//! Catalogue drift test (agent spec §11): the machine-readable A1–A7
+//! Catalogue drift test (agent spec §10): the machine-readable A1–A7
 //! catalogue and the live checker set must agree; a checker added in code
 //! but not recorded in the catalogue (or vice versa) fails the build, the
 //! same pattern guarding the core and utilities catalogues.
@@ -7,7 +7,7 @@
 //! sets of checker names. Two names carry six A-invariants here, so a name set
 //! is blind to the drift that actually happens: one entry quietly dropping its
 //! `Verify::Checker` while a sibling entry still names the same checker. That is
-//! how §11's A5 row came to understate its verification with every test green.
+//! how §10's A5 row came to understate its verification with every test green.
 
 mod support;
 
@@ -80,7 +80,7 @@ fn every_checker_covers_exactly_the_invariants_the_catalogue_gives_it() {
         declared,
         catalogued_pairs(),
         "a checker's declared coverage (agent::testing::checker_coverage) and the A \
-         catalogue's Verify::Checker rows name different (checker, invariant) pairs (§11)"
+         catalogue's Verify::Checker rows name different (checker, invariant) pairs (§10)"
     );
 }
 
@@ -106,7 +106,7 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 
     assert_eq!(
         live, declared,
-        "continuous agent checkers and their declared coverage drifted apart (§11)"
+        "continuous agent checkers and their declared coverage drifted apart (§10)"
     );
 }
 
@@ -123,7 +123,7 @@ fn the_catalogue_covers_the_live_a_invariants() {
     }
 }
 
-/// The table above and the agent spec's §11 copy of it are the same
+/// The table above and the agent spec's §10 copy of it are the same
 /// table.
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds it
@@ -135,7 +135,7 @@ fn the_catalogue_covers_the_live_a_invariants() {
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("agent");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("agent spec §11 parses");
+    let documented = catalogue::documented(&root, site).expect("agent spec §10 parses");
     let implemented: Vec<catalogue::Row> = a_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -144,7 +144,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "agent spec §11 and a_catalogue() disagree:\n  {}\n",
+        "agent spec §10 and a_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

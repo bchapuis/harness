@@ -1,41 +1,60 @@
-//! The autonomous entity (workflow spec): an entity that drives itself.
+//! The autonomous entity: an entity that drives itself.
 //!
-//! An entity waits. It holds durable state, admits a command, decides records,
-//! commits them, and replies (entity §4.2, §6). An **autonomous** entity does
-//! not wait: its activation re-derives the work its committed state calls for,
-//! launches what is not yet in flight, folds each outcome back, and stops when
-//! there is nothing left. This crate is that mechanism on its own, with no
-//! model, tool, or prompt in it.
+//! An entity waits: it admits a command, decides records, commits them, and
+//! replies (entity §3.2, §5). A **workflow** entity also drives itself: its
+//! activation re-derives the work its committed state calls for
+//! ([`Workflow::pending`]), launches what is not yet in flight
+//! ([`Workflow::perform`]), folds each outcome back into records
+//! ([`Workflow::settle`]), and stops when nothing is left. The work outstanding is a
+//! pure function of committed state, never a journaled queue, so one desired set is
+//! at once the dispatch list, the recovery set, and the straggler filter, and resume
+//! is not a special case. This crate is that mechanism with no model, tool, or
+//! prompt in it; the agent runtime is its production consumer.
 //!
-//! **The agent runtime sits on it.** Its `Workflow` impl supplies `pending`,
-//! `perform` and `settle`; this crate's [`Engine`] supplies everything between
-//! them, and its [`OnOrphan`] is the type a tool declaration's recovery policy
-//! has (agent §3.2, §13). What the agent keeps beside the cycle is what no
-//! desired set can express: a lost workspace, a failed sandbox open, and a tier
-//! not yet held are activation state, so it settles them in a pre-pass ahead of
-//! every tick rather than inside a launch (agent §5.4, §5.5, §5.6). A consumer
-//! holding a gate the set cannot express MUST settle it before it ticks, because
-//! the engine launches the whole set and cannot see what it does not hold.
+//! # Seams
 //!
-//! The whole of it rests on one decision: **the work outstanding is a pure
-//! function of committed state**, [`Workflow::pending`], never a journaled queue.
-//! A set re-derived from the journal needs no reconciliation after a crash,
-//! because recovery computes the same function over the same records, so
-//! resume stops being a special case, and the desired set is at once the
-//! dispatch list (§3.2), the recovery set (§4.4), and the straggler filter
-//! (§4.5).
+//! - [`Workflow`] is the plug point a consumer implements beside its [`Entity`].
+//!   Its handler supertraits make the consumer write a [`Tick`] and a [`Settled`]
+//!   handler; that they forward to the engine is the consumer's obligation.
+//! - [`Engine`] is what the consumer holds and forwards to:
+//!   [`Engine::on_activate`], [`Engine::quiescent`] (from `can_hibernate`),
+//!   [`Engine::advance`] (the `Tick` handler, after any gate of the consumer's own
+//!   that must run before a launch), [`Engine::settled`] (the `Settled` handler),
+//!   and [`Engine::tick`] (every handler of the consumer's own whose records call
+//!   for work).
+//! - [`Perform`] is all an effect may reach: the entity's name and the system's
+//!   `Clock`, `Entropy`, and `Spawner`.
+//! - [`Binding`] and [`Subscribers`] are passive components a consumer keeps in its
+//!   activation state, for an activation-scoped resource and for callers awaiting
+//!   a durable outcome; the obligations they carry are the holder's.
+//! - [`WorkflowEvent`] is the checker-facing vocabulary on the actor event stream,
+//!   which the checkers in `testing` (behind the `testing` feature) read.
 //!
-//! Everything beneath is entity's and is not re-implemented here: this crate
-//! defines **no journal, no fence, no placement function, and no resume
-//! protocol**, and names no durable type of its own. Every record a workflow
-//! entity writes is the consumer's [`Entity::Event`]; the workflow's own state
-//! (claims, backoff, subscribers) is ephemeral by specification (§3.3, §3.4,
-//! §7.1).
+//! Beneath, the crate consumes `entity`'s seams and adds none: [`Tick`] and
+//! [`Settled`] are ordinary, local-only commands self-told through the entity's
+//! mailbox, and the entity's output gate is the workflow's write-ahead barrier.
+//! This crate defines **no journal, no fence, no placement function, and no resume
+//! protocol**, and names no durable type of its own: every record a workflow entity
+//! writes is the consumer's [`Entity::Event`], and the workflow's own state
+//! (claims, backoff, subscribers) is ephemeral.
+//!
+//! # Mechanism
+//!
+//! `cycle` holds the engine: its per-activation scope (claims, backoff, the orphan
+//! phase, staged events) behind one mutex, a tick's four steps in
+//! [`Engine::advance`], and the launch path, which hands each effect's future to
+//! the `Spawner` and self-tells its outcome back as a [`Settled`]. `backoff` is the
+//! per-key capped exponential schedule, timed by `Clock` and jittered from
+//! `Entropy`, whose cap puts a key at rest. `orphan` classifies the orphan set at
+//! the activation's first sight of committed state and catches a panicking effect
+//! at the task boundary. `settle` is the outcome command, `event` the events, and
+//! `binding` and `subscribers` the two components. Every module is private except
+//! `testing`, and the crate root re-exports each public item once.
 //!
 //! # Wiring a workflow entity
 //!
 //! A consumer implements [`Workflow`] beside its [`Entity`], holds an [`Engine`] in
-//! its behavior, and forwards four hooks. There is deliberately no blanket
+//! its behavior, and forwards to it. There is deliberately no blanket
 //! `EntityHandler` impl, so the two commands are two small handlers:
 //!
 //! ```ignore
@@ -62,8 +81,12 @@
 //! and every handler of the consumer's own whose records call for work calls
 //! [`Engine::tick`] with the state it was given; the cycle's entry point after a
 //! commit (§3.2 item 1), and, on the activation's first handler, what classifies
-//! the orphan set (§4.4). The workflow re-enters after its own settles by itself,
-//! and arms the backoff timer after one that committed nothing (§3.2 item 3).
+//! the orphan set (§4.3). The workflow re-enters after its own settles by itself,
+//! and arms the backoff timer after one that committed nothing (§3.2 item 3). The
+//! crate's conformance suites run this shape as a fan-out fixture under
+//! `tests/support`.
+//!
+//! Specified by `docs/workflow-spec.md`.
 
 mod backoff;
 mod binding;
@@ -96,7 +119,7 @@ pub use subscribers::Subscribers;
 ///
 /// `key` is the effect's identity within its entity, `effect` the consumer's own
 /// opaque description of the work, and `on_orphan` the policy the workflow
-/// applies if a crash leaves the effect's fate unknown (§4.4). None of the three
+/// applies if a crash leaves the effect's fate unknown (§4.3). None of the three
 /// is journaled by the workflow: a `Pending` is re-derived, in full, on every
 /// activation that folds the same journal prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,12 +128,12 @@ pub struct Pending<K, E> {
     pub effect: E,
     /// The declared recovery policy. There is deliberately **no default**: an
     /// effect whose policy went unstated would be a silent decision about
-    /// whether to repeat a side effect, and there is no safe guess (§4.4).
+    /// whether to repeat a side effect, and there is no safe guess (§4.3).
     pub on_orphan: OnOrphan,
 }
 
 impl<K, E> Pending<K, E> {
-    /// A pending effect that is safe to re-run after an interruption (§4.4).
+    /// A pending effect that is safe to re-run after an interruption (§4.3).
     pub fn reexecute(key: K, effect: E) -> Self {
         Pending {
             key,
@@ -121,10 +144,10 @@ impl<K, E> Pending<K, E> {
 }
 
 /// Resume's policy for an **orphaned** effect: one whose intent committed and
-/// whose outcome did not, so nothing says whether it ran (spec §4.4).
+/// whose outcome did not, so nothing says whether it ran (spec §4.3).
 ///
 /// This is the workflow's type, and the home of the decision. The agent runtime's
-/// `ToolDecl::on_orphan` (agent §5.2) **is** this type: a tool declaration's
+/// `ToolDecl::on_orphan` (agent §2.4) **is** this type: a tool declaration's
 /// recovery policy is exactly what its [`Pending`] carries. What the agent keeps
 /// of its own is the *outcome* an interrupted call synthesizes: a `ToolError` the
 /// model reads, where a workflow mints an [`EffectError`] for a consumer's fold.
@@ -139,13 +162,13 @@ pub enum OnOrphan {
     Interrupt,
 }
 
-/// Why an effect produced no outcome (spec §4.3). A failing effect does not fail
+/// Why an effect produced no outcome (spec §4.2). A failing effect does not fail
 /// the entity: the workflow settles it as a value the consumer's fold records and
 /// reacts to.
 ///
 /// **Two variants are the workflow's to mint**: [`Interrupted`](EffectError::Interrupted)
-/// for an orphan resolved on resume (§4.4) and [`Failed`](EffectError::Failed) for a
-/// panic caught at the boundary of the task running the effect (§4.3). The other
+/// for an orphan resolved on resume (§4.3) and [`Failed`](EffectError::Failed) for a
+/// panic caught at the boundary of the task running the effect (§4.2). The other
 /// two are what a consumer's [`Workflow::perform`] returns: the workflow neither
 /// bounds an effect nor interprets its failure. A consumer wanting a per-effect
 /// timeout takes it from the [`Clock`](actor_core::Clock) on [`Perform`].
@@ -155,7 +178,7 @@ pub enum EffectError {
     /// still land; only the *outcome* is bounded.
     Timeout,
     /// An orphaned effect declaring [`OnOrphan::Interrupt`] was resolved on
-    /// resume (§4.4). Nothing is known about whether it ran.
+    /// resume (§4.3). Nothing is known about whether it ran.
     Interrupted,
     /// The environment the effect needed is gone.
     Lost(String),
@@ -176,7 +199,7 @@ impl std::fmt::Display for EffectError {
 
 impl std::error::Error for EffectError {}
 
-/// What an effect legitimately needs from outside itself (spec §4.1): the
+/// What an effect legitimately needs from outside itself (spec §2.4): the
 /// entity's name and the system's seams (clock, entropy, task launching).
 ///
 /// It carries **no** access to the entity's state, journal, or facets, which is
@@ -203,7 +226,7 @@ impl<S> Perform<S> {
         &self.name
     }
 
-    /// The system's seams: `now`, `sleep`, `next_random`, `launch` (core §4.6).
+    /// The system's seams: `now`, `sleep`, `next_random`, `launch` (core §2.12.1).
     /// Time and randomness inside an effect MUST come from here, or a simulated
     /// run stops reproducing.
     pub fn system(&self) -> &S {
@@ -221,13 +244,14 @@ impl<S> Perform<S> {
 /// Three methods, but only two new *things*: [`pending`](Workflow::pending) is the
 /// function and [`perform`](Workflow::perform) the seam, while
 /// [`settle`](Workflow::settle) is an ordinary entity decision under the ordinary
-/// rules (entity §4.2), differing from a handler only in that the workflow holds
+/// rules (entity §3.2), differing from a handler only in that the workflow holds
 /// the command it answers.
 ///
-/// The two handler supertraits are the wiring, made a compile-time obligation
-/// rather than a documented one: a workflow entity that has not routed [`Tick`] to
-/// [`Engine::advance`] and [`Settled`] to [`Engine::settled`] does not compile,
-/// which is the posture entity takes for its own calls (E10). There is
+/// The two handler supertraits make the wiring's *existence* a compile-time
+/// obligation: a workflow entity without a [`Tick`] and a [`Settled`] handler does
+/// not compile, the posture entity takes for its own calls (E10). What the
+/// compiler cannot check is that those handlers forward to [`Engine::advance`] and
+/// [`Engine::settled`]; that is the consumer's obligation (§2.1). There is
 /// deliberately no blanket impl supplying them: the orphan rule forbids one, and
 /// entity's stance is that the hand-written form is normative.
 pub trait Workflow:
@@ -238,12 +262,12 @@ pub trait Workflow:
     /// Re-derived on every activation and **never journaled by the workflow**, so
     /// it needs no stability across deployments and no registry. The bounds are
     /// the ordinary command bounds, because a key rides the [`Settled`] command
-    /// through the entity's mailbox (§4.2) and orders the claim and backoff
+    /// through the entity's mailbox (§4.1) and orders the claim and backoff
     /// tables (§3.3, §3.4).
     ///
     /// A key MUST be **unique over the entity's whole journal**, not merely
     /// within one desired set: the straggler filter's only test is presence in
-    /// the set (§4.5), so a key that leaves and later re-enters would let an
+    /// the set (§4.4), so a key that leaves and later re-enters would let an
     /// outcome launched under the first occurrence be settled as the second's.
     type Key: actor_serialization::SerializationRequirement + Clone + Ord + std::fmt::Debug;
 
@@ -254,13 +278,13 @@ pub trait Workflow:
 
     /// What an effect returns. Rides [`Settled`] back onto the command path, so
     /// it carries the command bounds; `Clone` because `EntityRef::tell` takes it
-    /// (entity §4.3).
+    /// (entity §2.2).
     type Outcome: actor_serialization::SerializationRequirement + Clone;
 
     /// The effects this entity's **committed** state calls for (§3.1).
     ///
     /// MUST be pure and deterministic: the same obligation [`Entity::apply`]
-    /// carries (entity §4.1, E2), for the same reason: a resumed activation
+    /// carries (entity §3.1, E2), for the same reason: a resumed activation
     /// that disagreed with the one it replaced about what work is outstanding
     /// would either abandon work or duplicate it. It MUST NOT perform I/O, read
     /// the clock, or use entropy, and it MUST NOT read the activation's
@@ -273,7 +297,7 @@ pub trait Workflow:
     /// entity's state, journal, or facets.
     fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
 
-    /// Perform one effect (§4.1). The **only** place a workflow entity performs
+    /// Perform one effect (§2.4). The **only** place a workflow entity performs
     /// I/O.
     ///
     /// It runs outside the activation, in a task the workflow launched, holding no
@@ -287,15 +311,15 @@ pub trait Workflow:
         cx: Perform<Self::System>,
     ) -> impl Future<Output = Result<Self::Outcome, EffectError>> + Send + 'static;
 
-    /// Fold one effect's outcome into records (§4.2).
+    /// Fold one effect's outcome into records (§4.1).
     ///
     /// A **decision**, under exactly the rules an [`EntityHandler`] decision
-    /// follows (entity §4.2): it MUST NOT mutate state, MUST NOT perform
+    /// follows (entity §3.2): it MUST NOT mutate state, MUST NOT perform
     /// durable I/O, and MUST NOT await anything. It returns the records that
     /// make the outcome durable; the entity's output gate commits them; the
     /// commit re-enters the workflow.
     ///
-    /// Returning no records is legal and commits nothing (entity §7.5), the way
+    /// Returning no records is legal and commits nothing (entity §6), the way
     /// a consumer says "this outcome changed nothing". The key then stays in the
     /// desired set for the backoff timer to relaunch (§3.2 item 3).
     ///

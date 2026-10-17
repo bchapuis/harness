@@ -53,7 +53,7 @@ pub enum Update {
     /// The tenant's session list (re)loaded.
     Sessions(Result<Vec<SessionEntry>, String>),
     /// A session's history loaded; replaces the transcript. `base` is the
-    /// journal's compaction base (§10.2): above zero, the transcript's oldest
+    /// journal's compaction base (§8.2): above zero, the transcript's oldest
     /// records were subsumed by a snapshot and the view starts truncated.
     Loaded {
         session: String,
@@ -61,7 +61,7 @@ pub enum Update {
     },
     /// A batch of new records from the live run.
     Records(Vec<(Seq, Record)>),
-    /// Compaction outran the live stream's cursor (§10.2): records up to the
+    /// Compaction outran the live stream's cursor (§8.2): records up to the
     /// base are subsumed by a snapshot and were skipped, not delivered.
     Truncated(Seq),
     /// The run's terminal outcome.
@@ -179,7 +179,7 @@ impl App {
         });
     }
 
-    /// The current turn's id: the client-chosen idempotency key (§7.4). A
+    /// The current turn's id: the client-chosen idempotency key (§5.3). A
     /// per-process `nonce` makes it unique across restarts, so a fresh prompt is
     /// never the persisted id of a finished run, which the entity would dedup,
     /// committing no new records and leaving the stream (and the UI) hung.
@@ -436,7 +436,7 @@ impl App {
                     Ok((base, records)) => {
                         self.records = records;
                         // A non-zero base means the oldest records were
-                        // compacted away (§10.2): say so, or the short
+                        // compacted away (§8.2): say so, or the short
                         // transcript reads as the whole history.
                         self.status = if base.value() > 0 {
                             format!("history truncated: records ≤ {} compacted", base.value())

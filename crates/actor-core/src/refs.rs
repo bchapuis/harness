@@ -1,14 +1,14 @@
-//! `ActorRef`: the only handle to an actor (spec §3.3).
+//! `ActorRef`: the only handle to an actor (spec §2.2).
 //!
 //! The `A: Handler<M>` bound on [`ask`](ActorRef::ask) / [`tell`](ActorRef::tell)
 //! is the dispatch mechanism: it proves at compile time that the target accepts
-//! `M`, so invalid sends do not compile (spec §3.3, invariant #20) and no
+//! `M`, so invalid sends do not compile (spec §2.2, invariant #20) and no
 //! runtime type check is needed.
 //!
-//! `ask`/`tell` are identical for local and remote targets (spec §3.3): the
+//! `ask`/`tell` are identical for local and remote targets (spec §2.2): the
 //! system classifies locality on each call. A **local** target enqueues by value
-//! with no serialization (spec §4.3); a **remote** target is encoded with the
-//! system codec and routed through `remote_ask`/`remote_tell` (spec §4.4).
+//! with no serialization (spec §3.2); a **remote** target is encoded with the
+//! system codec and routed through `remote_ask`/`remote_tell` (spec §2.10).
 
 use std::time::Duration;
 
@@ -22,10 +22,10 @@ use crate::message::Message;
 use crate::system::ActorSystem;
 
 /// The default deadline applied to `ask` when the caller gives none: every
-/// request carries an effective deadline (spec §14.2).
+/// request carries an effective deadline (spec §8.2).
 const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A serializable, cloneable, typed handle to an actor (spec §3.3).
+/// A serializable, cloneable, typed handle to an actor (spec §2.2).
 pub struct ActorRef<A: Actor> {
     id: ActorId,
     system: A::System,
@@ -41,7 +41,7 @@ impl<A: Actor> Clone for ActorRef<A> {
     }
 }
 
-// Equality and hashing derive purely from the `ActorId` (spec §3.1).
+// Equality and hashing derive purely from the `ActorId` (spec §2.1).
 impl<A: Actor> PartialEq for ActorRef<A> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -60,7 +60,7 @@ impl<A: Actor> std::fmt::Debug for ActorRef<A> {
     }
 }
 
-// An `ActorRef` travels as just its `ActorId` (spec §4.4): the system handle is
+// An `ActorRef` travels as just its `ActorId` (spec §2.10): the system handle is
 // not serializable and is rebound on the receiving node.
 impl<A: Actor> serde::Serialize for ActorRef<A> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -69,21 +69,21 @@ impl<A: Actor> serde::Serialize for ActorRef<A> {
 }
 
 // Deserializing rebinds the id to the *current decoding system* (set by the
-// runtime around a message decode, spec §4.4, invariant #10).
+// runtime around a message decode, spec §2.10, invariant #10).
 impl<'de, A: Actor> serde::Deserialize<'de> for ActorRef<A> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let id = <ActorId as serde::Deserialize>::deserialize(deserializer)?;
         match crate::rebind::current_decoding_system::<A::System>() {
             Some(system) => Ok(ActorRef::from_parts(id, system)),
             None => Err(serde::de::Error::custom(
-                "an ActorRef can only be deserialized while a decoding system is in scope (spec §4.4)",
+                "an ActorRef can only be deserialized while a decoding system is in scope (spec §2.10)",
             )),
         }
     }
 }
 
 /// Where a send to an [`ActorRef`] is delivered, classified once per call from
-/// the id alone (spec §4.3).
+/// the id alone (spec §3.2).
 enum Target<A: Actor> {
     Local(Mailbox<A>),
     /// The id is local but no live actor owns it: it has resigned.
@@ -112,12 +112,14 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// The system this ref is bound to (the local system after decode, spec
-    /// §4.4).
+    /// §2.10).
     pub fn system(&self) -> &A::System {
         &self.system
     }
 
-    /// Request/response (spec §3.3), with the system default deadline.
+    /// Request/response (spec §2.2), with the framework's fixed default deadline
+    /// (no system configures it; use [`ask_timeout`](Self::ask_timeout) for
+    /// another bound).
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, CallError>
     where
         A: Handler<M>,
@@ -127,7 +129,7 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// Request/response with an explicit deadline overriding the default (spec
-    /// §3.3).
+    /// §2.2).
     pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, CallError>
     where
         A: Handler<M>,
@@ -160,7 +162,7 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        // Both paths carry the deadline (spec §14.2): the local one on the
+        // Both paths carry the deadline (spec §8.2): the local one on the
         // system clock, the remote one inside `remote_ask`.
         match self.locate() {
             Target::Local(mailbox) => mailbox.ask(msg, self.system.clock(), within).await,
@@ -173,7 +175,7 @@ impl<A: Actor> ActorRef<A> {
                     .remote_ask(&self.id, M::MANIFEST, payload, within)
                     .await?;
                 // Decode under this system so an `ActorRef` in the reply rebinds
-                // here (spec §4.4).
+                // here (spec §2.10).
                 crate::rebind::with_decoding_system(&self.system, || {
                     actor_serialization::decode::<M::Reply>(&*codec, &bytes)
                         .map_err(CallError::from)
@@ -182,7 +184,7 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 
-    /// Fire-and-forget (spec §3.3). Errors only for enqueue/transport failure,
+    /// Fire-and-forget (spec §2.2). Errors only for enqueue/transport failure,
     /// never the handler outcome. Applies backpressure on a local target.
     pub async fn tell<M>(&self, msg: M) -> Result<(), CallError>
     where
@@ -203,7 +205,7 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// Non-blocking local fire-and-forget: returns [`CallError::MailboxFull`]
-    /// rather than awaiting when the mailbox is full (spec §6). Local-only: a
+    /// rather than awaiting when the mailbox is full (spec §3.3). Local-only: a
     /// remote target yields [`CallError::Unreachable`]; use [`tell`] for remote.
     ///
     /// [`tell`]: ActorRef::tell

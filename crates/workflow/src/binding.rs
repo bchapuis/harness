@@ -1,30 +1,33 @@
-//! An activation-scoped external resource (workflow spec §6).
+//! An activation-scoped external resource (workflow spec §2.6).
 //!
-//! A consumer frequently holds something for the life of an activation: the
-//! agent runtime's sandbox (agent §5.3), the machine's runtime binding (machine
-//! §2.1). Each has an open-once lifecycle, a release on every deactivation, and
-//! a hibernation veto while the open is in flight.
+//! A consumer frequently holds something for the life of an activation, such as
+//! the agent runtime's sandbox (agent §2.3): opened once, released on every
+//! deactivation, and vetoing hibernation while the open is in flight.
 //!
 //! The workflow supplies this as a **component rather than a trait method**,
-//! because the resource's type and its open path are the consumer's: the workflow
-//! owns only the state machine and the rule that a failed open settles the
-//! effects that needed it rather than retrying invisibly. A consumer that does
-//! not need one declares nothing.
+//! because the resource's type and its open path are the consumer's. The type is
+//! passive: it holds the state machine, and the engine never sees it. The rules
+//! are the holder's to apply: conjoin [`Binding::is_opening`] into its
+//! `can_hibernate`, settle the effects that needed a resource whose open failed
+//! ([`Binding::take_failure`]) rather than retrying invisibly, and release it from
+//! `on_deactivate` ([`Binding::take`]). A consumer that does not need one declares
+//! nothing.
 
-/// Where an activation-scoped resource stands (spec §6).
+/// Where an activation-scoped resource stands (spec §2.6).
 pub enum BindingState<T> {
     /// Nothing held, nothing in flight. The next effect that needs the resource
     /// triggers the open (lazily, so an entity that never needs one never pays).
     Closed,
-    /// An open is in flight. **Joins the hibernation veto**: an open in flight
-    /// is an outcome the activation still owes itself, and it is the one piece
-    /// of in-flight work that is not an effect.
+    /// An open is in flight. The holder's `can_hibernate` must veto while a
+    /// binding is here ([`Binding::is_opening`]): an open in flight is an outcome
+    /// the activation still owes itself, and it is the one piece of in-flight
+    /// work that is not an effect, so the engine's quiescence cannot see it.
     Opening,
     /// Held and usable.
     Open(T),
-    /// The last open failed. The next tick settles the effects that needed the
-    /// resource with this reason rather than retrying invisibly, so the failure
-    /// reaches the consumer's fold instead of spinning under it.
+    /// The last open failed. The holder's next tick settles the effects that
+    /// needed the resource with this reason rather than retrying invisibly, so the
+    /// failure reaches the consumer's fold instead of spinning under it.
     Failed(String),
 }
 
@@ -39,8 +42,8 @@ impl<T> std::fmt::Debug for BindingState<T> {
     }
 }
 
-/// An activation-scoped external resource (spec §6): opened once on demand,
-/// released on every deactivation, and never journaled.
+/// An activation-scoped external resource (spec §2.6): opened once on demand,
+/// released by its holder on every deactivation, and never journaled.
 pub struct Binding<T> {
     state: BindingState<T>,
 }
@@ -83,8 +86,8 @@ impl<T> Binding<T> {
         self.state = BindingState::Open(resource);
     }
 
-    /// The open failed. The reason is surfaced, not swallowed: the next tick
-    /// settles the effects that needed the resource with it.
+    /// The open failed. The reason is surfaced, not swallowed: the holder's next
+    /// tick settles the effects that needed the resource with it.
     pub fn failed(&mut self, why: impl Into<String>) {
         self.state = BindingState::Failed(why.into());
     }

@@ -1,8 +1,8 @@
-//! Resume conformance (agent spec §6.2, §7.5; invariant A1): a session
+//! Resume conformance (agent spec §3.1, §5.4; invariant A1): a session
 //! hibernates between turns and rehydrates from the journal on the next contact
-//! (entity §9, §10); the resumed journal matches an uninterrupted control run,
+//! (storage §8, entity §7); the resumed journal matches an uninterrupted control run,
 //! record for record; the differential test behind A1. (Mid-run crash/migration
-//! resume of an *orphaned* call, §5.5, is a `Quorum`-tier leadership-move phenomenon,
+//! resume of an *orphaned* call, §4.4, is a `Quorum`-tier leadership-move phenomenon,
 //! exercised under the clustered simulation; the `Local` tier is faultless by design.)
 
 mod support;
@@ -54,7 +54,7 @@ fn worker_kinds() -> Kinds {
 }
 
 /// Two turns; each does one tool step then completes. A pure function of the
-/// request, so a replay reproduces it (§4.2): at a turn's start (last entry is
+/// request, so a replay reproduces it (§2.1): at a turn's start (last entry is
 /// the user prompt) it calls the tool; after the tool result, it completes.
 fn two_turn_model() -> ScriptedModel {
     ScriptedModel::new(|req| match req.transcript.last() {
@@ -65,7 +65,7 @@ fn two_turn_model() -> ScriptedModel {
 }
 
 /// Run two turns on one session, optionally idling between them so the session
-/// hibernates and the second turn rehydrates from the journal (§7.5). Returns
+/// hibernates and the second turn rehydrates from the journal (§5.4). Returns
 /// the journal and the observed event stream.
 fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Record>, Vec<Event>) {
     let sim = Simulation::new(seed);
@@ -91,7 +91,7 @@ fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Reco
         assert_eq!(first.text(), "done");
         if hibernate {
             // Idle past the brisk window so the activation hibernates; the next
-            // turn reactivates and rehydrates from the journal (§7.5).
+            // turn reactivates and rehydrates from the journal (§5.4).
             clock.sleep(Duration::from_secs(5)).await;
         }
         let second = s
@@ -112,11 +112,11 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     let (resumed, events) = run_two_turns(71, "s-resume", true);
     let (control, _) = run_two_turns(71, "s-resume", false);
 
-    // The agent runtime checkers hold over the resumed run's full stream (§11).
+    // The agent runtime checkers hold over the resumed run's full stream (§10).
     let violations = check_events(&events);
     assert!(violations.is_empty(), "checkers: {violations:?}");
 
-    // The session activated more than once: it hibernated and rehydrated (§10).
+    // The session activated more than once: it hibernated and rehydrated (§8).
     let activations = events
         .iter()
         .filter_map(|e| e.as_app::<EntityEvent>())
@@ -127,7 +127,7 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
         "the session hibernated and reactivated, got {activations} activations"
     );
 
-    // A resume emits no second RunStarted (§10.4): one per turn, two total.
+    // A resume emits no second RunStarted (§2.8): one per turn, two total.
     let starts = events
         .iter()
         .filter_map(|e| e.as_app::<agent::AgentEvent>())
@@ -136,13 +136,13 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     assert_eq!(starts, 2, "one RunStarted per turn, none for the resume");
 
     // No `WorkspaceReset` on resume: the workspace is the agent's own durable
-    // facet (entity §7.11), rematerialized on reactivation; a routine resume
-    // is never a loss (§5.5). Only a mid-activation `EnvironmentLost` resets.
+    // facet (facets §4.1), rematerialized on reactivation; a routine resume
+    // is never a loss (§4.4). Only a mid-activation `EnvironmentLost` resets.
     assert!(
         !resumed
             .iter()
             .any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
-        "a routine resume must not surface a workspace reset (§5.5)"
+        "a routine resume must not surface a workspace reset (§4.4)"
     );
 
     // A1 with no exception: the rehydrated journal equals the uninterrupted

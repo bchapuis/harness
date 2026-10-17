@@ -1,10 +1,10 @@
-//! The Firecracker mechanism (sandbox spec §3.5, machine spec §2.1): the microVM
+//! The Firecracker mechanism (sandbox spec §4, machine spec §2.3): the microVM
 //! half of this crate's two [`MachineHost`] implementations.
 //!
 //! Two consumers boot Firecracker VMs and share the process-hygiene code
 //! between them: the agent sandbox's `Native` tier (`agent-sandbox`,
 //! per-call tar sync over vsock) and the persistent machine
-//! (`crates/machine-entity`, whose drive is the disk facet's image, entity §7.15).
+//! (`crates/machine-entity`, whose drive is the disk facet's image, facets §4.4).
 //! This module owns the mechanics identical for both and nothing
 //! protocol-shaped:
 //!
@@ -81,7 +81,7 @@ pub struct Drive {
 }
 
 /// One virtio-net device in the boot document (the machine's egress seam,
-/// machine §5.2): a host tap the provider created, optionally with a fixed
+/// machine §2.6): a host tap the provider created, optionally with a fixed
 /// guest MAC.
 #[derive(Clone, Debug)]
 pub struct NetIf {
@@ -432,7 +432,7 @@ pub struct MicroVmHost {
 impl MicroVmHost {
     /// `boot_args` is the consumer's: the sandbox boots its agent as init over a
     /// host-owned image, a machine boots the user rootfs's own init (machine
-    /// §5.1), and only the consumer knows which it is handing over.
+    /// §2.4), and only the consumer knows which it is handing over.
     pub fn new(
         binary: impl Into<PathBuf>,
         kernel: impl Into<PathBuf>,

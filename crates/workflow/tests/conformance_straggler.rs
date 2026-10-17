@@ -1,4 +1,4 @@
-//! Straggler rejection end to end (workflow spec §4.5, §3.1): W5.
+//! Straggler rejection end to end (workflow spec §4.4, §3.1): W5.
 //!
 //! An outcome MAY arrive after its key has left the desired set: a timeout
 //! racing the real result, a retracted effect completing anyway, an effect of a
@@ -137,7 +137,7 @@ fn a_retracted_key_that_never_returns_leaves_the_activation_free_to_rest() {
 
 #[test]
 fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
-    // §3.1 and §4.5 together, stated as the failure they prevent. The filter
+    // §3.1 and §4.4 together, stated as the failure they prevent. The filter
     // decides *presence*, not identity. Reuse a key across occurrences and the
     // workflow cannot tell them apart: the straggler of the first finds its key
     // present again and is settled as the second's outcome, while the second's
@@ -196,7 +196,7 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     assert!(
         done.contains_key(&0),
         "the first occurrence's outcome was settled as the second's, because \
-         presence is the only test the filter has (§4.5, §3.1)"
+         presence is the only test the filter has (§4.4, §3.1)"
     );
     assert!(
         outstanding.is_empty(),

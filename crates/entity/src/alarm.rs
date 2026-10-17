@@ -1,9 +1,9 @@
-//! The alarm facet (spec §7.16): a stored timer that
+//! The alarm facet (spec facets §4.5): a stored timer that
 //! re-activates an entity to run its [`on_alarm`](crate::Entity::on_alarm) handler
 //! with no caller present; the basis for retries, timeouts, batch flushes, and
 //! the durable-step [`steps`](crate::steps) API.
 //!
-//! **Storage is a logical facet (§7.12).** An entity holds at most one pending
+//! **Storage is a logical facet (facets §3).** An entity holds at most one pending
 //! alarm: the Durable Objects model (DO §5). Its due time is durable in the
 //! entity's own journal under the alarm tag, folded into a single `Option<Instant>`;
 //! that folded form is the **source of truth** for whether and when the entity
@@ -43,7 +43,7 @@ use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
 use actor_core::ActorSystem;
 
-/// The alarm facet marker (spec §7.16): declare `type Facets = (Alarm, …)` and
+/// The alarm facet marker (spec facets §4.5): declare `type Facets = (Alarm, …)` and
 /// reach the timer through [`EntityCtx::alarm`](crate::EntityCtx::alarm), pairing it
 /// with the [`on_alarm`](crate::Entity::on_alarm) handler the runtime invokes when
 /// the alarm fires.
@@ -53,12 +53,12 @@ impl Sealed for Alarm {}
 
 /// Whether `G`'s facet set declares the [`Alarm`] facet: the only way an entity of
 /// the type can hold a deadline, and so the condition under which hosting wires the
-/// node's alarm index into the type (spec §7.16).
+/// node's alarm index into the type (spec facets §4.5).
 pub(crate) fn declares_alarm<G: Entity>() -> bool {
     <G::Facets as FacetSet>::TAGS.contains(&<Alarm as Facet>::TAG)
 }
 
-/// One alarm record (spec §7.16): the unit of durable change under the alarm tag.
+/// One alarm record (spec facets §4.5): the unit of durable change under the alarm tag.
 #[derive(Serialize, Deserialize)]
 enum AlarmOp {
     /// Arm (or re-arm) the alarm for this deadline, in nanoseconds since the
@@ -82,7 +82,7 @@ impl AlarmForm {
     }
 }
 
-/// The per-command stage (spec §7.12): the last arm/cancel staged this command,
+/// The per-command stage (spec facets §3): the last arm/cancel staged this command,
 /// giving the handler read-your-staged-writes. `None` means the command left the
 /// alarm untouched; it drains to a single record when set.
 #[derive(Default)]
@@ -135,9 +135,9 @@ impl Facet for Alarm {
     }
 }
 
-/// The handler-facing alarm accessor (spec §7.16), obtained from
+/// The handler-facing alarm accessor (spec facets §4.5), obtained from
 /// [`EntityCtx::alarm`](crate::EntityCtx::alarm). Reads see committed-plus-staged;
-/// arming or cancelling stages into the current command's atomic batch (§7.12).
+/// arming or cancelling stages into the current command's atomic batch (facets §3).
 pub struct AlarmHandle<'a, G: Entity, I>
 where
     G::Facets: HasFacet<Alarm, I>,
@@ -148,10 +148,10 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's durable alarm (spec §7.16). Compiles exactly when the entity
+    /// The entity's durable alarm (spec facets §4.5). Compiles exactly when the entity
     /// declares the [`Alarm`] facet (`type Facets = (Alarm, …)`): the E10
     /// discipline applied to the timer. Arming is valid only inside a command or
-    /// [`on_alarm`](crate::Entity::on_alarm) handler (§7.12); reads are valid
+    /// [`on_alarm`](crate::Entity::on_alarm) handler (facets §3); reads are valid
     /// anywhere the form is folded.
     pub fn alarm<I>(&self) -> AlarmHandle<'_, G, I>
     where
@@ -170,7 +170,7 @@ where
     G::Facets: HasFacet<Alarm, I>,
 {
     /// The pending deadline, resolving a staged arm/cancel over the committed
-    /// form (read-your-staged-writes, §7.12). Valid anywhere the form is
+    /// form (read-your-staged-writes, facets §3). Valid anywhere the form is
     /// folded; outside a command only the committed form answers.
     pub fn pending(&self) -> Option<Instant> {
         self.cell.with_overlay::<Alarm, I, _>(|form, stage| {

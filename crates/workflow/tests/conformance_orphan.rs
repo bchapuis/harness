@@ -1,4 +1,4 @@
-//! Orphaned effects and resume (workflow spec §4.4, §3.3, §6): W6, and W3's
+//! Orphaned effects and resume (workflow spec §4.3, §3.3, §6): W6, and W3's
 //! cross-activation half.
 //!
 //! An effect's intent is journaled before it launches and its outcome after
@@ -13,7 +13,7 @@
 //! rehydration on a three-node cluster: a crash is a process death
 //! (`SimNetwork::restart`), which takes the effect's task with it, and a migration
 //! is a voluntary leadership hand-off under which the deposed activation's effect
-//! keeps running and its outcome reaches the successor as §4.5's straggler.
+//! keeps running and its outcome reaches the successor as §4.4's straggler.
 //! Hibernation is deliberately absent: W7 forbids hibernating with a claim open,
 //! so it cannot leave an effect orphaned, and `conformance_cycle.rs` pins that.
 
@@ -154,11 +154,11 @@ fn a_crash_between_launch_and_settle_settles_an_interrupt_effect_without_relaunc
     assert_eq!(
         read_script(&script, |s| s.runs(0)),
         1,
-        "an Interrupt effect is never relaunched (§4.4)"
+        "an Interrupt effect is never relaunched (§4.3)"
     );
     assert!(
         matches!(&done.get(&0), Some(Answer::Failed(why)) if why.contains("interrupted")),
-        "the consumer folded `EffectError::Interrupted` as a value (§4.3): {done:?}"
+        "the consumer folded `EffectError::Interrupted` as a value (§4.2): {done:?}"
     );
     assert!(finished);
     assert!(outstanding.is_empty(), "resolved, so no longer wanted");
@@ -176,7 +176,7 @@ fn a_crash_between_launch_and_settle_settles_an_interrupt_effect_without_relaunc
 
 #[test]
 fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
-    // §6 and §4.5 together. A voluntary hand-off is a forced step-down for the
+    // §6 and §4.4 together. A voluntary hand-off is a forced step-down for the
     // activation: it abandons its launch to whatever it was doing. The successor
     // re-derives the key and relaunches it (Reexecute). The abandoned effect keeps
     // running on the old node and its outcome, routed to whoever now leads,
@@ -217,7 +217,7 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
     );
 
     // Both launches complete, and exactly one outcome becomes the record. The
-    // other is dropped by one of the two guards §4.5 names: the straggler filter,
+    // other is dropped by one of the two guards §4.4 names: the straggler filter,
     // if it reached the successor after the first had settled, or the fence, if
     // it reached the deposed activation, whose append the journal refuses.
     sim.run_for(SLOW + Duration::from_secs(5));
@@ -234,7 +234,7 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
         .iter()
         .filter(|(_, r)| matches!(r, FanoutRecord::Answered { task: 0, .. }))
         .count();
-    assert_eq!(answered, 1, "two outcomes, one record (W5, §4.5)");
+    assert_eq!(answered, 1, "two outcomes, one record (W5, §4.4)");
     assert!(
         discarded(&recorder.events()).len() <= 1,
         "at most the successor's own relaunch was discarded as a straggler"

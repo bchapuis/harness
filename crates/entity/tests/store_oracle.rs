@@ -1,4 +1,4 @@
-//! Differential oracle for the [`EntityStore`] seam (entity §7.2, §7.4, §8, §9):
+//! Differential oracle for the [`EntityStore`] seam (storage §4, §2.2, §5, §8):
 //! drive a seeded stream of every store operation through `FileEntityStore` and a
 //! `MemoryEntityStore` mirror, reopening the file store from disk as it goes, and
 //! require that the two agree on **every return value** at every step.
@@ -12,7 +12,7 @@
 //!
 //! **Why the returns and not just the final state.** A store that answered `Stale`
 //! where the reference answered `Stored` would leave identical records on disk and
-//! still be wrong: the ack is what the replicator counts toward a quorum (§7.2), so a
+//! still be wrong: the ack is what the replicator counts toward a quorum (storage §4), so a
 //! divergence there is a divergence in whether a write committed. Comparing reads
 //! alone cannot see it.
 //!

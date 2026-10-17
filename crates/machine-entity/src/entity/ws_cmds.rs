@@ -22,7 +22,7 @@ use super::MachineState;
 
 /// Cap on one file command's bytes, both directions: a [`WsWrite`]'s record
 /// and a [`WsRead`]'s reply must stay bounded (the ws facet's records carry
-/// bytes inline, entity §7.11).
+/// bytes inline, facets §4.1).
 pub const MAX_WS_FILE: usize = 1024 * 1024;
 
 /// The one mapping every workspace file operation fails through.
@@ -130,7 +130,7 @@ impl<S: EntitySystem> EntityHandler<WsWrite> for Machine<S> {
 }
 
 /// Read one file from the machine's `/workspace` without booting it: the last
-/// committed state while hibernated. Stages nothing (entity §7.5).
+/// committed state while hibernated. Stages nothing (entity §6).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WsRead {
     pub path: String,
@@ -173,7 +173,7 @@ pub struct WsFileInfo {
 }
 
 /// List one level of the machine's `/workspace` without booting it. An empty
-/// `path` lists the root. Stages nothing (entity §7.5).
+/// `path` lists the root. Stages nothing (entity §6).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WsList {
     pub path: String,

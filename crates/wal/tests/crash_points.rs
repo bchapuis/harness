@@ -1,4 +1,5 @@
-//! Recovery from every possible crash point (wal spec: the torn-tail rule).
+//! Recovery from every possible crash point: the crate's prefix rule (L1) and
+//! acknowledged-record durability (L2).
 //!
 //! A write-ahead log's whole promise is what survives a process that died
 //! mid-write, and the only interesting question is *where* it died. The unit

@@ -1,24 +1,36 @@
-//! The agent runtime gateway: the public multi-tenant HTTP/SSE edge, an
-//! Orleans-style cluster **client** of the agent runtime cluster (design:
-//! `docs/multi-tenant-edge.md`).
+//! The agent runtime's HTTP edge: the public multi-tenant HTTP/SSE gateway,
+//! an Orleans-style cluster **client** of the agent cluster and its trust
+//! boundary. Specified by `docs/edge-spec.md`.
 //!
-//! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
-//! (it **terminates** tenant auth), scopes the caller's session key under that
-//! principal, and drives the session by addressing its entity **directly**, no
-//! control protocol, no per-node listener, no forwarding hop.
+//! # Seams
 //!
-//! The gateway joins the actor transport as a non-voting, routing-only **member**
-//! (`Harness::client(system, kinds)` /
-//! [`entities_client`](entity::EntityExt::entities_client)): a full local actor
-//! system that hosts no entities but is still a member; it holds `EntityRef`s
-//! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
-//! shard leader, and spawns the ephemeral reply mailbox the host calls back. It is
-//! therefore **inside** the cluster's trust boundary (it holds the cluster secret
-//! and rides the receptionist bus); untrusted callers reach it only over HTTP with
-//! a bearer token.
+//! - **The HTTP/SSE surface** ([`http::router`]): `prompt`, `records`,
+//!   `stream`, `cancel`, and `sessions`, with the error envelope in
+//!   [`error`]. Front ends such as `agent-tui` consume it.
+//! - **[`TokenVerifier`]**, the plug point that maps a bearer token to a
+//!   [`PrincipalId`]: [`StaticTokens`](auth::StaticTokens) (an operator's
+//!   token file) or [`InsecureTokens`](auth::InsecureTokens) (loopback
+//!   development only). It runs here, at the edge, never in an entity.
+//! - Consumed: the agent runtime's client view (`Harness::client`,
+//!   [`SessionRef`]) and the `tenancy` [`Directory`] entity, through a client
+//!   `Entities<Directory>`.
 //!
-//! Stateless: the gateway holds no durable state. Run N replicas behind a load
-//! balancer; each joins the cluster as its own client id.
+//! # Mechanism
+//!
+//! The gateway joins the actor transport as a non-voting, routing-only
+//! member: a full local actor system that hosts no entities, holds the
+//! `EntityRef`s discovered through the receptionist gossip ([`connect`] polls
+//! until they resolve), routes `ask` and `follow` to the shard leaders, and
+//! spawns the ephemeral reply mailboxes the hosts call back. It therefore
+//! holds the cluster secret and sits inside the trust boundary; untrusted
+//! callers reach it only over HTTP. Each handler verifies the token, rejects
+//! a malformed session id, scopes the session key under the principal
+//! ([`auth::scoped_session`]), and calls the entity directly
+//! ([`Gateway::session`]): no control protocol, no per-node listener, no
+//! forwarding hop. SSE rides the session's `Follower`.
+//!
+//! The gateway holds no durable state: run any number of replicas behind a
+//! load balancer, each joining the cluster under its own client id.
 
 pub mod auth;
 pub mod error;

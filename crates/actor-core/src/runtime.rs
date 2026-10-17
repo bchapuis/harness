@@ -1,10 +1,10 @@
-//! The runtime environment seam (spec §4.6).
+//! The runtime environment seam (spec §2.12.1).
 //!
 //! Time, randomness, and task spawning are the three capabilities the runtime
 //! needs from its host. Each is an ordinary trait, and **no subsystem may read
 //! any of them from the host directly**. That indirection is what lets the same
 //! actor code run under the production runtime and under deterministic
-//! simulation (spec §18): only the trait implementations differ.
+//! simulation (spec §2.12.2): only the trait implementations differ.
 //!
 //! The trait methods return `impl Future + Send` rather than using `async fn`
 //! so that code generic over a [`Clock`] can rely on the returned futures being
@@ -72,8 +72,8 @@ impl std::fmt::Display for Elapsed {
 impl std::error::Error for Elapsed {}
 
 /// Virtual or real time. No subsystem may read wall-clock time directly
-/// (spec §4.6). `Clone` so the executor can own a handle for supervision
-/// backoff (spec §11.2); implementations are cheap to clone (an `Arc` inside).
+/// (spec §2.12.1). `Clone` so the executor can own a handle for supervision
+/// backoff (spec §2.4); implementations are cheap to clone (an `Arc` inside).
 pub trait Clock: Clone + Send + Sync + 'static {
     /// The current logical time.
     fn now(&self) -> Instant;
@@ -106,7 +106,7 @@ pub trait Clock: Clone + Send + Sync + 'static {
     }
 }
 
-/// The single source of randomness (spec §4.6). Seedable in simulation; the
+/// The single source of randomness (spec §2.12.1). Seedable in simulation; the
 /// only randomness anywhere in the system. Uses interior mutability so a shared
 /// `&self` can advance the stream.
 pub trait Entropy: Send + Sync + 'static {
@@ -127,7 +127,7 @@ pub trait Entropy: Send + Sync + 'static {
     }
 }
 
-/// Task spawning (spec §4.6). Mailbox executors and the cluster's background
+/// Task spawning (spec §2.12.1). Mailbox executors and the cluster's background
 /// loops run through this.
 pub trait Spawner: Send + Sync + 'static {
     /// Named `launch`, not `spawn`, so a raw task is never confused with

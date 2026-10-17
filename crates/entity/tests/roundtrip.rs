@@ -2,7 +2,7 @@
 //!
 //! Every value entity puts on the wire: the entity identity `EntityName`, the
 //! sequence position `Seq`, and the durability/transport error `EntityError` that
-//! rides inside a command's reply (§6, §12); must survive an encode/decode round
+//! rides inside a command's reply (§5, §9); must survive an encode/decode round
 //! trip unchanged. A silent change to any of these representations would corrupt
 //! cross-node routing or replies.
 
@@ -38,7 +38,7 @@ fn seq_round_trips() {
     assert_eq!(roundtrip(&Seq::ZERO), Seq::ZERO);
 }
 
-/// The SQL facet's reply-carried types (spec §7.14): a handler puts query
+/// The SQL facet's reply-carried types (spec facets §4.3): a handler puts query
 /// results and SQL errors *inside its reply*, so they cross the wire with the
 /// user codec and must survive the round trip.
 #[cfg(feature = "sql")]
@@ -96,7 +96,7 @@ mod sql {
 #[test]
 fn entity_error_round_trips_every_variant() {
     // EntityError rides inside the host's reply on the wire, so every variant must
-    // decode to itself (§6, §12).
+    // decode to itself (§5, §9).
     let cases = [
         EntityError::Call(CallError::Unreachable),
         EntityError::Call(CallError::Timeout),

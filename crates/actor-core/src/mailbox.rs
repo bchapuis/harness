@@ -1,15 +1,15 @@
-//! The mailbox and its erased envelopes (spec §6).
+//! The mailbox and its erased envelopes (spec §3.3).
 //!
 //! This is the layer **above** the [`ActorSystem`](crate::ActorSystem)
 //! transport boundary where local and remote sends converge. A message becomes
 //! an erased *envelope*: a closure that, given `&mut A` and its [`Ctx`], runs
 //! the matching `Handler<M>` to completion. The local fast path enqueues the
-//! envelope **by value, with no serialization** (spec §4.3); the remote path
+//! envelope **by value, with no serialization** (spec §3.2); the remote path
 //! builds the same envelope after deserializing, routing the reply through a
 //! `ReplyHandle` instead of a oneshot.
 //!
 //! Because every actor has exactly one mailbox feeding one serial executor,
-//! `&mut self` in a handler is never aliased (spec §3.5, §6).
+//! `&mut self` in a handler is never aliased (spec §2.1, §3.3).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,14 +56,14 @@ where
 
 /// One unit of work queued on a mailbox: the message's manifest (for the
 /// `Dispatch` event) plus the runner that executes it. The **local, by-value**
-/// envelope (spec §6): a live closure, not serialized bytes.
+/// envelope (spec §3.3): a live closure, not serialized bytes.
 pub(crate) struct Envelope<A: Actor> {
     pub(crate) manifest: Manifest,
     pub(crate) run: Runner<A>,
     /// The reply side of an inbound remote `ask`, carried beside the runner
     /// rather than captured inside it: a rejected enqueue hands the envelope
     /// back, and the handle must still be reachable to fail it with the reason
-    /// (spec §4.5: exactly one resolution per `ask`).
+    /// (spec §2.10: exactly one resolution per `ask`).
     pub(crate) reply: Option<ReplyHandle>,
 }
 
@@ -90,7 +90,7 @@ impl<A: Actor> Envelope<A> {
 /// The consuming end of a mailbox, owned by the actor's executor.
 pub(crate) type Inbox<A> = Receiver<Envelope<A>>;
 
-/// The bounded queue feeding an actor's serial executor (spec §6). Cloning
+/// The bounded queue feeding an actor's serial executor (spec §3.3). Cloning
 /// yields another producer handle to the same queue; cheap (an `Arc` inside the
 /// channel sender).
 pub struct Mailbox<A: Actor> {
@@ -121,8 +121,8 @@ impl<A: Actor> Mailbox<A> {
     }
 
     /// Request/response: enqueue `msg` by value and await its typed reply (spec
-    /// §4.4), failing with [`CallError::Timeout`] once `within` of `clock`'s
-    /// time has elapsed (spec §14.2). No serialization occurs on this path.
+    /// §2.10), failing with [`CallError::Timeout`] once `within` of `clock`'s
+    /// time has elapsed (spec §8.2). No serialization occurs on this path.
     /// Emits no `AskIssued`/`AskOutcome`: [`ActorRef::ask`](crate::ActorRef::ask)
     /// brackets the call.
     pub async fn ask<M, C>(
@@ -160,7 +160,7 @@ impl<A: Actor> Mailbox<A> {
         }
     }
 
-    /// Fire-and-forget with backpressure: awaits mailbox space (spec §6).
+    /// Fire-and-forget with backpressure: awaits mailbox space (spec §3.3).
     pub async fn tell<M>(&self, msg: M) -> Result<(), CallError>
     where
         A: Handler<M>,
@@ -171,7 +171,7 @@ impl<A: Actor> Mailbox<A> {
     }
 
     /// Non-blocking fire-and-forget: [`CallError::MailboxFull`] when full,
-    /// rather than awaiting (spec §6).
+    /// rather than awaiting (spec §3.3).
     pub fn try_tell<M>(&self, msg: M) -> Result<(), CallError>
     where
         A: Handler<M>,
@@ -180,7 +180,7 @@ impl<A: Actor> Mailbox<A> {
         self.try_enqueue(Envelope::local(M::MANIFEST, tell_runner(msg)))
     }
 
-    /// Awaiting enqueue (spec §6 default backpressure): blocks until the mailbox
+    /// Awaiting enqueue (spec §3.3 default backpressure): blocks until the mailbox
     /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`, and
     /// the death-watch signal.
     async fn enqueue(&self, envelope: Envelope<A>) -> Result<(), CallError> {
@@ -211,7 +211,7 @@ impl<A: Actor> Mailbox<A> {
         }
     }
 
-    /// Record that an envelope reached the queue (spec §16). Both enqueue paths
+    /// Record that an envelope reached the queue (spec §2.7). Both enqueue paths
     /// emit exactly one `Enqueue` here on success, so the event has a single
     /// origin.
     fn emit_enqueue(&self, manifest: Manifest) {
@@ -222,7 +222,7 @@ impl<A: Actor> Mailbox<A> {
     }
 
     /// Enqueue an already-decoded inbound remote message, routing its reply
-    /// through `reply` (spec §4.4 inbound path). Non-blocking: returns
+    /// through `reply` (spec §2.10 inbound path). Non-blocking: returns
     /// [`CallError::MailboxFull`] under backpressure rather than stalling the
     /// receive loop. Used by the dispatch registry (see [`crate::registry`]).
     ///
@@ -250,12 +250,12 @@ impl<A: Actor> Mailbox<A> {
         })
     }
 
-    /// Enqueue a [`Terminated`] death-watch signal (spec §12). It rides the same
+    /// Enqueue a [`Terminated`] death-watch signal (spec §2.5). It rides the same
     /// mailbox as any message, so it is observed in the actor's serial order
     /// (invariant #13).
     ///
     /// A `Terminated` MUST reach its watcher exactly once for *any* cause
-    /// (invariant #11), so this applies the §6 default backpressure policy: it
+    /// (invariant #11), so this applies the §3.3 default backpressure policy: it
     /// **awaits** until the mailbox has room rather than dropping the signal.
     /// Only a *closed* mailbox lets it give up: the watcher itself is already
     /// gone, so there is no one left to notify.
@@ -274,7 +274,7 @@ impl<A: Actor> Mailbox<A> {
             .is_ok()
         {
             // The watcher's mailbox is the one and only point a `Terminated` is
-            // actually *delivered* (spec §12, §16), so the event is emitted here:
+            // actually *delivered* (spec §2.5, §2.7), so the event is emitted here:
             // a forward to another node is not a delivery, and a watch-after-death
             // delivery is still counted.
             self.events.emit(Event::TerminatedDelivered {

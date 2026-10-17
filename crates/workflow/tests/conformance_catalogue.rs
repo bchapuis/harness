@@ -1,4 +1,4 @@
-//! Catalogue drift test (workflow spec §9): the machine-readable W1–W7 catalogue,
+//! Catalogue drift test (workflow spec §8): the machine-readable W1–W7 catalogue,
 //! the live checker set, and the specification's own table must agree; a
 //! checker added in code but not recorded in the catalogue (or vice versa), or a
 //! row moved in one copy fails the build,
@@ -94,7 +94,7 @@ fn every_checker_covers_exactly_the_invariants_the_catalogue_gives_it() {
         declared,
         catalogued_pairs(),
         "a checker's declared coverage (workflow::testing::checker_coverage) and the W \
-         catalogue's Verify::Checker rows name different (checker, invariant) pairs (§9)"
+         catalogue's Verify::Checker rows name different (checker, invariant) pairs (§8)"
     );
 }
 
@@ -115,18 +115,18 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
         .collect();
     assert_eq!(
         live, declared,
-        "continuous workflow checkers and their declared coverage drifted apart (§9)"
+        "continuous workflow checkers and their declared coverage drifted apart (§8)"
     );
 }
 
-/// The table above and the workflow spec's §9 copy of it are the same table:
+/// The table above and the workflow spec's §8 copy of it are the same table:
 /// numbering and defining sections. The suites each row points at are this
 /// copy's alone.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("workflow");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("workflow spec §9 parses");
+    let documented = catalogue::documented(&root, site).expect("workflow spec §8 parses");
     let implemented: Vec<catalogue::Row> = w_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -135,7 +135,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "workflow spec §9 and w_catalogue() disagree:\n  {}\n",
+        "workflow spec §8 and w_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

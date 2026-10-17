@@ -1,92 +1,114 @@
-//! Entities: durable objects ("entities") on the distributed actor framework.
+//! Entities: virtual, durable, single-activation objects on the distributed actor
+//! framework.
 //!
-//! An **entity** is an actor plus three things (entity spec): a name-based virtual
-//! identity, a durable event-sourced journal, and a durability barrier on the
-//! reply. Everything else (mailboxes, serial execution, location-transparent
-//! `ask`/`tell`, supervision, death watch) is inherited unchanged from
-//! `actor-core`.
+//! An entity is an actor plus a name-based virtual identity, a durable
+//! event-sourced journal, and a durability barrier on the reply: the runtime
+//! activates it on its shard leader on first use, holds each reply until the
+//! command's records are durable, and rebuilds it from the journal after a
+//! hibernation or a failover. Workflows, agents, machines, and the tenancy
+//! directory are built on it.
 //!
-//! Author an entity by implementing [`Entity`] (state, events, the pure
-//! [`apply`](Entity::apply) fold) and an [`EntityHandler`] per command (the
-//! decide/apply split, §4.2), then host it with
-//! [`system.entities::<G>(config)`](EntityExt::entities) and address it by name
-//! with [`Entities::entity`]. A command's reply is held until its events are
-//! durable (the §6 output gate), so a crash loses no acknowledged write.
+//! # Seams
 //!
-//! # Facets: one entity, many storage features
+//! - **Authoring** (a plug point every entity type implements): [`Entity`],
+//!   [`EntityHandler`], [`EntityRegistry`], with [`EntityCtx`] as what a decision
+//!   receives. Callers hold an [`EntityRef`] from [`Entities`]; types are hosted
+//!   through [`EntityExt`] or the node's [`EntityNode`](cluster::EntityNode).
+//! - **Storage plug points**, in [`store`]: the per-replica
+//!   [`EntityStore`](store::EntityStore) (supplied on
+//!   [`EntityConfig::entity_store`]), the node's
+//!   [`BlockingIo`](store::BlockingIo) pool, and the
+//!   [`EntityMetrics`](store::EntityMetrics) sink.
+//! - **Internal boundaries**: [`EntitySystem`] (implemented here for actor-core's
+//!   `LocalSystem` and actor-cluster's `ClusterSystem`, which choose the durability
+//!   tier), the [`EntityJournal`](store::EntityJournal) the host appends through, the
+//!   [`ShardMapSource`](cluster::ShardMapSource) placement view, the
+//!   [`ReplicaTransport`](cluster::ReplicaTransport) replica protocol, and the
+//!   sealed [`Facet`](facet::Facet) seam behind the built-in facets.
+//! - **Consumed**: actor-cluster's `RaftConsensus` for leader election and the shard
+//!   maps, the `wal` crate under [`FileEntityStore`](store::FileEntityStore), and the
+//!   `compat` stamps on records, snapshots, and stores.
 //!
-//! Beyond the event fold, an entity composes **facets** (spec §7.12) by declaring
-//! `type Facets`: the [`Kv`](facet::Kv) map (§7.13), the [`Ws`](facet::Ws) workspace directory
-//! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
-//! [`Alarm`](facet::Alarm) durable timer (§7.16), and the [`Steps`](facet::Steps) step memo (§7.17). A
-//! handler writes through the compile-time-gated `ctx` accessors:
-//! [`kv()`](EntityCtx::kv), [`ws()`](EntityCtx::ws), `sql()`,
-//! [`alarm()`](EntityCtx::alarm), [`steps()`](EntityCtx::steps), and all of a
-//! command's records, events and facet operations alike, commit as **one
-//! atomic tagged batch** in the entity's single journal, snapshot as one
-//! composite, and share one unioned blob root set.
+//! # How it works
 //!
-//! # Durable alarms and step memos
+//! The `host` module is an entity's activation: the per-command protocol (decide,
+//! append, fold only after a contiguous commit, then reply), rehydration, idle
+//! hibernation, and the alarm timer. The `gateway` module routes a call to its
+//! shard leader, owns the activation table, and serves the non-activating event
+//! read. On the clustered tier the `replicator` module is the per-shard journal: a
+//! quorum append fenced by the shard term, and the read-repair recovery a new
+//! leader runs before serving an entity. The `shardmap` module is the per-type
+//! consensus group that allocates shards, drives joint-quorum migrations, and
+//! commits splits and merges. The [`facet`] module carries the record envelope, the
+//! composite snapshot, and the unioned blob roots the built-in facets share.
 //!
-//! The [`Alarm`](facet::Alarm) facet stores a single per-entity deadline; when it passes the
-//! runtime fires [`Entity::on_alarm`] with **no caller present** (spec §7.16). The
-//! [`Steps`](facet::Steps) step memo builds on it: each step's result is journaled
-//! write-once, so a completed step resolves from the memo across crashes instead of
-//! running again. An alarm fires while its entity is resident and re-arms on
-//! re-activation. To fire with **no access after a node failover or hibernation**,
-//! give the node an alarm index
-//! ([`EntityNode::alarm_index`](cluster::EntityNode::alarm_index)) and host the type
-//! through it: each host registers its deadline in a per-shard
-//! [`AlarmIndex`](cluster::AlarmIndex) (an acknowledged registration, which is what
-//! lets an alarmed entity hibernate; an unacked one pins it resident), and a driver
-//! re-activates due entities on the shards this node leads.
+//! Specified by `docs/entity-spec.md` (the model and runtime),
+//! `docs/entity-storage-spec.md` (the substrate), and `docs/entity-facets-spec.md`
+//! (the facets).
 //!
-//! # Scope: two durability tiers, one model
+//! # Example
 //!
-//! The full entity programming model runs on either durability tier, selected by
-//! the system an entity is hosted on (§7.4):
+//! ```ignore
+//! pub struct Account;
+//! #[derive(Default, Serialize, Deserialize)]
+//! pub struct Balance { cents: i64 }
+//! #[derive(Serialize, Deserialize)]
+//! pub enum Ledger { Deposited(u64), Withdrew(u64) }
+//! pub struct Overdraft; // an application error, carried inside the reply
 //!
-//! - **`Local`, single-node** ([`LocalEntityJournal`](store::LocalEntityJournal)): one linearizable local store,
-//!   CP trivially. Hosted on a [`LocalSystem`](actor_core::LocalSystem).
-//! - **`Quorum`, clustered** (the shard replicator, replicator.rs): the namespace is partitioned
-//!   into shards (`EntityConfig::shards`), each a leader-election Raft group holding
-//!   no entity data (§7.1) over which a per-entity **quorum append** (§7.2) makes an
-//!   entity's records durable on the shard's replicas, fenced by the shard term. An
-//!   entity activates on its shard's leader (§5.2), an [`EntityRef`] call from any node
-//!   routes name→shard→leader (§5.4), the §8 single-writer fence and the
-//!   `NotLeader`/`Unavailable` durability outcomes (§11) apply, and a new leader
-//!   recovers each entity's head from a write quorum by read-repair on activation, so
-//!   committed state survives failover (E14). Hosted on an `ActorSystem` that
-//!   implements [`EntitySystem`] over consensus (the cluster's `ClusterSystem`). The
-//!   over-the-wire command dispatch (§5.5) reuses the actor framework's own dispatch
-//!   registry, fed by [`Entity::register`] (see [`accepted_manifests`]).
+//! impl Entity for Account {
+//!     type System = ClusterSystem;
+//!     type State = Balance;
+//!     type Event = Ledger;
+//!     type Facets = ();
+//!     const ENTITY_TYPE: &'static str = "bank.Account"; // rename-stable
+//!     fn apply(state: &mut Balance, e: &Ledger) {
+//!         match e {
+//!             Ledger::Deposited(n) => state.cents += *n as i64,
+//!             Ledger::Withdrew(n) => state.cents -= *n as i64,
+//!         }
+//!     }
+//!     fn register(r: &mut EntityRegistry<Self>) {
+//!         r.accept::<Withdraw>();
+//!     }
+//! }
 //!
-//! The shard map (§7.6) is a per-type Raft group whose committed log is the
-//! allocation ([`ShardMapSource`](cluster::ShardMapSource)), storing each shard's **key range** and replica
-//! set. As cluster membership changes, a shard rebalances by **joint-quorum
-//! migration** (§7.7): the new set commits as a `target` (writes and recoveries
-//! then need a majority of BOTH sets), the shard leader's driver catches every
-//! entity's records, snapshot, and blobs up on the target, and only then does the
-//! map flip, so a committed write's durability never rests on replicas that left
-//! (E14).
+//! #[derive(Clone, Serialize, Deserialize)]
+//! pub struct Withdraw { cents: u64 }
+//! impl Message for Withdraw {
+//!     type Reply = Result<i64, Overdraft>;
+//!     const MANIFEST: Manifest = Manifest::new("bank.Withdraw");
+//! }
 //!
-//! The partition itself is **elastic** (§7.7): a shard **splits** (its key range
-//! divides in two, the parent keeping the low half and a fresh child taking the
-//! high half on the same replicas) when it grows past `shard_target_bytes` or on
-//! an explicit request, and two adjacent shards **merge** the reverse way,
-//! reclaiming a leader-election group (E7). A split (or merge) seals the moving
-//! range on a quorum of stores (from which no append to it can reach a write
-//! quorum at any term), transfers each moved entity's committed prefix, snapshot,
-//! and blobs to the destination keys, and only then commits the new mapping, so an
-//! entity is writable in exactly one shard at any time and no write is lost or
-//! duplicated across the boundary (E15).
+//! impl EntityHandler<Withdraw> for Account {
+//!     async fn handle(&self, state: &Balance, msg: Withdraw, _: &EntityCtx<Self>)
+//!         -> (Vec<Ledger>, Result<i64, Overdraft>) {
+//!         if (state.cents as u64) < msg.cents {
+//!             return (vec![], Err(Overdraft)); // no event: nothing commits
+//!         }
+//!         (vec![Ledger::Withdrew(msg.cents)], Ok(state.cents - msg.cents as i64))
+//!     }
+//! }
 //!
-//! The following remain **deferred**:
+//! // One node of a cluster in the leader-based mode, over real storage.
+//! let system = ClusterSystem::start("node-a", config_leader_based).await?;
+//! let (node, store) = EntityNode::durable(system.clone(), data_dir);
+//! let accounts: Entities<Account> = node.entities(EntityConfig {
+//!     entity_store: Some(store),
+//!     ..EntityConfig::default()
+//! });
 //!
-//! - Linearizable reads (§7.5): reads are **read-your-leader** (relaxed); served
-//!   locally from the leader's activation, so a deposed-but-unfenced minority
-//!   leader can serve a stale read (writes never fork, §8).
-//! - Hibernatable connections, follower reads, and cross-entity sagas (§16).
+//! // Activated on first use; the reply waits until the event is durable.
+//! match accounts.entity("account/42").ask(Withdraw { cents: 500 }).await {
+//!     Ok(Ok(balance)) => println!("balance now {balance}"),
+//!     Ok(Err(Overdraft)) => { /* the application's own outcome */ }
+//!     Err(EntityError::Unavailable(_)) => { /* no quorum: the write MAY still land */ }
+//!     Err(other) => eprintln!("{other}"),
+//! }
+//!
+//! // At a graceful stop, hand every led shard to another replica.
+//! node.hand_off_leadership().await;
+//! ```
 
 #[cfg(feature = "testing")]
 pub mod testing;

@@ -1,4 +1,4 @@
-//! Conformance: **static** membership (spec §9.4); the fixed-roster control
+//! Conformance: **static** membership (spec §6.4); the fixed-roster control
 //! plane.
 //!
 //! In static mode the member set is fixed at startup and no failure detector
@@ -74,7 +74,7 @@ fn static_mode_runs_no_failure_detector() {
 fn a_send_to_a_crashed_node_fails_without_changing_membership() {
     // Failure surfaces to the caller as a `CallError`, and the call still
     // completes (never hangs), but membership is untouched: nothing downs B
-    // (spec §8, §9.4).
+    // (spec §5, §6.4).
     let sim = Simulation::new(2);
     let net = SimNetwork::new(&sim);
     let a = net.join(A);
@@ -104,7 +104,7 @@ fn a_send_to_a_crashed_node_fails_without_changing_membership() {
 #[test]
 fn operator_commands_are_noops_without_a_control_plane() {
     // Static mode has no membership authority at all: every operator command is
-    // a no-op and the roster stays fixed (spec §9.4.1).
+    // a no-op and the roster stays fixed (spec §6.4.1).
     let sim = Simulation::new(3);
     let net = SimNetwork::new(&sim);
     let a = net.join(A);
@@ -135,7 +135,7 @@ fn operator_commands_are_noops_without_a_control_plane() {
 
 #[test]
 fn the_observe_only_detector_reports_reachability_but_never_downs() {
-    // Spec §9.4.1: a static deployment MAY enable the detector observe-only,
+    // Spec §6.4.1: a static deployment MAY enable the detector observe-only,
     // trading probe traffic for reachability events and discovery routing.
     // Nothing else changes: there is still no down authority, no `down`, no
     // membership transition; the member set stays exactly the configured roster.
@@ -167,7 +167,7 @@ fn the_observe_only_detector_reports_reachability_but_never_downs() {
         recorder.events().iter().any(
             |e| matches!(e, Event::Unreachable { observer, node } if *observer == A && *node == B)
         ),
-        "reachability transitions are observable (spec §16)",
+        "reachability transitions are observable (spec §2.7)",
     );
     assert!(!a.membership().is_down(B), "but nothing ever declares down");
     assert_eq!(

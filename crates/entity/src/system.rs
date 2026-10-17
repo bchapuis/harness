@@ -2,8 +2,8 @@
 //!
 //! An entity's activation needs three runtime capabilities the bare
 //! [`ActorSystem`] trait does not expose: the virtual clock (for hibernation
-//! timing, §10), task launching (to drive the idle timer), and a typed channel
-//! for entity events (§13). Threading the concrete `Clock`/`Entropy`/`Spawner`
+//! timing, §7), task launching (to drive the idle timer), and a typed channel
+//! for entity events (§10). Threading the concrete `Clock`/`Entropy`/`Spawner`
 //! type parameters of [`LocalSystem`] through every entity type would leak them
 //! onto `EntityRef`, `Entities`, and the host, so an entity's system implements this
 //! one **object-friendly** trait instead: the host, gateway, and ref are generic
@@ -31,14 +31,14 @@ use crate::shardmap::RaftShardMap;
 use crate::shardmap::ShardMapSource;
 use crate::store::NodeStore;
 
-/// A shard of one entity type's namespace (spec §7.1): the entity-local handle a
+/// A shard of one entity type's namespace (spec storage §3.1): the entity-local handle a
 /// [`EntitySystem`] maps to its backing store and consensus group. Kept distinct
 /// from `actor_cluster::GroupId` so the seam signature stays system-agnostic: a
 /// `Local` single-node system has no Raft group at all.
 ///
 /// An entity's name maps to one `ShardId` by a stable hash of the name onto a
-/// key-range partition of the type's hash space (§5.1): `entities()` founds
-/// `shards` equal ranges ([`shard_for`]), and a split or merge (§7.7) is the only
+/// key-range partition of the type's hash space (§4.1): `entities()` founds
+/// `shards` equal ranges ([`shard_for`]), and a split or merge (storage §7) is the only
 /// thing that changes the partition afterward, never membership change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShardId {
@@ -52,7 +52,7 @@ pub struct ShardId {
 
 /// FNV-1a over `bytes`: a small, allocation-free, deterministic hash. Used for
 /// name→shard and shard→group, both of which MUST agree on every node and across
-/// runs (the simulator replays a seed exactly, §14), so a randomized hasher is
+/// runs (the simulator replays a seed exactly, §11), so a randomized hasher is
 /// unusable here.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
@@ -68,7 +68,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// [`group_id_for`], so the map group never collides with a data shard's group.
 pub(crate) const MAP_SHARD_INDEX: u32 = u32::MAX;
 
-/// The stable hash of an entity name onto the type's 64-bit key space (spec §5.1).
+/// The stable hash of an entity name onto the type's 64-bit key space (spec §4.1).
 /// Every routing decision starts here: the hash locates the name's point in the
 /// space, and the shard owning the surrounding key range serves it.
 ///
@@ -91,7 +91,7 @@ pub(crate) fn name_hash(entity_type: &str, key: &str) -> u64 {
     hash
 }
 
-/// Whether `entity`'s name-hash falls at or above the bound `from` (§7.7). The
+/// Whether `entity`'s name-hash falls at or above the bound `from` (storage §7). The
 /// moving side of a split/merge boundary and the append-refusing side of a
 /// shard's seal are the same half-open test, so both stores' `sealed` check and
 /// the split driver's keep-predicate route through here.
@@ -99,10 +99,10 @@ pub(crate) fn name_at_or_above(entity: &crate::entity::EntityName, from: u64) ->
     name_hash(entity.entity_type(), entity.key()) >= from
 }
 
-/// A contiguous, inclusive range of the 64-bit name-hash space (spec §7.1): the
+/// A contiguous, inclusive range of the 64-bit name-hash space (spec storage §3.1): the
 /// keys a shard owns. The founding partition slices the space into `shards` equal
 /// ranges (`initial_ranges`); a split divides a range in two and a merge fuses
-/// two adjacent ranges (§7.7).
+/// two adjacent ranges (storage §7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyRange {
     /// The lowest hash this range owns.
@@ -125,7 +125,7 @@ fn initial_boundary(i: usize, shards: usize) -> u128 {
     ((i as u128) << 64).div_ceil(shards as u128)
 }
 
-/// The founding partition (spec §5.1): `shards` near-equal contiguous ranges
+/// The founding partition (spec §4.1): `shards` near-equal contiguous ranges
 /// covering the whole hash space. Deterministic, so every node founds the
 /// identical partition; [`shard_for`] is its O(1) point lookup.
 pub(crate) fn initial_ranges(shards: usize) -> Vec<KeyRange> {
@@ -138,10 +138,10 @@ pub(crate) fn initial_ranges(shards: usize) -> Vec<KeyRange> {
         .collect()
 }
 
-/// Map an entity name to its **founding** shard (spec §5.1): the range of the
+/// Map an entity name to its **founding** shard (spec §4.1): the range of the
 /// initial `shards`-way partition (`initial_ranges`) containing the name's
 /// hash, computed in O(1) as `⌊hash·n/2^64⌋`. Stable across nodes and runs, so
-/// resolution is consistent cluster-wide. After a split or merge (§7.7) the
+/// resolution is consistent cluster-wide. After a split or merge (storage §7) the
 /// committed shard map, not this function, is the authority, routing consults
 /// the map first and falls back here only while the map bootstraps.
 pub fn shard_for(entity_type: &'static str, key: &str, shards: usize) -> ShardId {
@@ -161,7 +161,7 @@ pub(crate) fn founding_index(hash: u64, shards: usize) -> u32 {
 
 /// Map a shard to its `actor_cluster` consensus group: a stable hash of
 /// `(entity_type, index)`, forced nonzero so it never aliases the membership
-/// control group ([`GroupId::CONTROL`] = 0, spec §8.2). Every node derives the
+/// control group ([`GroupId::CONTROL`] = 0, spec storage §3.2). Every node derives the
 /// same group id for the same shard, so they form one Raft group.
 pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
     let id = fnv1a(shard.entity_type.as_bytes()).wrapping_mul(0x0000_0100_0000_01b3)
@@ -170,7 +170,7 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
 }
 
 /// How a deployment groups nodes into failure domains: racks, availability zones,
-/// whatever fails together (spec §7.1).
+/// whatever fails together (spec storage §3.1).
 ///
 /// Replica selection without this spreads voters across the *cluster* but is blind to
 /// how the cluster is arranged, so nothing stops all R replicas of a shard landing in
@@ -179,14 +179,14 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
 /// quorum while the cluster still looks healthy.
 ///
 /// **Every node MUST map a given node to the same domain.** The allocation is agreed
-/// by every node computing the identical rendezvous choice (§7.6); a mapping that
+/// by every node computing the identical rendezvous choice (storage §6); a mapping that
 /// disagreed across nodes would make them propose different sets. Deriving it from
 /// static deployment metadata (the zone label a scheduler sets) satisfies this;
 /// deriving it from anything node-local does not.
 pub type FailureDomains = Arc<dyn Fn(NodeId) -> u64 + Send + Sync>;
 
 /// Split `members` into voters and learners, spreading voters across failure domains
-/// (spec §7.1). See [`select_replicas`] for the domain-blind case.
+/// (spec storage §3.1). See [`select_replicas`] for the domain-blind case.
 ///
 /// Walks the rendezvous order and takes a node only while its domain is under the
 /// per-domain cap: `ceil(replicas / distinct domains)`, so R=3 over 3 zones takes one
@@ -239,8 +239,8 @@ fn select_spread(
 
 /// The members in rendezvous (HRW) order for `group`: the shared ranking both
 /// selection strategies choose from. Every node must derive the same order for
-/// the allocation to converge (§7.6), so the score is the cluster's one
-/// rendezvous weight (utilities §2), keyed by the group id: consecutive shards'
+/// the allocation to converge (storage §6), so the score is the cluster's one
+/// rendezvous weight (utilities §2.1), keyed by the group id: consecutive shards'
 /// ids differ only in their low bits, and the weight's finalizer spreads that
 /// difference across all 64, so each shard ranks the nodes independently.
 fn rendezvous_order(members: &[NodeId], group: GroupId) -> Vec<NodeId> {
@@ -248,7 +248,7 @@ fn rendezvous_order(members: &[NodeId], group: GroupId) -> Vec<NodeId> {
 }
 
 /// Split `members` into a shard's voters and learners, optionally spreading the
-/// voters across failure domains (spec §7.1). `domains` of `None` is the
+/// voters across failure domains (spec storage §3.1). `domains` of `None` is the
 /// domain-blind rendezvous split.
 pub(crate) fn select_replicas_in(
     members: &[NodeId],
@@ -263,7 +263,7 @@ pub(crate) fn select_replicas_in(
 }
 
 /// Split `members` into a shard's `replicas` voters and its remaining learners
-/// (spec §7.1) by **rendezvous hashing**: each member is scored by a stable hash
+/// (spec storage §3.1) by **rendezvous hashing**: each member is scored by a stable hash
 /// of `(node, group)`, the top `replicas` become voters, the rest learners. This
 /// is a deterministic function of the members and the group (so every node
 /// computes the identical split), and it spreads each shard's voters across the
@@ -284,12 +284,12 @@ fn select_replicas(
 }
 
 /// An [`ActorSystem`] that can host entities: it exposes virtual time, task
-/// launching, the entity event channel (§10, §13), and the shard seam that places
-/// an entity's durable storage and resolves its leader (§5.1, §5.2, §7). Implemented
+/// launching, the entity event channel (§7, §10), and the shard seam that places
+/// an entity's durable storage and resolves its leader (§4.1, §4.2, storage §1). Implemented
 /// for [`LocalSystem`] (the `Local` tier, single-node) and [`ClusterSystem`] (the
 /// `Quorum` tier, sharded Raft).
 pub trait EntitySystem: ActorSystem {
-    /// Emit an entity event onto the framework's observability stream (§13),
+    /// Emit an entity event onto the framework's observability stream (§10),
     /// wrapped as an application event so the checkers and the reproducibility
     /// recorder observe it in the one ordered stream. (Time, sleeping, and
     /// task launching come from the [`ActorSystem`] supertrait.)
@@ -297,16 +297,16 @@ pub trait EntitySystem: ActorSystem {
         self.emit(Event::app(event));
     }
 
-    /// Build the **shard map** for an entity type (spec §7.6): the consensus-agreed
+    /// Build the **shard map** for an entity type (spec storage §6): the consensus-agreed
     /// record of which nodes replicate each of its `shards`, and this node's local
     /// store for shards it replicates. The `Local` tier returns a single-node map
     /// (this node replicates everything); the `Quorum` tier creates a per-type Raft
     /// group whose committed log is the allocation, so every node agrees regardless
     /// of join order. The allocation targets `replicas` nodes per shard, and the
-    /// leader auto-splits a shard past `split_target_bytes` (§7.7; `0` disables the
+    /// leader auto-splits a shard past `split_target_bytes` (storage §7; `0` disables the
     /// size trigger). `local` is this node's durable store, its writes on the node's
     /// blocking pool ([`NodeStore`]), and `transport` reaches peer replicas' stores
-    /// (§7.2). Created once at `entities()` time; routing reads it through the
+    /// (storage §4). Created once at `entities()` time; routing reads it through the
     /// [`ShardMapSource`] seam.
     #[allow(clippy::too_many_arguments)] // one call site, from `entities()`
     fn shard_map(
@@ -321,13 +321,13 @@ pub trait EntitySystem: ActorSystem {
         domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource>;
 
-    /// The node that currently leads `shard`, where its entities activate (§5.2), or
+    /// The node that currently leads `shard`, where its entities activate (§4.2), or
     /// `None` if this node does not replicate the shard (so cannot know) or a shard
     /// election is in flight. the `Local` tier is always its own leader.
     fn shard_leader(&self, shard: ShardId) -> Option<NodeId>;
 
-    /// Whether this node leads `shard`: the single-writer fence (§8) and the gate
-    /// for local activation (§5.4). `false` on a node that does not replicate the
+    /// Whether this node leads `shard`: the single-writer fence (storage §5) and the gate
+    /// for local activation (§4.4). `false` on a node that does not replicate the
     /// shard. the `Local` tier leads every shard.
     fn leads_shard(&self, shard: ShardId) -> bool;
 }
@@ -380,10 +380,10 @@ where
         domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Quorum` tier: a per-type Raft group whose committed log is the allocation,
-        // so every node agrees on each shard's replica set (§7.6). It creates each
+        // so every node agrees on each shard's replica set (storage §6). It creates each
         // assigned shard's leader-election group + per-entity quorum journal as the
         // allocation commits. The emitter closure puts the map's shard events
-        // (§13: LeaderChanged, ShardSplit, ShardMerged) onto this system's stream.
+        // (§10: LeaderChanged, ShardSplit, ShardMerged) onto this system's stream.
         let system = self.clone();
         Arc::new(RaftShardMap::new(
             self.clone(),
@@ -522,7 +522,7 @@ mod tests {
         // differing only in the low ~4 bits, so this uses the *realistic* group
         // ids (not the far-apart literals the deterministic test uses): distinct
         // shards must land on more than one replica set, and every node must
-        // replicate some shard, or the §7.1/§7.8 load-spreading premise is broken.
+        // replicate some shard, or the storage §3.1/§3.2 load-spreading premise is broken.
         let members = nodes(&[1, 2, 3, 4, 5]);
         let mut sets = std::collections::BTreeSet::new();
         let mut covered = std::collections::BTreeSet::new();
@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// The spread is still a pure function every node computes identically: the
-    /// property the consensus-agreed allocation rests on (§7.6).
+    /// property the consensus-agreed allocation rests on (storage §6).
     #[test]
     fn the_spread_is_deterministic() {
         let members: Vec<NodeId> = (1..=6).map(NodeId::new).collect();

@@ -1,4 +1,4 @@
-//! Seed-controlled transport faults (spec §18.3).
+//! Seed-controlled transport faults (docs/simulation-testing.md).
 //!
 //! A [`FaultPolicy`] is the *input* side of fault injection: the per-frame drop,
 //! duplication, and latency a run applies to the in-memory network. The *output*
@@ -7,10 +7,10 @@
 
 use std::time::Duration;
 
-/// Seed-controlled transport faults (spec §18.3). All zero by default. Per-pair
+/// Seed-controlled transport faults (docs/simulation-testing.md). All zero by default. Per-pair
 /// FIFO is preserved even under latency (#3); loss surfaces as
 /// `Timeout`/`Unreachable`; duplication is tolerated (the framework gives
-/// at-most-once *at the caller*, not exactly-once delivery, §7.2).
+/// at-most-once *at the caller*, not exactly-once delivery, §4).
 #[derive(Clone, Copy)]
 pub struct FaultPolicy {
     /// Probability `drop_num / drop_den` that a frame is lost.
@@ -43,9 +43,9 @@ impl FaultPolicy {
     }
 }
 
-// --- The external registry (spec §9.4.2) --------------------------------------
+// --- The external registry (spec §6.4.2) --------------------------------------
 
-/// Seeded registry faults (spec §18.3: a stalled, lagging, or unavailable
+/// Seeded registry faults (docs/simulation-testing.md: a stalled, lagging, or unavailable
 /// registry sync). All draws come from the run's single
 /// [`SimEntropy`](crate::SimEntropy), so a faulted run replays from its seed.
 #[derive(Clone, Copy, Debug)]

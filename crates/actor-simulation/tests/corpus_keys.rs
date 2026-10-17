@@ -1,4 +1,4 @@
-//! Guard rails on the names that sweeps and the corpus agree about (spec §18.6).
+//! Guard rails on the names that sweeps and the corpus agree about (spec §2.12.2).
 //!
 //! A corpus entry is keyed by a workload's `name()`. Two properties have to hold
 //! for that key to mean anything, and neither is enforced by the type system

@@ -1,12 +1,12 @@
 //! Durable recovery of the clustered `Quorum` journal under deterministic
-//! simulation (entity §14), focused on the case the per-entity quorum substrate
+//! simulation (entity §11), focused on the case the per-entity quorum substrate
 //! makes hard: **a full-cluster cold restart**.
 //!
 //! In the `Quorum` tier an entity's records live off the leader-election group's Raft
-//! log, in each replica's [`EntityStore`](entity::store::EntityStore) (§7.2). Unlike a
+//! log, in each replica's [`EntityStore`](entity::store::EntityStore) (storage §4). Unlike a
 //! shared-log design, surviving a simultaneous restart of every replica needs the
 //! store itself to be durable: injected through [`EntityConfig::entity_store`] and
-//! preserved across the restart (the entity analogue of the Raft WAL, §7.4). These
+//! preserved across the restart (the entity analogue of the Raft WAL, storage §2.2). These
 //! tests inject a per-node store that outlives `net.restart`, commit, cold-restart
 //! the whole cluster, and assert each entity recovers its committed state from a
 //! quorum of the reloaded stores (**E14**). The healthy-path quorum behaviours
@@ -133,10 +133,10 @@ fn leader_net(sim: &Simulation) -> SimNetwork {
 
 /// A per-`(entity_type, node)` entity store that **survives a restart**: the factory
 /// hands a restarted node the same store it had before (the WAL-storage analogue,
-/// §7.4). Without this, a full-cluster cold restart would lose every entity's records.
+/// storage §2.2). Without this, a full-cluster cold restart would lose every entity's records.
 /// Keyed by type as well as node, like every real factory: a shard index names a
 /// different leader-election group under each type, so its fence cannot be shared
-/// (§8.2).
+/// (storage §3.2).
 fn durable_stores() -> EntityStoreFactory {
     type Stores = Mutex<HashMap<(String, NodeId), Arc<MemoryEntityStore>>>;
     let stores: Arc<Stores> = Arc::new(Mutex::new(HashMap::new()));
@@ -181,7 +181,7 @@ fn deposit_each(
 fn committed_writes_survive_a_full_cluster_cold_restart() {
     // The whole cluster goes down and comes back: no survivor keeps a leader or any
     // in-memory state, so every entity must recover its head from a quorum of the
-    // replicas' *reloaded* stores (§8, E14). The injected store outlives the restart;
+    // replicas' *reloaded* stores (storage §5, E14). The injected store outlives the restart;
     // the records do not live in any Raft log.
     let sim = Simulation::new(1);
     let net = leader_net(&sim);
@@ -243,7 +243,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart() {
 #[test]
 fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
     // The same total cold restart as above, but through the *production* durable
-    // store: a file-backed [`FileEntityStore`] under a real directory (§7.4). To prove
+    // store: a file-backed [`FileEntityStore`] under a real directory (storage §2.2). To prove
     // recovery comes from disk and not a retained handle, the old factory (its
     // per-node cache and open append files) is dropped before the restart and a fresh
     // one opened at the SAME path afterward, as a process restart does.
@@ -311,7 +311,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
 fn a_compacted_entity_survives_a_full_cluster_cold_restart() {
     // Like the cold restart above, but snapshots are taken (`snapshot_every`), so a
     // recovering leader reloads each replica's snapshot plus the tail rather than the
-    // whole history: the snapshot-recovery path of §9, exercised across a total
+    // whole history: the snapshot-recovery path of storage §8, exercised across a total
     // restart where there is no peer to install a snapshot from.
     let sim = Simulation::new(2);
     let net = leader_net(&sim);

@@ -1,8 +1,8 @@
-//! The `Native` tier at the microVM grade (sandbox spec §3.4, §3.5): OS
+//! The `Native` tier at the microVM grade (sandbox spec §4.4, §4): OS
 //! processes inside a Firecracker microVM, one VM per activation,
 //! provisioned lazily on the first `Native` call and killed on release.
 //!
-//! Confinement here is **hardware virtualization**, §3.4's stronger grade:
+//! Confinement here is **hardware virtualization**, §4.4's stronger grade:
 //! the guest speaks to a virtual machine monitor, not the host kernel. The
 //! price is provisioning cost (a boot per activation; snapshot warm pools
 //! are not implemented, sandbox spec §7) and a Linux + `/dev/kvm` host at
@@ -31,7 +31,7 @@
 //! it. Effects a backgrounded process makes after the command returns are
 //! not pulled until a later call returns. Both tar directions are capped
 //! ([`MAX_TAR`]): a workspace beyond the cap fails the call as an outcome,
-//! never an unmetered host allocation (the §3.2 stance, applied here).
+//! never an unmetered host allocation (the §4.2 stance, applied here).
 //!
 //! Regular files, directories, relative symlinks, and the executable bit
 //! round-trip; absolute symlink targets, hard links, device and fifo nodes,
@@ -55,7 +55,7 @@
 //! reported over a transport that still works; the call fails as an
 //! ordinary outcome and the VM is kept. A *transport* failure (connect
 //! refused, short read, frame over cap) is single-tier loss (sandbox spec
-//! §4): the VM is killed and forgotten, the call fails as a `ToolError`, and
+//! §5): the VM is killed and forgotten, the call fails as a `ToolError`, and
 //! the next call MAY re-provision lazily under the acquisition this
 //! activation already journaled. A vanished workspace escalates to
 //! `EnvironmentLost` in the provider, as for every tier.
@@ -113,7 +113,7 @@ pub(crate) const SHELL_DESCRIPTION: &str = "Run a POSIX shell command (`/bin/sh 
 /// Deployment-level Firecracker configuration, handed to
 /// [`crate::TieredSandboxes::with_firecracker`]: the node's VMM assets. Which
 /// base rootfs a session boots is solely the profile's `image` (agent spec
-/// §5.3 item 4), a host path to an ext4 containing `/sbin/fc-agent`; keeping
+/// §2.4), a host path to an ext4 containing `/sbin/fc-agent`; keeping
 /// it out of this config keeps the choice inside the digest the cluster
 /// agrees on.
 #[derive(Clone, Debug)]
@@ -159,7 +159,7 @@ fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> machine_host::microvm
 }
 
 /// One session's native tier at the microVM grade: a VM provisioned lazily
-/// on the first `Native` call (sandbox spec §2.3 item 2), killed on release
+/// on the first `Native` call (sandbox spec §3.3 item 2), killed on release
 /// (S5).
 pub(crate) struct FirecrackerTier {
     config: Arc<FirecrackerConfig>,
@@ -227,7 +227,7 @@ impl FirecrackerTier {
                 Err(ToolError::Sandbox(format!("firecracker: agent: {e}")))
             }
             Err(BracketError::Transport(e)) => {
-                // Single-tier loss (sandbox spec §4): kill and forget; the
+                // Single-tier loss (sandbox spec §5): kill and forget; the
                 // next call MAY re-provision under the journaled acquisition.
                 self.teardown(&mut slot).await;
                 Err(ToolError::Sandbox(format!("firecracker: {e}")))
@@ -236,7 +236,7 @@ impl FirecrackerTier {
     }
 
     /// Boot the session's microVM (lazily, on the first call that carries
-    /// the tier: sandbox spec §2.3 item 2).
+    /// the tier: sandbox spec §3.3 item 2).
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));

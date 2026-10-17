@@ -1,4 +1,4 @@
-//! The receptionist: service discovery (spec §13).
+//! The receptionist: service discovery (spec §2.6).
 //!
 //! Actors are addressed by [`ActorRef`], but a node needs a way to obtain the
 //! initial handle for a remote service without hardcoding its [`ActorId`]. The
@@ -7,9 +7,9 @@
 //! [`subscribe`](Receptionist::subscribe) to the current [`Listing`].
 //!
 //! Registrations are an OR-set keyed by the registering node, so concurrent
-//! registrations merge. **Pruning rides on death watch** (spec §12, §13): the
+//! registrations merge. **Pruning rides on death watch** (spec §2.5, §2.6): the
 //! receptionist watches each registered actor, so when one stops, or its node
-//! is declared `down` (spec §8.1 step 5), its registration is removed and
+//! is declared `down` (spec §5.1 step 5), its registration is removed and
 //! subscribers see a fresh listing.
 //!
 //! Only [`ActorId`]s travel and are stored; a typed [`ActorRef`] is
@@ -34,7 +34,7 @@ use crate::id::Path;
 use crate::refs::ActorRef;
 use crate::system::ActorSystem;
 
-/// A typed registry key (spec §13). The actor type makes `lookup`/`subscribe`
+/// A typed registry key (spec §2.6). The actor type makes `lookup`/`subscribe`
 /// return correctly typed `ActorRef`s.
 pub struct Key<A> {
     id: &'static str,
@@ -63,7 +63,7 @@ impl<A> Clone for Key<A> {
 }
 impl<A> Copy for Key<A> {}
 
-/// A snapshot of the actors registered under a key (spec §13).
+/// A snapshot of the actors registered under a key (spec §2.6).
 pub struct Listing<A: Actor> {
     refs: Vec<ActorRef<A>>,
 }
@@ -144,7 +144,7 @@ impl ReceptionistState {
 
     /// Every `(key, origin, actor)` entry in the registry, in deterministic
     /// order: the full local view, advertised to a peer for anti-entropy
-    /// reconciliation (spec §13).
+    /// reconciliation (spec §2.6).
     pub fn digest(&self) -> Vec<(String, NodeId, ActorId)> {
         let registry = self.registry.lock().expect("registry mutex poisoned");
         let mut entries = Vec::new();
@@ -176,7 +176,7 @@ impl ReceptionistState {
         }
     }
 
-    /// Subscribe to `key`, delivering the current snapshot immediately (spec §13
+    /// Subscribe to `key`, delivering the current snapshot immediately (spec §2.6
     /// requirement 5) and then on every change.
     fn subscribe(&self, key: &str) -> async_channel::Receiver<Vec<ActorId>> {
         let (tx, rx) = async_channel::unbounded();
@@ -196,7 +196,7 @@ fn receptionist_id(node: NodeId) -> ActorId {
     ActorId::new(node, Path::new("/system/receptionist"), 0)
 }
 
-/// A handle to a node's receptionist (spec §13). Obtained from the system.
+/// A handle to a node's receptionist (spec §2.6). Obtained from the system.
 pub struct Receptionist<S: ActorSystem> {
     system: S,
     state: Arc<ReceptionistState>,
@@ -207,7 +207,7 @@ impl<S: ActorSystem> Receptionist<S> {
         Receptionist { system, state }
     }
 
-    /// Register `who` under `key` (spec §13), replicating to the cluster and
+    /// Register `who` under `key` (spec §2.6), replicating to the cluster and
     /// arranging for pruning when `who` terminates.
     pub fn register<A: Actor<System = S>>(&self, key: Key<A>, who: &ActorRef<A>) {
         let node = self.system.node();
@@ -216,15 +216,15 @@ impl<S: ActorSystem> Receptionist<S> {
             .replicate_registration(key.id(), node, who.id().clone());
     }
 
-    /// The current listing for `key` (spec §13). Actors on a node out of
-    /// rotation, drained for maintenance or down (spec §9.4), stay registered but
+    /// The current listing for `key` (spec §2.6). Actors on a node out of
+    /// rotation, drained for maintenance or down (spec §6.4), stay registered but
     /// are omitted here, so a caller never discovers a cordoned node and a later
     /// `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
         listing(&self.system, self.state.snapshot(key.id()))
     }
 
-    /// Subscribe to `key` (spec §13): the stream yields the current listing
+    /// Subscribe to `key` (spec §2.6): the stream yields the current listing
     /// first, then a fresh listing on every change.
     pub fn subscribe<A: Actor<System = S>>(
         &self,
@@ -236,14 +236,14 @@ impl<S: ActorSystem> Receptionist<S> {
             .map(move |ids| listing(&system, ids))
     }
 
-    /// Apply a registration received from a peer (spec §13): record it without
+    /// Apply a registration received from a peer (spec §2.6): record it without
     /// re-broadcasting.
     pub fn apply_remote_registration(&self, key: &str, origin: NodeId, id: ActorId) {
         self.record(key, origin, id);
     }
 
     /// Record a registration locally: add it, watch the actor so it is pruned on
-    /// termination (spec §12, §13), and notify subscribers.
+    /// termination (spec §2.5, §2.6), and notify subscribers.
     fn record(&self, key: &str, origin: NodeId, id: ActorId) {
         if self.state.add(key, origin, id.clone()) {
             let state = Arc::clone(&self.state);
@@ -259,7 +259,7 @@ impl<S: ActorSystem> Receptionist<S> {
 }
 
 /// Build the listing for a set of registered ids: the one place the rule that
-/// lists only nodes in rotation lives (spec §9.4, §13 requirement 4), shared by
+/// lists only nodes in rotation lives (spec §6.4, §2.6 requirement 4), shared by
 /// `lookup` and `subscribe`.
 fn listing<A: Actor<System = S>, S: ActorSystem>(system: &S, ids: Vec<ActorId>) -> Listing<A> {
     Listing {

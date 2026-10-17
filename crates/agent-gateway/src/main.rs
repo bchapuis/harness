@@ -175,7 +175,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         codec: Arc::new(JsonCodec),
         events: Arc::new(GatewayEvents { node }),
         // The gateway joins inside the cluster's trust boundary (see
-        // `docs/multi-tenant-edge.md`); the same plaintext caveat applies.
+        // `docs/edge-spec.md`); the same plaintext caveat applies.
         encryption: Encryption::PlaintextTrusted,
         // `Static` without a detector is the non-participating mode: a client
         // observes membership but does not drive it, and with no shard groups it

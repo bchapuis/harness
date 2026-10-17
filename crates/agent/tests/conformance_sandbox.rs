@@ -1,4 +1,4 @@
-//! Sandbox conformance (agent spec §5.3, §5.5, §5.6; invariant A7; sandbox
+//! Sandbox conformance (agent spec §2.3, §4.4, §4.5; invariant A7; sandbox
 //! spec S4): lazy open, provisioning failure as a transcript value, per-tool
 //! timeouts, environment loss surfacing as a journaled `WorkspaceReset` (never
 //! as silent corruption), and the tier acquisition discipline: journaled,
@@ -78,7 +78,7 @@ fn a_failed_open_fails_the_calls_not_the_run() {
         match step {
             0 => Ok(tool_call("c1", "shell", json!({}))),
             1 => {
-                // The model saw the provisioning failure (§5.4) and retries; the
+                // The model saw the provisioning failure (§4.2) and retries; the
                 // environment is back.
                 for_model.set_fail_open(false);
                 Ok(tool_call("c2", "shell", json!({})))
@@ -122,7 +122,7 @@ fn a_failed_open_fails_the_calls_not_the_run() {
     assert_eq!(
         outcomes,
         vec![false, true],
-        "the provisioning failure is the first call's outcome (§5.4)"
+        "the provisioning failure is the first call's outcome (§4.2)"
     );
     assert_eq!(stats.opened(), 1, "the retry opened lazily");
 }
@@ -167,7 +167,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
     run_seed(&workload, 61).expect("invariants hold");
 
     // The loss enters the record before the model acts on state that is gone
-    // (§5.5): tool error → WorkspaceReset → next model call.
+    // (§4.4): tool error → WorkspaceReset → next model call.
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec![
@@ -175,7 +175,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
             "ended"
         ],
     );
-    // The loss tore down one environment; the next call opened a fresh one (§5.5),
+    // The loss tore down one environment; the next call opened a fresh one (§4.4),
     // and both were released exactly once (A7).
     assert_eq!(stats.opened(), 2);
     assert_eq!(stats.released(), 2);
@@ -285,7 +285,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
     );
     run_seed(&workload, 67).expect("invariants hold");
 
-    // The timeout is the journaled outcome (§5.3 item 3); the straggling real
+    // The timeout is the journaled outcome (§4.3); the straggling real
     // result, arriving at 60s, is a duplicate and is discarded.
     let tool_outcomes: Vec<_> = records
         .lock()
@@ -300,11 +300,11 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
 }
 
 // ---------------------------------------------------------------------------
-// Tier acquisition (agent spec §5.6; sandbox spec S4)
+// Tier acquisition (agent spec §4.5; sandbox spec S4)
 // ---------------------------------------------------------------------------
 
 /// A kind spanning two tiers: `read` needs only the workspace the open grants
-/// (§5.6 item 1); `run` needs `Compute`, acquired on first use. Its cap admits
+/// (§4.5 item 1); `run` needs `Compute`, acquired on first use. Its cap admits
 /// both, so the registration is valid.
 fn tiered_kind() -> Kinds {
     Kinds::new().register(
@@ -380,8 +380,8 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
     let (records, stats) = run_tiered("tier-acquisition", model, "s-4", 71);
 
     // The Workspace call needs no record, opening grants Workspace and nothing
-    // else (§5.6 item 1); the Compute call's acquisition is journaled before its
-    // outcome: intent before effect (§6.4).
+    // else (§4.5 item 1); the Compute call's acquisition is journaled before its
+    // outcome: intent before effect (§3.3).
     assert_eq!(
         record_kinds(&records),
         vec![
@@ -397,7 +397,7 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
         })
         .collect();
     assert_eq!(acquired, vec![Tier::Compute]);
-    // The provider saw each call at its declared tier (§5.3 item 1).
+    // The provider saw each call at its declared tier (§2.3).
     let calls: Vec<(Tier, String)> = stats
         .calls()
         .into_iter()
@@ -430,7 +430,7 @@ fn two_same_step_calls_at_one_new_tier_journal_one_acquisition() {
         .count();
     assert_eq!(
         acquisitions, 1,
-        "the second sibling parks on the first's record, no duplicate (§5.6)"
+        "the second sibling parks on the first's record, no duplicate (§4.5)"
     );
     let outcomes = records
         .iter()
@@ -479,7 +479,7 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
     run_seed(&workload, 79).expect("invariants hold");
 
     let records = records.lock().unwrap();
-    // The fresh environment resets every held tier (§5.5): after the journaled
+    // The fresh environment resets every held tier (§4.4): after the journaled
     // reset, the held set is back to Workspace and the second Compute call
     // re-journals its acquisition, never silently inherited.
     assert_eq!(
@@ -496,7 +496,7 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
 #[should_panic(expected = "outside the tier cap")]
 fn a_tool_beyond_the_cap_is_a_registration_error() {
     // Declaring a tool whose tier the cap excludes is a deployment configuration
-    // error, surfaced at registration as loudly as a duplicate name (§5.3 item 4).
+    // error, surfaced at registration as loudly as a duplicate name (§2.4).
     let _ = Kinds::new().register(
         "worker",
         Kind::new("worker")

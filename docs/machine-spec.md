@@ -1,159 +1,145 @@
-# Persistent Machines: A Durable Lightweight VM as an Entity
+# Persistent Machines: Specification
 
-**Status:** Implemented (`machine-entity`, `machine-host`, `machine-frontdoor`, `machine-proto`, `machine-standalone`).
-**Scope:** A persistent, name-addressed lightweight virtual machine, a **machine**, that a user reaches over SSH and whose whole rootfs survives disconnection, idle hibernation, migration, and node loss. A machine is an entity ([`entity-spec.md`](entity-spec.md)) whose durable state is a raw disk (the disk facet, entity §7.15) plus a synced `/workspace` volume (the workspace facet, entity §7.11; §3), and whose one added seam is the **network seam** (§5). Its sibling, the agent runtime ([`agent-spec.md`](agent-spec.md)), also consumes entity, and both reuse the sandbox's Firecracker `Native` microVM and vsock transport ([`sandbox-spec.md`](sandbox-spec.md) §3.5). A machine is not an agent: it has no run loop, no model seam, and no autonomy.
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119. Other specifications are cited with a prefix; this document's sections are plain §N, and its invariants are M1–M6.
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
+## 1. Scope
 
-Sections of the entity specification are cited as **entity §N** (its invariants as **E1–E21**, the facet contract as **F1–F4**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N** or **actor §N**; the sandbox specification as **sandbox §N** (its invariants as **S1–S5**); the agent runtime as **agent §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **M1, M2, …**.
+A **machine** is a persistent, name-addressed lightweight VM that a person reaches over SSH and whose whole root filesystem survives disconnection, idle hibernation, migration, and node loss. It is an entity ([`entity-spec.md`](entity-spec.md)) of type `MACHINE_TYPE`, keyed by the machine's name, whose durable state is its journal, a disk facet holding the rootfs as a raw block image (facets §4.4), and a workspace facet holding `/workspace` (facets §4.1). Identity, the fence, placement, activation, hibernation, and failover are the entity's, unchanged. The live guest and the client's connection are disposable: stopping either loses no committed block. A machine adds a session-grained durability discipline (§4) and a network seam, ingress (§2.5) and egress (§2.6). Its guest runs under the mechanisms the agent sandbox's `Native` tier also uses (sandbox §4), but where the sandbox confines an autonomous model, a machine is reactive: it does nothing until a person attaches.
 
-> **Design stance.** An entity is an actor plus a name-based virtual identity, a durable event-sourced journal, and a durability barrier on the reply; an agent is an entity plus a self-driving loop, a model seam, and a sandbox. **A machine is an entity plus two things**: durable storage (the rootfs as a disk facet, the `/workspace` volume as a workspace facet; §3) and a network seam (§5). Everything else is the entity's, unchanged: identity (`EntityName`), the journal, the single-writer fence, placement on a shard leader, virtual activation, idle hibernation, and lossless failover.
->
-> A machine inverts the agent's principal: the agent is autonomous, the machine **reactive**. Its principal is a human on an SSH connection, its activation *is* a running microVM, its journal *is* that VM's disk write-log, and it does nothing until someone attaches. Where the agent sandbox persists only a workspace, defaults egress to deny, and forbids ingress (sandbox §1.1), the machine persists the whole rootfs and exists to be connected to and to reach out from (§5).
->
-> The inheritance is literal except for the durability barrier (§4). A terminal cannot gate each keystroke on a quorum append, so the machine's **command unit is a whole session**: the disk is captured at quiescent points, each capture an ordinary command through the entity §6 barrier, and a mid-session crash rewinds the disk to its last capture (M3), never forking or corrupting it. Fewer appends also means a deposed activation may never learn it is deposed, so a live session carries a **session lease**, a periodic fenced append, and self-fences without one (M5).
+### 1.1 Non-goals
 
----
+- **An agent:** no run loop, model seam, or autonomy; agents belong to the agent runtime ([`agent-spec.md`](agent-spec.md)).
+- **Per-keystroke durability:** the disk is durable to the last capture: snapshot crash-consistency, what a real VM gives across power loss (§4).
+- **Live process migration:** a migration or a crash reboots the guest against the last captured image (§5).
+- **A new consensus or isolation technology:** durability and the fence are the entity's, confinement the mechanism's (sandbox §4.4).
+- **Network access for the agent sandbox:** the machine's network seam sits outside the sandbox's tier model (sandbox §1.1) and grants it nothing.
 
-## 1. What a machine is
+## 2. Seams
 
-A **machine** is a virtual, durable, single-activation lightweight VM addressed by an `EntityName`: the entity model (entity §1) specialized like the agent (agent §2), along one axis instead of three:
+### 2.1 The machine entity
 
-| | Entity (entity spec) | Machine (this spec) |
+`Machine` implements the entity's `Entity` trait, the entity layer's plug point, with `Facets = (Disk, Alarm, Ws)`: the disk facet owns the rootfs image (facets §4.4), the alarm facet supplies §4's one timer (facets §4.5), and the workspace facet is `/workspace` (facets §4.1). Its state is `MachineState`, its journal `MachineEvent`, its application failures `MachineError`, and its command surface `Provision`, `Attach`, `Detach`, `DoorPolicy`, `AddKey`, `RevokeKey`, `SetEgress`, `Status`, `WsWrite`, `WsRead`, `WsList`, and `WsRemove` (§3), used by front doors (§2.5) and operator tools.
+
+- The machine MUST stage disk state only from capture commands (§4), one capture manifest each, and MUST NOT stage from `on_deactivate` (facets §3).
+- `can_hibernate` MUST refuse while an attachment is live or the image may hold uncaptured writes.
+- `on_deactivate` MUST stop the guest, whatever ended the activation.
+- Activation MUST NOT boot a guest; only `Attach` does.
+- The facets MUST meet F1–F4 (facets §3).
+
+### 2.2 The runtime binding
+
+The entity drives its guest through `MachineRuntimeProvider` (one per node, injected into the entity factory), which boots one `MachineRuntime` per live guest from a `BootSpec`: the disk facet's image, the journaled sizing, the machine's `EntityName`, and its `EgressPolicy`. It is a plug point: simulation binds the deterministic `FakeRuntimeProvider`, production binds `HostedRuntimeProvider` over the node's mechanism (§2.3). Every failure is one `RuntimeError`, because the entity answers every runtime failure the same way.
+
+- `boot` MUST use `BootSpec::image` in place: the guest writing that file between captures is the persistence model.
+- `pause` MUST NOT resolve while the guest can still write the image, and the guest issues no write until `resume`.
+- `kill` MUST be idempotent, and dropping a runtime MUST kill its guest and release its egress plumbing, so a dropped activation leaks neither.
+- `push_ws` MUST replace the guest's `/workspace` with the facet directory; `pull_ws` MUST flush the guest's filesystem and replace the facet directory with the guest's `/workspace`. A failed pull MUST leave the facet directory unchanged.
+- The provider MUST realize no more egress than `BootSpec::egress` grants (§2.6).
+- The entity MUST push once per boot before answering the first attach, and on a failed push MUST kill the guest and fail the command. It MUST pull while the guest runs, and MUST NOT capture a guest it failed to pause: it kills it instead (§4).
+
+### 2.3 The guest mechanism
+
+`MachineHost` holds a node's guests and `MachineGuest` is one live guest, both in `machine-host` and shared with the agent sandbox's `Native` tier (sandbox §4). A microVM and a container that loop-mounts the same disk image implement them; which one a node runs is configuration, never probed, because the two confinement grades are not interchangeable (sandbox §4.4). A guest is described by a `GuestSpec`, reports its grade as `MachineIsolation`, and fails with `GuestError::Gone` (not here) or `GuestError::Host` (the mechanism failed; the guest may be live).
+
+- A mechanism MUST use `GuestSpec::disk` in place.
+- `MachineGuest::connect` MUST reach the numbered listener inside the guest with one handshake under every mechanism, so one guest agent serves either.
+- `MachineGuest::pause` and `MachineGuest::stop` carry §2.2's pause and kill obligations.
+- `MachineHost::connect_by_key` MUST answer `GuestError::Gone` for a guest this node does not hold.
+- `MachineHost::accepts_tap` MUST be true only where a guest can take a host tap.
+
+Every property of §4 holds under either mechanism; confinement does not. The container grade is shared-kernel and privileged (sandbox §4.4's SHOULD grade) and takes no network device: a development mechanism, not a boundary for untrusted guests.
+
+### 2.4 The guest-agent wire
+
+The user's own rootfs, a plug point the machine's owner supplies, ships the **guest agent**, which answers the host from inside the guest; `machine-proto` is the single definition of their wire, an interop boundary. One stream carries one channel: the host sends a header frame naming a `ChannelKind` (`Pty`, `Exec`, `Sftp` for the front door; `Sync`, `WsPush`, `WsPull` for the workspace sync), then both ends exchange `Frame`s (a `u32` little-endian length, a tag byte, a payload). The interop constants are `AGENT_PORT` (distinct from the sandbox agent's), `MAX_FRAME` (1 MiB), and `MAX_TAR` (64 MiB per workspace stream, the workspace facet's cap).
+
+- A machine image MUST serve the protocol on `AGENT_PORT`, and MUST mount `/workspace` as a volatile filesystem, never a rootfs directory, so the facet is its single durable home (§3).
+- `Sync` MUST flush the guest's page cache to its disk before the agent answers; the host issues it before every capture's pause.
+- The agent is untrusted user code, and a compromise persists in the rootfs. The host MUST refuse a frame or stream past its cap before allocating, MUST bound in time every exchange a boot or capture waits on, and MUST treat what the agent sends as data that widens nothing the host bridges or grants.
+- Holding the stream is the host's authority: the guest performs no second authentication, and no authorized-key material enters it.
+- A broken or removed agent costs front-door access and the workspace cadence, never disk captures.
+
+### 2.5 Ingress: the front door
+
+A **front door** (`serve_connection`) is a cluster member, like the agent runtime's HTTP gateway (edge §2.4), that terminates SSH and bridges authenticated sessions to its machine's guest. The deployment supplies its two plug points: `MachineAuthority`, the cluster half, over the machine's `DoorPolicy`, `Attach`, and `Detach` commands on its leader, and `ChannelBackend`, the guest half, over the node's `MachineHost`. The bridge is node-local: a channel ends at a guest the door's own node holds.
+
+- The door MUST authenticate by public key, verifying possession itself, against the machine's current journaled key set read per connection, and MUST NOT bridge a session for a key that set does not authorize.
+- The door MUST present the machine's journaled host key, so a client's pin survives hibernation, migration, and failover.
+- The principal an attachment journals MUST derive from the authenticating key; a client-asserted name MAY sit beside it.
+- The door MUST journal the attachment (`Attach`) before bridging any channel, SHOULD journal its end (`Detach`) when the connection closes, and MUST open channels only to its own machine's guest.
+- A door whose node does not lead the machine MUST refuse during authentication, journaling and booting nothing. A door refusing for leadership SHOULD say so, distinct from a key refusal.
+- `MachineAuthority::authorizes` MUST fail closed when the machine is unreachable.
+- `Attach` MUST journal `Attached` (id, principal, the holding front-door member, time), boot the guest if none runs, and start the capture cadence (§4). `Detach` journals `Detached` with a `DetachReason` and is idempotent.
+- The machine MUST death-watch the front-door member of every live attachment (actor §2.5) and fold `DetachReason::FrontDoorLost` for one that dies without detaching, so an attachment pins the activation only while something live holds it.
+- Host-key material MUST stay inside the cluster's trust boundary and never reach the guest: `DoorPolicy` alone returns it.
+
+Ingress is thus authenticated, attributable, and isolated (M4). SSH is the realization in the tree; a provider MAY bridge another protocol that meets the three properties.
+
+### 2.6 Egress
+
+Unlike the agent sandbox's per-call default-deny (sandbox §4.3), a machine's guest has a standing outbound path: its egress is a person's, authenticated at attach and attributed per machine. The journaled `EgressPolicy` (`Open` by default, `Allowlist`, or `None`, changed by `SetEgress`) says what the guest may reach; a node's `EgressConfig` (uplink, guest address pool, cluster ranges) is the plug point through which the hosted binding realizes it.
+
+- **Policy-bound:** the provider MUST give the guest no outbound path beyond what the journaled policy grants. An owner or operator MAY narrow it.
+- **Attributable:** the provider MUST be able to attribute egress flows to their machine, joinable with the attachment journal.
+- **Isolated:** whatever the policy grants, the path MUST NOT reach another machine's guest, an agent-sandbox environment, the host's services, or the cluster's control-plane and node-internal addresses, link-local and metadata endpoints included.
+- A policy change MUST apply no later than the machine's next boot; a provider MAY apply it sooner.
+- A node that cannot realize egress (no configuration, no network device at this grade, an exhausted pool, failed plumbing) MUST boot the machine with no network device rather than fail the boot.
+
+These three properties are M6.
+
+## 3. State, provisioning, and the workspace
+
+- **State is metadata:** `MachineState` holds the owner, authorized keys by fingerprint, the host-key seed, the egress policy, sizing, the base image, the checkpoint and lease intervals, and the live attachments, never image or workspace bytes. The idle window is the entity type's `EntityConfig::idle_after` (entity §7).
+- **Provisioning:** `Provision` imports the base image as the disk's first manifest (facets §4.4) and folds `Provisioned` with a host-key seed that MUST come from the system's `Entropy` (actor §2.12.1): secret in production, reproducible in simulation. Until it commits, every command but `Status` and `Detach` answers `MachineError::NotProvisioned`; a second one answers `MachineError::AlreadyProvisioned`.
+- **Access policy:** `AddKey` and `RevokeKey` fold ordinary events. A revocation stops the next attach and does not end a live connection (§7).
+- **The workspace:** the facet directory is the workspace's single durable home; the guest's volatile `/workspace` is filled at boot and drained at every capture (§4), so a crash rewind cannot split two histories.
+- **File commands need no guest:** `WsWrite`, `WsRead`, `WsList`, and `WsRemove` act on the facet directly, a write committing with its delta record. While a guest runs it owns `/workspace` and they answer `MachineError::Running`; otherwise the next boot's push delivers every write. Paths are confined by capability handle (sandbox §4.1), and one command carries at most `MAX_WS_FILE` bytes.
+
+## 4. Durability: the session is the command
+
+The output gate holds a reply until its events are durable (entity §5), and a terminal cannot wait for a quorum per keystroke. So a machine's command unit is a session, and its disk is durable to the last **capture**.
+
+- **Capture:** the disk facet's capture command (facets §4.4), delivered by the checkpoint alarm (facets §4.5), stages one capture manifest through the ordinary barrier, and MUST read the image only with the guest paused or stopped. Between captures the guest writes the image in place: visible to whoever is attached, not committed, and discarded by a non-committed outcome (E20). That is the disk facet's one departure from the physical discipline, and M3 bounds it.
+- **Sequence:** flush (`Sync`), pull the workspace, stage its delta, pause (mid-session) or stop (final), capture the disk, resume. Workspace and disk commit in one batch (E19), the workspace as of the pull and the disk as of the pause. A failed pull journals `WsCaptureSkipped` and the disk capture proceeds. A failed pause stops the guest and skips the disk capture while the pulled delta still commits, leaving the workspace one cadence ahead and the image dirty.
+- **Quiescent points:** (1) when the last attachment goes, the final capture runs at once with the guest stopped, retrying each cadence tick until it commits, after which the entity can hibernate (entity §7); (2) while attached, the checkpoint alarm pauses, captures, and resumes. A machine SHOULD checkpoint at a configured interval while attached, or M3's window is the whole session.
+- **Session lease:** a deposed activation that appends nothing never learns it is deposed and may keep serving (entity §6), here a live terminal. So while attached, the activation MUST commit a fenced append at least once per lease interval. Every alarm fire stages its re-arm record (facets §4.5), so an alarm firing once per `min(checkpoint, lease)` meets it. Any outcome but a contiguous commit ends the activation (entity §5), stopping the guest and severing its attachments (M5).
+- **Planned migration:** a cooperative handoff (storage §5.3) is a forced step-down, which stages nothing (facets §3): lossless for a machine already captured, M3's window for an attached, dirty one (§7).
+- **The relaxed barrier:** a capture counts only once it commits on a quorum; only the frequency relaxes. Only captures append disk state, under the term fence (storage §5), each one record in one batch, so a crash falls back to a consistent prior capture, never a torn composite (F4, E19). The lost-write window is the capture cadence (M3); the doomed-session window is the lease plus one bounded capture and the append timeout (M5).
+
+## 5. Lifecycle and failure
+
+- **Activation on attach:** the first `Attach` activates the entity on its shard leader, paying at most one quorum head-recovery (storage §8, entity §7, E8), and boots a guest against the rehydrated image.
+- **Crash and failover:** the new leader recovers the committed head from a write quorum (storage §5, E14) and boots the last captured image on the next attach. Later writes are lost and the connection dropped; the disk never forks or corrupts (storage §10, E11).
+- **The deposed side:** until the lease expires, a deposed leader's guest can live beside the new leader's, unable to commit. The deposed activation MUST stop its guest and sever its attachments within the lease (§4, M5), and its image is discarded (E20).
+- **Routing:** each connection resolves the current leader; a leadership change severs it rather than rehoming it, and the client reconnects to the new leader's door.
+- **Reporting loss:** a severed connection MUST reach the client as a disconnect, and a channel whose guest end vanished as exit status 255, never as a hang (cf. sandbox §5). A reconnect after a crash MAY see the disk rewound to the last capture (M3), never a mixture of histories (M1).
+
+## 6. Invariants
+
+These hold under the faults of entity §11 and add to E1–E21 and F1–F4. A machine conforms iff M1–M6 hold and its facets meet F1–F4 (facets §3). The machine entity takes time and randomness only from its system (actor §2.12.1), so one simulation seed reproduces an attach, a crash, a partition, a failover, and a reconnect (actor §2.12.2). The Rust copy of this table, with the tests that verify each row, is `machine-entity`'s conformance catalogue.
+
+| # | Invariant | Defined in |
 |---|---|---|
-| Identity | a stable `EntityName` | `MachineId` **is** an `EntityName`: `(entity_type = "machine", key = the machine's name)` |
-| State | event-sourced journal + snapshots | the **disk facet** (entity §7.15): the guest's whole rootfs as a raw block image; plus the **workspace facet** (entity §7.11): the machine's `/workspace` as host-side files (§3) |
-| Activation | fold of the journal on the shard leader | a **running microVM** on the shard leader, its image rehydrated from the disk facet |
-| Reply | held until events are durable (output gate) | **relaxed to session-grained** (§4): the terminal is live; the disk is durable to the last capture |
-| The world reaches it by | `ask`/`tell` (entity §4.3) | an **inbound SSH connection**, through the front door (§5.1) |
+| **M1** | **Single disk, never forked.** Only the shard leader appends disk state, term-fenced (E1), each capture one atomic record (E19), so the rootfs never forks or mixes histories. | §4, §5; storage §5, facets §4.4 |
+| **M2** | **Lossless across idle hibernation.** An idle machine re-activates with the disk as of the final capture, run when the last attachment goes (E12, E14). A cooperative handoff runs no capture, so it is lossless only for a machine already captured. | §4, §5 |
+| **M3** | **Bounded crash window.** On node loss mid-session the disk rewinds to the last committed capture, never a fork or a torn image (E19, F4, E11); the window is the capture cadence. | §4, §5 |
+| **M4** | **Authenticated, attributable, isolated ingress.** A session is bridged only for a key the current journaled policy authorizes; every attachment and detachment is journaled with a principal derived from that key; a session reaches only its own machine's guest. | §2.5 |
+| **M5** | **A deposed activation self-fences within the lease.** While attached it commits a fenced append once per lease interval, or stops its guest and severs its attachments; the deposed guest never commits (M1). | §4, §5 |
+| **M6** | **Policy-bound, attributable, isolated egress.** A guest's outbound path is at most what its policy grants, attributable per machine, and never reaches another guest, a sandbox, the host's services, or cluster-internal addresses. | §2.6 |
 
-Only the entity (its journal, disk-facet blocks, and workspace files) is durable; the live microVM (the activation) and the front-door connection are disposable. Stopping the activation loses no committed disk block: the next activation, on whichever node leads the shard, boots a fresh microVM against the rehydrated image (entity §7.15, §9).
+The workspace adds no invariant: its delta rides the disk's captures (§4), so M1–M3 cover it. A failed pause leaves the workspace one cadence ahead, two consistent points, never a torn image.
 
----
+## 7. Deferred
 
-## 2. Goals and non-goals
-
-### 2.1 Goals
-
-- **A machine by name.** Any node addresses a machine by a stable name; the runtime guarantees at most one *committing* live microVM, routes the name to its leader (entity §5), and bounds how long a deposed one can linger (M5). Front doors are node-local, so a client reconnects to the leader's door after a migration (§5.1, §6).
-- **Whole-rootfs persistence.** Installed packages, home directory, and working files survive disconnection, hibernation, migration, and node loss, as one disk facet over the entity's two storage primitives (entity §7.15), with no new replication mechanism.
-- **Costs nothing while idle.** A machine with no connection hibernates (entity §10): the microVM is torn down after a final capture commits, and the entity holds no thread and no memory until the next attach.
-- **Single-writer safety.** The disk never forks: the shard leader is its only writer, term-fenced (entity §8, E1).
-- **Authenticated, attributable, isolated ingress; policy-bound, attributable, isolated egress.** A connection reaches a machine only with a key the machine authorizes, each attachment is journaled, and a connection reaches only its own machine's guest (§5.1, M4). The guest reaches out only through egress its journaled policy grants, attributed to the machine and never lateral into the cluster or a neighbor (§5.2, M6).
-- **One binding, two mechanisms.** The entity drives its guest through one binding (`MachineRuntimeProvider`); *how* the guest is held (a Firecracker microVM, or a privileged container that loop-mounts the same disk-facet image and chroots into it) is node configuration behind `machine_host::MachineHost`, chosen by an operator's flag, never probed. Both hold the image in place, speak the same guest agent over the same framed channels, and reach quiescent points, so every durable property of §4 holds under either. Confinement differs: the container is shared-kernel and privileged (sandbox §3.4's SHOULD grade), runs no init inside the rootfs, and takes no egress tap, a development mechanism for hosts without `/dev/kvm`, not a boundary for untrusted guests.
-- **Reuse, not reinvention.** The microVM, the vsock transport, and the workspace tar codec are the sandbox's Firecracker `Native` mechanics (sandbox §3.5), shared through the `machine-host` crate. Three things differ: the disk facet replaces the per-call tar path for the rootfs (blocks, not archives); the workspace facet keeps the tar codec for `/workspace`, per quiescent point rather than per call (§3, §4); and the guest half is inverted. The sandbox boots a host-owned `fc-agent` as init over a host-owned image; a machine boots the *user's own rootfs*, which ships the guest agent (§5.1). The vsock peer is therefore untrusted user code, and a guest compromise is durable by design: it persists in the rootfs like the user's files (recovery is restore-from-checkpoint, §8). This spec adds only the network seam, the workspace volume seam (§3), and the session-grained capture policy.
-
-### 2.2 Non-goals
-
-- **An agent.** No run loop, model seam, tool declarations, or budget. A user may run an agent as an ordinary guest process; agents-as-infrastructure belong to the agent runtime (agent spec).
-- **Per-keystroke durability.** The disk is durable to the last capture, not the last write (§4): snapshot crash-consistency, the guarantee a real VM gives across power loss, never exactly-once for a session's tail.
-- **Live process migration.** Running processes are activation-local: a planned migration reboots the guest on the new leader against the last captured image, and a crash drops the connection and the process state (§4, §6). Memory-snapshot warm resume is future work (§8).
-- **A new consensus mechanism, a new isolation technology.** As in the agent runtime (agent §1.1), durability and the fence are the entity's and confinement is the provider's (sandbox §3.4).
-- **Ingress or default egress for the agent sandbox.** The agent sandbox withholds all ingress and defaults egress to deny (sandbox §1.1). The network seam here is the machine's, outside the sandbox tier model, and grants the agent sandbox nothing.
-
----
-
-## 3. The disk and the workspace are the entity's
-
-A machine declares `Facets = (Disk, Alarm, Ws)` and adds no storage of its own: the disk facet (entity §7.15) owns the rootfs image's capture, checkpoint, discard, and rehydration; the alarm facet (entity §7.16) supplies §4's checkpoint timer; the workspace facet (entity §7.11) is `/workspace`. The machine contributes the following.
-
-- **Facet-0 state is metadata.** The entity's folded `State` (`MachineState`) holds shape and policy, nothing bulk: the authorized public keys, the SSH **host key** (§5.1), the egress policy (§5.2), vCPU and memory sizing, the base image reference, the checkpoint and lease intervals, the live **attachment set** (§5.1) with the next attachment id, and three observability counters (`captures`, `ws_captures`, `ws_capture_skips`) folded from the capture events. A climbing `ws_capture_skips` (from `WsCaptureSkipped`, §4) against a flat `ws_captures` reads as a broken or removed guest agent. The idle window is entity's `EntityConfig::idle_after` (entity §10), one number per entity type, so the journal carries no per-machine idle policy. The journal never holds image bytes outside the disk facet's blobs and manifests.
-- **Provisioning is a journaled command, issued out of band.** An explicit `Provision` command (`machine-standalone create`, over the node's admin socket) imports the base image and folds a `Provisioned` event (owner, sizing, base image, a freshly generated host key). Activation is not provisioning: activating an unprovisioned machine folds and boots nothing, and every command answers `MachineError::NotProvisioned` until `Provision` commits, except `Status` (a read, reporting the machine unprovisioned) and `Detach` (an idempotent no-op on a missing attachment). A provisioned disk begins as the base image's checkpoint manifest, so it boots against content-addressed base blocks and diverges by dirty blocks (entity §7.15). Dedup is *within* the machine: the import re-puts the base blocks into the machine's own blob area, so two machines off one base image each pay for it; fleet-wide sharing is deferred (§8). The host key is a 32-byte ed25519 seed drawn from the system's entropy stream (actor §4.6), which the front door (§5.1) expands into the presented key: fresh and secret in production (OS-seeded), reproduced by a replayed seed in the simulator (actor §18.1). The private half lives in facet-0 state, inside the cluster's trust boundary.
-- **Access policy is journaled too.** Adding or revoking an authorized key is an ordinary event; the front door reads the current folded set. A revocation stops the next attach but does not tear down a live connection (a separate administrative action). Egress policy changes the same way, effective from the next activation or live where the provider can.
-- **The workspace is a synced volume, and its durable truth is the facet.** The guest mounts `/workspace` as a **tmpfs**, not a rootfs directory, so the facet's host-side directory is its single durable home: no byte is stored twice, and a crash rewind cannot split two histories. The volume syncs at the session's edges: **pushed** whole into the guest at boot (a failed push kills the VM and fails the attach, so a guest never serves a stale workspace), and **pulled** back at every capture quiescent point (§4), the delta staged into the same command as the disk's capture manifest, one atomic batch (**E19**). Sync uses the sandbox's tar codec (sandbox §3.5) over the guest agent's `WsPush`/`WsPull` channels (§5.1).
-- **File commands need no VM.** `WsWrite`, `WsRead`, `WsList`, and `WsRemove` are ordinary entity commands over the workspace facet. Activation boots no microVM (boot is attach-driven, §6), so an agent or tool reads and writes a hibernated machine's `/workspace` durably (the write and its delta record are one commit) without a boot. Authority is exclusive by liveness: while a microVM runs, the guest owns `/workspace` and file commands refuse (`MachineError::Running`) rather than race the next pull; otherwise the host owns it and the next boot's push delivers every write. Paths are confined by capability handle (sandbox §3.1), and a command's bytes are capped, so no reply or record outgrows its bounds.
-
----
-
-## 4. The session is the command; the capture cadence is the durability grain
-
-The output gate holds a reply until its events are durable (entity §6). A terminal echoes faster than any quorum append, so the machine widens the command unit.
-
-- **A command is a session, bracketed by attach and detach.** The unit of durability is the interval from a connection attaching (§5.1) to the machine's next **quiescent point**. In between, the guest runs freely over vsock with the entity out of the data path; the disk facet captures only at a quiescent point, never mid-write (entity §7.15).
-- **A capture is a command.** Every capture is the disk facet's **capture command** (entity §7.15): a host-delivered command that pauses or stops the guest, drains the dirty set into blobs, stages one capture manifest, and commits through the ordinary barrier (input gate, one atomic batch, output gate). Nothing is staged from `on_deactivate` (entity §7.12): a lifecycle boundary that needs a capture runs the command to completion first, and `can_hibernate` refuses eviction while the image holds uncaptured writes, so the idle path cannot strand a dirty disk.
-- **The workspace pull rides the same command.** The sequence: flush the guest (`Sync`), **pull `/workspace`** (before the pause, since a paused guest cannot answer), stage the workspace delta, pause or stop the guest, capture the disk, resume. The workspace is as-of-pull, the disk as-of-pause; both commit in one batch (E19), skewed by at most the pull's duration. A failed pull skips the workspace staging while the disk capture proceeds, so a broken or removed guest agent degrades only the workspace cadence (§5.1) and the delta waits for the next quiescent point. A failed **pause** is not symmetric: the guest is treated as lost and killed, the disk capture is skipped, and the already-staged workspace delta still commits (it is real pulled bytes), leaving the workspace one cadence ahead of the disk. The image keeps its uncaptured writes and stays pinned dirty (the M3 window) until the next capture catches it up.
-- **Quiescent points, where the capture command runs.** Two:
-  1. **Idle hibernation** (entity §10). When the last attachment goes (§5.1), by `Detach` or by its front door's death, the machine re-arms the checkpoint alarm to fire at once; that fire runs the final capture with the guest **stopped**, leaving the entity clean. A capture that cannot commit keeps the dirty pin and retries at the next cadence tick. The idle window (§3) then governs only hibernation: with the guest gone and the disk captured, `can_hibernate` permits, and the entity hibernates when the window elapses with no new attach.
-  2. **The checkpoint alarm** (entity §7.16): a durable alarm that pauses the guest mid-session, runs the capture command, and resumes. A machine SHOULD set it at a configured interval whenever a connection is attached: a live attachment suppresses point (1) (§5.1), so the alarm is a long session's **only** capture cadence, and without it M3's window grows to the whole session. It doubles as the session lease's fenced append (below).
-- **A planned migration is not capture-coordinated.** A cooperative handoff (entity §8.3, §10) ends the activation through the entity host's forced step-down, and the machine's `on_deactivate` only kills the guest; no capture runs there (entity §7.12). A handoff is therefore lossless exactly when the disk is already captured (a detached machine, or an attached one whose alarm has captured since the guest's last write); an attached, dirty machine loses its writes since the last capture, as in a crash (M3). The checkpoint alarm bounds that window; capturing before a planned handoff is deferred (§8).
-- **The session lease (self-fencing).** Under the relaxed barrier a deposed activation may append nothing and so never learn it is deposed, and entity lets an unfenced minority leader serve stale *reads* "until its activation stops" (entity §7.5); here that read is a live terminal. So while any connection is attached, the activation MUST commit a fenced append at least once per configured **lease interval**. The checkpoint alarm realizes it, fired at `min(checkpoint, lease)`: a fired alarm always stages its consume/re-arm record (entity §7.16), so **every fire is a fenced append**, carrying the capture command when a checkpoint interval has elapsed and the alarm record alone (the heartbeat) otherwise. Any outcome but a contiguous commit (`NotLeader`, `Unavailable`) ends the activation (entity §6), whose `on_deactivate` stops the microVM and severs its attachments, reported as a disconnect (§6). A partitioned machine thus dies within one lease interval plus the append timeout (**M5**).
-- **The relaxed barrier, stated exactly.** Committed disk state is durable to the **last capture**, not the last write. The output gate still governs the capture's record: a capture manifest is not acknowledged, and the machine does not proceed as captured, until it commits on a quorum (entity §6). Only the *frequency* relaxes, from per-message to per-quiescent-point. Between captures the guest's writes live only in the activation-local image, a rebuildable cache (entity §1) that a non-committed outcome discards (entity §7.15, E20).
-- **The bounds.** The disk never forks: only capture commands append disk state, under the term fence (entity §8, M1), each one record in one atomic batch, so a crash never commits part of one and the image falls back to a consistent prior capture, never a torn composite (F4, E19). The lost-write window is the capture cadence (M3), the doomed-session window the lease interval (M5), both configuration.
-
----
-
-## 5. The network seam
-
-The network seam is the one seam the entity does not supply, and it has two directions. As in the sandbox (sandbox §1.1), both are **properties, not products**: a provider MAY realize them with other protocols and plumbing, but the properties bind.
-
-### 5.1 Ingress: the front door
-
-A **front door** terminates SSH and bridges authenticated sessions to the machine's activation. It is a cluster member holding an `EntityRef` per machine, like the agent runtime's gateway (agent §7.3–§7.4).
-
-- **The front door terminates SSH.** It authenticates the client by public key against the machine's journaled authorized-key set (§3), verifying possession itself, and presents the machine's own **host key** (§3), so the client's `known_hosts` pin survives hibernation, migration, and failover. No session is bridged for a key the machine's current policy does not authorize (**M4**).
-- **Resolve, attach, bridge.** The door resolves name → shard → leader by the entity's ordinary routing (entity §5.4). **The bridge is node-local**: a channel ends at a guest this node holds, so a door checks leadership before attaching and serves only the machines its node leads. A door that does not lead the machine refuses the connection during authentication, journaling no attachment and booting no guest, and the client reconnects to the leader's door (§6); a relay is deferred (§8). A leading door sends the leader an `Attach` command; the activation lazily boots the microVM (rehydrating the disk, entity §7.15) and replies with the **attachment id**. The door then bridges the session's channels (PTY, exec, sftp) to the **guest agent** over the machine's vsock; the channel comes from the door's own backend, not from the reply.
-- **The guest side is the guest agent over vsock, not a second authentication.** The base image ships a guest agent listening on vsock (an `sshd` bound to vsock or an equivalent PTY/exec broker), whose channel kinds also carry the workspace sync (`WsPush`/`WsPull`, driven by §4's capture cadence, never by the front door) and the pre-pause flush (`Sync`); the image mounts `/workspace` as the tmpfs those channels fill and drain (§3). vsock is reachable only from the host, so holding the bridged channel *is* the host's authority: the user key set governs the front door, and no `authorized_keys` material enters the guest. The agent is part of the user's own rootfs (§2.1): removing it severs the user's own front-door access (the machine keeps running and capturing; recovery is restore-from-checkpoint, §8), and nothing the guest does to the agent widens what the host will bridge.
-- **Attachment is journaled (attributable).** `Attach` and `Detach` fold `Attached { id, principal, front_door, at_nanos }` and `Detached { id, at_nanos, reason }`, so the journal alone answers "who reached this machine, and when" (**M4**). The `id` is the attachment the reply carries and `Detach` names; `front_door` is the member holding the connection, the death-watch target below.
-- **Attachment liveness.** The front door folds `Detached` when a connection closes, and the activation **death-watches the front-door member** holding each attachment (actor §12): if the door dies without detaching, the watch folds `Detached { reason: FrontDoorLost }` for its attachments. An attachment thus pins an activation only while something provably live holds it; a dead door releases its pins within the death-watch's failure-detection bound, and the idle window runs from that release.
-- **A live attachment pins the activation against hibernation, and against nothing else.** While any connection is attached, `can_hibernate` refuses, suppressing §4's quiescent point (1). No handoff path consults the attachment set, so a cooperative migration moves an attached machine and severs its connection (§4, §6). Routing is **migration-aware between connections**, not within one: each new connection re-resolves the leader, while an established one is severed by a leadership change (§6, M5), never silently rehomed.
-- **Isolation.** By single activation and name routing (entity §1, §5), a connection reaches only its own machine's guest, over that machine's vsock; a machine can neither receive nor observe another's connection. This is the ingress face of agent A7 and sandbox S1.
-
-Ingress is thus *authenticated*, *attributable*, and *isolated* (**M4**). SSH terminated at the front door and bridged over vsock is the reference realization; a provider MAY bridge another protocol that meets the three.
-
-### 5.2 Egress: the machine reaches out
-
-A machine's guest has a standing outbound path, unlike the agent sandbox's per-call default-deny (sandbox §3.3), whose tier model this section leaves untouched (§2.2): the sandbox confines an *autonomous model's* effects, while a machine's egress is a *person's*, authenticated at attach (M4) and attributed per machine. Three properties bind (**M6**):
-
-- **Policy-bound.** The machine's journaled egress policy (§3) grants egress; nothing is ambient. A fresh machine's default is **open internet** (the development-machine posture); an owner or operator MAY narrow it to an allowlist or to none by an ordinary journaled event.
-- **Attributable.** The provider MUST be able to attribute egress flows to the machine that originated them (reference realization: a per-machine interface or address plus flow accounting), joinable with the attachment journal (§5.1) to answer *who was attached while this machine reached what*.
-- **Isolated: no lateral movement.** Whatever the policy grants toward the internet, the egress path MUST NOT reach another machine's guest, any agent-sandbox environment, the host's own services, or the cluster's control plane and node-internal addresses (link-local and metadata endpoints included). The reference realization is a per-machine tap device NAT-ed through a node gateway that filters cluster-internal destinations.
-
-A node realizes egress only when configured for it (`EgressConfig`: the uplink it NATs out, a guest address pool carved into one /30 per running machine, and the cluster's own ranges to drop; in `machine-standalone`, the `node --egress-uplink --egress-pool --cluster-cidr` flags of its `net` feature). Without that configuration, at the container grade (§2.1), or where the plumbing cannot be installed, a machine boots with no NIC rather than failing: egress degrades to none, never past the policy. The policy changes by `SetEgress` (`machine-standalone egress`) and applies from the machine's next boot.
-
----
-
-## 6. Lifecycle and failure
-
-Everything here is an entity primitive; the machine adds only what the microVM and the connection require.
-
-- **Activation on attach.** The first `Attach` (§5.1) activates the entity on its shard leader and boots a microVM against the rehydrated disk. Activation touches no consensus (entity §10, E8): it pays at most one quorum head-recovery (entity §9) plus rehydration of the **whole** image: the facet's restore fetches every block the snapshot and pending capture manifests cover from the blob store into the node-local image file before the first command runs. First-attach latency therefore grows with image size, not with what the session reads; lazy hydration is deferred (§8).
-- **Hibernation on idle.** The final capture runs when the last attachment goes (§4, quiescent point 1), not at the end of the idle window; after a window with no attach, the entity sleeps holding no thread and no memory, its disk and workspace durable (entity §10). Re-activation is identical-state by rehydrate-then-replay (entity §7.15, E12).
-- **Planned migration.** The forced step-down's `on_deactivate` kills the guest and the shard's new leader takes over (entity §8.3, §10), booting against the **last captured** image since no capture runs (§4): lossless (E14) for a detached or already-captured machine, the M3 window for an attached, dirty one, whose connection is severed. The guest's live processes restart either way (§2.2).
-- **Crash and failover.** On ungraceful node loss, the shard's new leader recovers each entity's committed disk head from a write quorum (entity §8, E14) and, on the next attach, boots against the **last captured** image. Writes since that capture are lost and the connection dropped; the disk never forks and never corrupts (CP, entity §11, E11). The lost window is the capture cadence (§4, **M3**).
-- **The deposed side, bounded.** Between a partition and the lease expiry, two live microVMs can exist for one name: the new leader's, able to commit, and the deposed leader's, unable to and not yet aware. The deposed session is doomed: its captures cannot commit and its image will be discarded (E20). Within one lease interval the deposed activation MUST stop the guest and sever its attachments (§4, **M5**).
-- **Reporting loss.** A severed connection is reported to the client as a disconnect, never masked (the ingress analogue of sandbox §4's "loss is reported, never absorbed"); the client reconnects through the front door to the current leader. A reconnect after a crash MAY observe the disk rewound to the last capture (M3); it never observes a mixture of two histories (M1).
-
----
-
-## 7. Invariant catalogue and conformance
-
-These invariants, stated as MUSTs above, are the machine's contract, each holding under the faults of entity §14. They add to the entity's catalogue (E1–E21) and the facet contract (F1–F4).
-
-The catalogue is machine-readable as `m_catalogue()` beside this crate's conformance suite, guarded by the siblings' drift-test pattern (`conformance_catalogue.rs`). Entries name test *functions*, since verification spans the entity's suites, the front door's in `machine-frontdoor`, and the egress rule generator's unit tests in `machine-entity/src/net.rs`; M4 and M6 MUST resolve outside `machine-entity/tests/` (the simulation suites), since neither seam is provable by simulation alone.
-
-| | Invariant | Defined in | Verified by |
-|---|---|---|---|
-| **M1** | **Single disk, never forked.** A machine's disk is the entity's journal plus the disk facet; only the shard leader appends, term-fenced (E1), and each capture is one atomic record (E19), so two activations never both commit disk state and the rootfs never forks and never mixes histories. | §4, §6; entity §8, §7.15 | `the_machine_survives_the_attach_crash_partition_failover_reconnect_story`, `machine_invariants_hold_under_the_cluster_swarm` |
-| **M2** | **Lossless across idle hibernation.** A machine that goes idle re-activates with the disk as of the final capture command, which the idle path runs to completion when the last attachment goes; no write preceding that boundary is lost (E12/E14 applied to the disk facet). A cooperative handoff runs no capture of its own (§4), so it is lossless for a machine already captured and rewinds an attached, dirty one by M3's window. | §4, §6 | `attach_capture_detach_hibernate_reattach_round_trips`, `workspace_files_survive_boot_capture_and_hibernation` |
-| **M3** | **Bounded crash window.** On ungraceful node loss during a live session, the disk rewinds to the last durable capture, never a fork and never a torn image (E19, F4, E11), and writes since are lost. The window is the capture cadence: the checkpoint-alarm interval while attached (SHOULD, §4), the session boundary otherwise. | §4, §6 | `the_machine_survives_the_attach_crash_partition_failover_reconnect_story`, `machine_invariants_hold_under_the_cluster_swarm` |
-| **M4** | **Authenticated, attributable, isolated ingress.** A session is bridged only on possession of a key the machine's current journaled policy authorizes, verified at the front door; each attachment and detachment is journaled with its principal; a bridged session reaches only its own machine's guest, which holds by construction rather than by a test of its own (a door is built around one `EntityName` and opens channels only to that machine's guest). | §5.1 | `an_authorized_key_attaches_and_bridges_an_exec_channel`, `an_unauthorized_key_is_rejected`, `each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation`, `front_door_death_folds_detached_and_releases_the_pin` |
-| **M5** | **A deposed activation self-fences within the lease.** While any connection is attached, the activation commits a fenced append at least once per lease interval; failing that, it stops the microVM and severs its attachments. Two live guests for one name can coexist only within one lease interval, and the deposed one can never commit (M1). | §4, §6 | `the_machine_survives_the_attach_crash_partition_failover_reconnect_story`, `machine_invariants_hold_under_the_cluster_swarm` |
-| **M6** | **Policy-bound, attributable, isolated egress.** A guest's outbound path is exactly what the machine's journaled policy grants, attributable per machine, and can never reach another machine's guest, an agent-sandbox environment, the host's services, or the cluster's internal addresses. | §5.2 | `every_forbidden_class_is_dropped_regardless_of_policy`, `open_policy_accepts_the_internet_after_the_drops`, `allowlist_accepts_only_listed_destinations`, `none_policy_drops_all_egress`, `the_masquerade_counter_attributes_flows_per_machine` |
-
-The workspace facet adds no M-invariant: its delta records ride the disk's capture commands and atomic batches (§4, E19), so M1–M3 cover it and a crash rewinds workspace and disk to the *same* capture. The one skew, §4's failed pause, leaves two consistent points (the workspace one cadence ahead), never a torn image.
-
-A machine implementation conforms iff M1–M6 hold and its declared facets meet F1–F4 (entity §7.12), verified under the entity's deterministic simulation (entity §14): the fence, the capture cadence, the lease, and the crash rewind are seed-driven, so one seed reproduces an attach, a mid-session crash, a partition with a doomed session, a failover, and a reconnect.
-
----
-
-## 8. Future work
-
-- **Memory-snapshot warm resume.** Snapshotting the microVM's *memory* alongside its disk (Firecracker's full snapshot), so a hibernated or migrated machine resumes its running processes instead of rebooting the guest (§2.2), at the cost of memory snapshots stored as blobs and a heavier capture. Paired with warm pools (sandbox §7) it also cuts first-attach boot latency.
-- **Disk lazy block hydration.** The disk facet's deferred refinement (entity §16): faulting image blocks in from checkpoint blobs on first guest access, so a many-gigabyte machine attaches and migrates by touching only the blocks its next session reads, rather than materializing the whole image (§6).
-- **An external object-store home for disk blobs.** A machine's replication cost is nearly all blob bytes (kilobytes of journal against gigabytes of disk blocks stored R× on the shard's own replicas, entity §7.10), so in production the capture blobs' durable home should be an external content-addressed store, the entity's deferred cold blob tier (entity §16): any S3-compatible or homegrown backend behind the blob half of the journal seam, with the shard replicas reduced to read-through caches. The journal stays quorum-replicated, since the fence (M1), the lease (M5), and the attribution (M4) live in the record path; that keeps the store's contract portable: immutable, verified, content-addressed put/get, never a conditional write. A hibernated machine then costs object-store rates rather than R× cluster disk, and its rootfs survives whole-cluster loss. Two costs: the capture command must stage its dirty set and resume the guest *before* the upload, so only the commit waits on the store; and lazy hydration plus a node-local cache become requirements, since a cold attach otherwise pulls the whole image over the wide network. Fleet-wide dedup of base-image blocks is a separate step: the blob area is scoped per entity (§3), so sharing base blocks across machines needs a content scope wider than one machine.
-- **Point-in-time restore and forking.** Checkpoints are content-addressed manifests (entity §7.15), so restoring a machine to an earlier checkpoint, or provisioning a *new* machine from another's checkpoint (fork), is a metadata operation over existing blobs; restore is also the recovery path for a compromised or self-bricked rootfs (§2.1, §5.1). Neither needs new replication; both need policy (who may fork whose image) before mechanism.
-- **Capture before a planned handoff.** A forced step-down is a lifecycle boundary, which stages nothing (entity §7.12; §4), so capturing first needs a handoff protocol that runs the capture command *before* the step-down, at a capture's latency on every planned move. Without it an attached, dirty machine pays M3's window on a rolling restart, which is why the checkpoint alarm is a SHOULD while attached (§4).
-- **Within-connection migration.** Live-migrating an established SSH connection across a leadership change instead of severing it (§5.1, §6). Requires connection-state handoff at the front door and a memory snapshot.
-- **A cross-node front-door relay.** A bridged channel ends at a node-local vsock socket, so each door serves only the machines its node leads, and a client reconnects (§6) when leadership moves. A relay would let any door reach any guest, and would let the door become a separate tier (the shape `agent-gateway` takes for sessions) rather than the in-process one `machine-standalone`'s node runs. Reconnection already covers failover, so this buys placement freedom, not availability.
-- **Richer ingress.** Port forwarding and non-SSH protocols (HTTP preview endpoints, TCP) over the same authenticated, attributable, isolated seam (§5.1), the machine's version of the sandbox's deferred ingress (sandbox §7).
-- **Quotas and multi-tenant economics.** Per-owner machine counts, disk, CPU, and egress budgets, and idle-reap policy: the tenant-level economics the agent runtime defers (agent §1.1, §13).
+- **Warm resume:** a hibernated or migrated machine reboots its guest; resuming processes needs memory snapshots as blobs.
+- **Lazy block hydration:** an attach materializes the whole image, so first-attach latency grows with image size (entity §13).
+- **An external blob store:** capture blobs live on every shard replica; an object store behind the entity's blob seam (entity §13) would cut idle cost and needs lazy hydration.
+- **Fleet-wide base-image sharing:** each machine's import stores its own copy of the base blocks.
+- **Restore and fork:** checkpoints make both metadata operations, and restore is the only recovery for a compromised rootfs; both need a policy first.
+- **Capture before a planned handoff:** a rolling restart costs an attached, dirty machine M3's window.
+- **Within-connection migration:** a leadership change severs established connections.
+- **A cross-node front-door relay:** doors serve only their node's machines, so clients reconnect after a move; a relay also needs transport flow control.
+- **Ending live connections:** no command ends an attached connection; revocation acts on the next attach.
+- **Caller-scoped host-key reads:** the entity answers `DoorPolicy` to any cluster member, not only front doors.
+- **Richer ingress:** port forwarding and non-SSH protocols (sandbox §7).
+- **Quotas:** per-owner counts, disk, CPU, egress budgets, and idle reaping (agent §1.1, §11).

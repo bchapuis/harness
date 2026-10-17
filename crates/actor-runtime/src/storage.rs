@@ -1,4 +1,4 @@
-//! Durable Raft state on the local filesystem (spec §9.4.3 item 2, §9).
+//! Durable Raft state on the local filesystem (spec §6.4.3 item 2, §6).
 //!
 //! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote, log, and
 //! state-machine snapshot survive a process restart, so a restarted voter can never
@@ -11,7 +11,7 @@
 //!   ([`wal::atomic_replace`]). A torn write is impossible: a reader sees either the
 //!   old record or the new one. It stays JSON so that its parse failure is the
 //!   corruption check protecting election safety. The stamp ahead of it
-//!   (`actor.raft.term`, compatibility §3) answers a different question (that
+//!   (`actor.raft.term`, compatibility §4) answers a different question (that
 //!   the bytes are this format at all), so a build skew is refused *by name*
 //!   rather than reported as the corruption this JSON body exists to detect. The
 //!   two have opposite fixes: run the matching build, versus re-seed the node and
@@ -22,10 +22,10 @@
 //!   [`Wal::truncate`](wal::Wal::truncate) at the entry's recorded offset followed by
 //!   [`Wal::append_batch`](wal::Wal::append_batch); both fsync before returning.
 //! - **`snapshot`**: one postcard record `{index, term, data}` for the compacted
-//!   prefix (§9), rewritten by the same atomic replace as `term`. Written *before*
+//!   prefix (§6), rewritten by the same atomic replace as `term`. Written *before*
 //!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
 //!   than the log but never the reverse. Stamped as `actor.raft.snapshot`
-//!   (compatibility §3). This is the format where a *missing* stamp would be most
+//!   (compatibility §4). This is the format where a *missing* stamp would be most
 //!   dangerous: a bare `postcard` body has no first byte a reader can reject, so a
 //!   wrong-format file decodes to a plausible index and `open` then discards the
 //!   log prefix below it.
@@ -79,11 +79,11 @@ use wal::Wal;
 const MAX_RECORD: u32 = 1 << 20;
 
 /// The schema version of this log's `(index, RaftEntry)` records, stamped into the
-/// log's header (compatibility spec §3). A node that cannot read its own log cannot
+/// log's header (compatibility spec §4). A node that cannot read its own log cannot
 /// rejoin without losing committed state.
 const LOG_RECORDS: compat::Format = compat::Format::new("actor.raft.log", 1);
 
-/// The stamp on the `term` file (compatibility spec §3, `actor.raft.term`).
+/// The stamp on the `term` file (compatibility spec §4, `actor.raft.term`).
 ///
 /// `\x89RFTERM\n` follows `wal::MAGIC`'s convention. The body behind it is JSON,
 /// which always begins `{`, and no JSON value may begin `0x89`, so a stamped file
@@ -91,7 +91,7 @@ const LOG_RECORDS: compat::Format = compat::Format::new("actor.raft.log", 1);
 const TERM: compat::Stamp =
     compat::Stamp::new(b"\x89RFTERM\n", compat::Format::new("actor.raft.term", 1));
 
-/// The `term` file's content (spec §9.4.3 item 2): the current term and the
+/// The `term` file's content (spec §6.4.3 item 2): the current term and the
 /// vote cast in it, always written together; they are one atomic decision.
 #[derive(Serialize, Deserialize)]
 struct TermRecord {
@@ -99,7 +99,7 @@ struct TermRecord {
     voted_for: Option<NodeId>,
 }
 
-/// The stamp on the `snapshot` file (compatibility spec §3, `actor.raft.snapshot`).
+/// The stamp on the `snapshot` file (compatibility spec §4, `actor.raft.snapshot`).
 ///
 /// The stamp matters most here. A `postcard` body begins with a varint, so *every*
 /// byte is a possible first byte of one: read as a bare [`SnapshotBody`],
@@ -114,7 +114,7 @@ const SNAPSHOT: compat::Stamp = compat::Stamp::new(
     compat::Format::new("actor.raft.snapshot", 1),
 );
 
-/// The `snapshot` file's content behind the stamp (spec §9): the compacted
+/// The `snapshot` file's content behind the stamp (spec §6): the compacted
 /// prefix's last index and term, and the application snapshot taken at it.
 #[derive(Serialize, Deserialize)]
 struct SnapshotBody {
@@ -253,7 +253,7 @@ impl FileRaftWAL {
     /// `(group, node)`'s state lives in its own `data_dir/<group>/<node>/`
     /// subdirectory, so a node's several Raft groups never share a log. Panics if
     /// a directory cannot be opened: a voter without durable storage must not
-    /// start (spec §9.4.3 item 2).
+    /// start (spec §6.4.3 item 2).
     ///
     /// [`RaftConfig::storage`]: actor_cluster::RaftConfig
     pub fn factory(
@@ -655,7 +655,7 @@ mod tests {
         drop(storage);
 
         // Flip a byte inside the second record's payload. Frames follow the file
-        // header (wal §2.1) and each is `[u32 len][payload][u64 checksum]`, so the
+        // header (`wal::HEADER_LEN` bytes) and each is `[u32 len][payload][u64 checksum]`, so the
         // second frame starts just past the first.
         let log_path = dir.path().join("log");
         let mut bytes = fs::read(&log_path).unwrap();
@@ -736,7 +736,7 @@ mod tests {
         assert_eq!(final_state.load(), mirror.load(), "diverged at the end");
     }
 
-    // --- The stamped files (compatibility spec §3) ----------------------------
+    // --- The stamped files (compatibility spec §4) ----------------------------
 
     /// A stamped `term` file, encoded the way this build reads one. Written here
     /// rather than taken from `persist_term` so the bytes cannot move with the

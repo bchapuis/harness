@@ -1,16 +1,17 @@
-//! The `Native` tier (sandbox spec §3.4): OS processes inside an OCI container;
-//! the development fallback of sandbox spec §3.5, not the microVM grade.
+//! The `Native` tier (sandbox spec §4.4): OS processes inside an OCI container;
+//! the development fallback of sandbox spec §4, not the microVM grade.
 //!
 //! The container itself is `machine_host::container`'s, shared with the persistent
-//! machine's binding (machine §2.1); what is here is what a `Native` call means:
-//! the shell tool, the bind-mounted workspace, and the loss conduct of §4.
+//! machine's binding (machine §2.3); what is here is what a `Native` call means:
+//! the shell tool, the bind-mounted workspace, and the loss conduct of §5.
 //!
-//! Confinement here is **shared-kernel** (§3.4's SHOULD grade): the
+//! Confinement here is **shared-kernel** (§4.4's SHOULD grade): the
 //! container sees the session workspace bind-mounted at `/workspace`, no
 //! network (`--network none`), and nothing else, but the guest still speaks
 //! to the host kernel, so the guarantee is priced by kernel
 //! privilege-escalation bugs. Multi-tenant deployments SHOULD NOT rely on it
-//! alone.
+//! alone. On macOS, Docker Desktop's Linux VM is an incidental layer, not the
+//! microVM grade.
 //!
 //! Conduct:
 //!
@@ -29,7 +30,7 @@
 //!   the container being gone (`GuestError::Gone`, judged from the daemon's own
 //!   stderr rather than an exit code a user command can forge) from a command
 //!   that merely failed. This tier turns the former into single-tier loss
-//!   (sandbox spec §4): the slot is forgotten and the next call re-provisions
+//!   (sandbox spec §5): the slot is forgotten and the next call re-provisions
 //!   lazily under the acquisition this activation already journaled. A vanished
 //!   *workspace* escalates to `EnvironmentLost` in the provider, as for every
 //!   tier.
@@ -87,13 +88,13 @@ fn readable(session: &str) -> String {
 }
 
 /// One session's native tier: a container provisioned lazily on the first
-/// `Native` call (sandbox spec §2.3 item 2), removed on release (S5).
+/// `Native` call (sandbox spec §3.3 item 2), removed on release (S5).
 pub(crate) struct NativeTier {
     /// This node's container mechanism, which owns every CLI invocation
     /// (`machine_host::container`): the tier owns what a `Native` call *means*.
     host: ContainerHost,
     /// The profile's image reference, provider-interpreted (agent spec
-    /// §5.3 item 4). Empty fails per-call: no silent network-pulled default.
+    /// §2.4). Empty fails per-call: no silent network-pulled default.
     image: String,
     /// Host path of the session workspace, retained for the bind mount only
     /// (module docs).
@@ -154,7 +155,7 @@ impl NativeTier {
             })),
             Err(e) => {
                 // The container (or the daemon under it) is gone while the
-                // workspace survives: single-tier loss (sandbox spec §4).
+                // workspace survives: single-tier loss (sandbox spec §5).
                 // Forget the slot (the next call MAY re-provision lazily under
                 // the acquisition this activation already journaled), and fail
                 // this call as an ordinary outcome, never a silent re-grant.
@@ -180,7 +181,7 @@ impl NativeTier {
     }
 
     /// Run the session's container (lazily, on the first call that carries the
-    /// tier: sandbox spec §2.3 item 2).
+    /// tier: sandbox spec §3.3 item 2).
     async fn provision(&self) -> Result<ContainerGuest, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let mut spec = ContainerSpec::image(self.key.clone(), &self.image)

@@ -1,14 +1,14 @@
-//! Record subscriptions under the cluster fault swarm (entity §7.9, §14,
+//! Record subscriptions under the cluster fault swarm (entity §6.3, §11,
 //! invariant **E16**).
 //!
-//! `tests/subscription_faults.rs` scripts the §14 subscription cases one at a
+//! `tests/subscription_faults.rs` scripts the subscription fault cases one at a
 //! time (a leader crash mid-stream, a burst that overflows the sink's buffer).
 //! This file sweeps seeds while the nemesis partitions, freezes, crashes, and
 //! restarts nodes underneath a live subscription, and checks E16 on whatever
 //! history each seed produced.
 //!
-//! The spec (§14) requires fault injection to produce four cases; the workload
-//! induces rather than scripts them:
+//! E16 is only as strong as the faults behind it, so fault injection must
+//! produce four cases; the workload induces rather than scripts them:
 //!
 //! - **A leader move mid-stream.** The nemesis partitions and crashes; a shard
 //!   whose leader is cut off elects another, and push stops without notice. The
@@ -63,12 +63,12 @@ use support::log::ReadFrom;
 use support::log::collect_until;
 
 /// Short enough that the pauses below cross it, so the entity deactivates with a
-/// subscriber attached (§14's hibernation case).
+/// subscriber attached (the module doc's hibernation case).
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// A writer's pause between bursts: past [`IDLE_AFTER`] on purpose.
 const IDLE_FOR: Duration = Duration::from_millis(400);
 /// Shorter than a faulted quorum round, so some appends time out and commit
-/// afterwards (§14's late-commit case).
+/// afterwards (the module doc's late-commit case).
 const APPEND_DEADLINE: Duration = Duration::from_millis(600);
 /// How long the collector keeps reconciling after the writers stop. Long enough
 /// for a post-move backfill to run; the run's own settle window covers the rest.
@@ -115,8 +115,8 @@ impl ClusterWorkload for SubscriptionSwarm {
     }
 
     fn rehost(&self) -> Option<Rehost> {
-        // Process death moves a shard's leader mid-stream, the first case §14
-        // asks for; the re-hosted successor keeps the shard servable afterwards.
+        // Process death moves a shard's leader mid-stream, the first case listed
+        // in the module doc; the re-hosted successor keeps the shard servable afterwards.
         Some(Arc::new(|node: &SimNode| {
             node.entities::<LogEntity>(config());
         }))
@@ -230,7 +230,7 @@ impl ClusterWorkload for SubscriptionSwarm {
             // The sink may legitimately trail the head: it stopped on a deadline
             // while writes were still landing. What it did reconstruct must be an
             // exact prefix: every record it produced is the committed record at
-            // that slot, in order, with no gap or duplicate (§7.9, E16).
+            // that slot, in order, with no gap or duplicate (§6.3, E16).
             assert!(
                 reconstructed.len() <= committed.len(),
                 "the sink reconstructed {} records but only {} ever committed: \

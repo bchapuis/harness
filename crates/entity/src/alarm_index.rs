@@ -1,4 +1,4 @@
-//! The per-shard alarm index (spec §7.16): a durable directory of the pending
+//! The per-shard alarm index (spec facets §4.5): a durable directory of the pending
 //! [`Alarm`](crate::alarm::Alarm) deadlines of one entity type's entities, so a node that
 //! acquires a shard's leadership can re-activate the entities that owe a callerless
 //! wake; **without** scanning every entity or holding them all resident.
@@ -7,12 +7,12 @@
 //!
 //! An alarm fires from an in-activation timer, so a resident entity always fires on
 //! time. The gap is every **deactivation**: a failover deactivates a shard's entities
-//! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
+//! (a forced step-down, §10), and idle hibernation would otherwise pin an alarmed
 //! entity resident forever, in either case an alarm with no caller would sleep
 //! until the entity is next touched. Each [`Host`](crate::host::Host) registers its
 //! entity's pending deadline here on every alarm change; the alarm **driver** reads
 //! the index for the shards its node leads and re-activates each pending entity,
-//! whose [`on_activate`](crate::Entity::on_activate) re-arms its own timer (**E3**).
+//! whose host re-arms the timer from the folded deadline as rehydration ends (**E3**).
 //! The index is a *hint* (the entity's own alarm facet is the source of truth), so a
 //! stale entry is reconciled on the next activation, never a lost or double fire. The
 //! one place a *missing* entry would be unrecoverable is a voluntarily hibernated
@@ -25,10 +25,10 @@
 //! [`index_key`]-style, holding an `EntityName → due-nanos` map: a small
 //! event-sourced map with a pure fold, mirroring
 //! [`tenancy::Directory`](../../tenancy/index.html). Reads
-//! (`due_before`) serve locally from the activation (§7.5); registration is
-//! idempotent (§7.5), so a re-register of an unchanged deadline commits nothing.
+//! (`due_before`) serve locally from the activation (§6); registration is
+//! idempotent (§6), so a re-register of an unchanged deadline commits nothing.
 //! Registration is an **acknowledged** `ask`: the reply releases only after this
-//! entity's commit (the output gate, §6), which is what lets a host treat an acked
+//! entity's commit (the output gate, §5), which is what lets a host treat an acked
 //! deadline as durably indexed and hibernate with its alarm pending (host.rs).
 
 use std::collections::BTreeMap;
@@ -65,7 +65,7 @@ struct Slot {
     head: u64,
 }
 
-/// The index's journal record: the unit of durable change (entity §4.1). The fold
+/// The index's journal record: the unit of durable change (entity §3.1). The fold
 /// is pure (no clock, no I/O), so live commit and replay agree (**E2**).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Change {
@@ -111,7 +111,7 @@ impl Pending {
 }
 
 /// A per-shard alarm index for one target entity type: a durable `EntityName → due`
-/// directory (spec §7.16). Generic over the hosting system so it runs on either
+/// directory (spec facets §4.5). Generic over the hosting system so it runs on either
 /// durability tier; the activation's state is the folded [`Pending`] map, rebuilt
 /// from the journal (entity §1).
 pub struct AlarmIndex<S>(PhantomData<fn() -> S>);
@@ -155,11 +155,11 @@ impl<S: EntitySystem> Entity for AlarmIndex<S> {
     }
 }
 
-/// Sync an entity's alarm state into the index at a journal head (spec §7.16). `due` is
+/// Sync an entity's alarm state into the index at a journal head (spec facets §4.5). `due` is
 /// `Some(ns)` while an alarm is pending, `None` once it clears. Applied only if
 /// `head` is at least the entry's last head, so an out-of-order pair from one
 /// activation resolves to the higher head (see `Slot`). Idempotent: an
-/// unchanged `(due, head)` commits nothing (§7.5).
+/// unchanged `(due, head)` commits nothing (§6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sync {
     pub entity: EntityName,
@@ -198,7 +198,7 @@ impl<S: EntitySystem> EntityHandler<Sync> for AlarmIndex<S> {
 }
 
 /// The registered entities due at or before `before` (nanoseconds): the driver's
-/// sweep query. A read; emits no events (§7.5).
+/// sweep query. A read; emits no events (§6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DueBefore {
     pub before: u64,

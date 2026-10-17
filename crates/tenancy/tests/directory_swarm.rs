@@ -1,9 +1,9 @@
-//! The directory entity under the cluster fault swarm (entity §14).
+//! The directory entity under the cluster fault swarm (entity §11).
 //!
 //! `tests/directory.rs` drives the ownership contract on the single-node `Local`
 //! tier, where nothing is lost, duplicated, or delayed. This file puts the same
 //! entity on a leader-based cluster and sweeps seeds while the nemesis partitions,
-//! freezes, crashes, and restarts nodes under it, with the §13 event stream
+//! freezes, crashes, and restarts nodes under it, with the §10 event stream
 //! watched live.
 //!
 //! # What the sweep can and cannot claim
@@ -16,12 +16,12 @@
 //!
 //! What it deliberately does **not** assert is any end state a *re-delivered
 //! mutation* could change. The wire is at-most-once and may duplicate a request
-//! frame and delay it (actor §7.2, §18.3), so a duplicate of an earlier `Forget`
+//! frame and delay it (actor §4, §10), so a duplicate of an earlier `Forget`
 //! can arrive **after** a later `Record` and undo it. Nothing in the directory
 //! rejects that: its mutating operations carry no idempotency key, so a re-applied
 //! one is indistinguishable from a fresh one.
 //!
-//! That is the framework's contract rather than a defect in it: spec §7.2 puts
+//! That is the framework's contract rather than a defect in it: spec storage §4 puts
 //! exactly-once out of scope, "built atop this layer with explicit idempotency
 //! keys".
 //!
@@ -124,14 +124,14 @@ fn churn(client: usize, n: u64) -> EntityName {
 
 /// The keep names whose `Record` was acknowledged, per principal. A call that
 /// failed says nothing either way: the record may sit on a replica minority and
-/// be adopted by a later recovery (§7.2, §11), so it is not tracked.
+/// be adopted by a later recovery (storage §4, §10), so it is not tracked.
 #[derive(Default)]
 struct Acked {
     recorded: BTreeSet<(String, EntityName)>,
 }
 
 /// Record-and-forget traffic against a handful of principals' directories,
-/// driven through the public `EntityRef` API only (actor §18.4).
+/// driven through the public `EntityRef` API only (docs/simulation-testing.md).
 struct DirectorySwarm {
     nodes: usize,
     clients: usize,
@@ -183,7 +183,7 @@ impl ClusterWorkload for DirectorySwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (§7.6); every node is a control voter so the map group can form.
+        // (storage §6); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -308,7 +308,7 @@ impl ClusterWorkload for DirectorySwarm {
             };
             // Ask about each name with a *writing* command, not `List`.
             //
-            // `List` is a query, and a query commits nothing, so §7.5 serves it
+            // `List` is a query, and a query commits nothing, so §6 serves it
             // from the activation: "read-your-leader (relaxed), not linearizable
             // under partition"; a deposed-but-unfenced leader may answer from
             // stale state, and a quorum-less recovery may have seeded that state
@@ -317,7 +317,7 @@ impl ClusterWorkload for DirectorySwarm {
             // failed about one seed in eight hundred for exactly that reason.
             //
             // The spec names the construction in the same paragraph: issue a
-            // trivial writing command, which rides the §6 output gate and so
+            // trivial writing command, which rides the §5 output gate and so
             // "commits through the shard leader and reflects committed state, or
             // fails". `Record` with *different* metadata is one: it commits either
             // way, and its reply is the committed answer to the question asked;

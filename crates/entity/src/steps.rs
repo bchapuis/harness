@@ -1,4 +1,4 @@
-//! The steps facet (spec §7.17): durable **step memoization** for the
+//! The steps facet (spec facets §4.6): durable **step memoization** for the
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event
 //! fold, the [`Alarm`](crate::alarm::Alarm) facet, and an entity's self-driving loop.
 //!
@@ -15,7 +15,7 @@
 //! **What the entity still wires.** Launching a step's effect off the command path
 //! and self-`tell`ing its result back is entity-specific (the effect's type is), so
 //! the facet supplies only the durable half. Not implemented: a linear `async` DSL
-//! over these (§16).
+//! over these (§13).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -40,17 +40,17 @@ use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
 
 /// A step's identity: its stable call-site ordinal within the consumer's step
-/// sequence (spec §7.17). Must be assigned deterministically across re-drives and
+/// sequence (spec facets §4.6). Must be assigned deterministically across re-drives and
 /// replay, so a completed step resolves to the same memoized result every time.
 pub type StepId = u32;
 
-/// The steps facet marker (spec §7.17): declare `type Facets = (Steps, Alarm, …)`
+/// The steps facet marker (spec facets §4.6): declare `type Facets = (Steps, Alarm, …)`
 /// and reach the memoized steps through [`EntityCtx::steps`](crate::EntityCtx::steps).
 pub struct Steps;
 
 impl Sealed for Steps {}
 
-/// One steps record (spec §7.17): a step's memoized result under the steps tag.
+/// One steps record (spec facets §4.6): a step's memoized result under the steps tag.
 /// `bytes` is the caller's `postcard`-encoded step output: opaque to the facet.
 #[derive(Serialize, Deserialize)]
 struct StepRecord {
@@ -64,7 +64,7 @@ pub struct StepsForm {
     steps: BTreeMap<StepId, Vec<u8>>,
 }
 
-/// The per-command stage (spec §7.12): the step results recorded this command,
+/// The per-command stage (spec facets §3): the step results recorded this command,
 /// draining to one record each. A step recorded twice in one command keeps the last
 /// (a re-drive within a command should not happen, but last-write matches the fold).
 #[derive(Default)]
@@ -108,7 +108,7 @@ impl Facet for Steps {
     }
 }
 
-/// The handler-facing step-memo accessor (spec §7.17), obtained from
+/// The handler-facing step-memo accessor (spec facets §4.6), obtained from
 /// [`EntityCtx::steps`](crate::EntityCtx::steps).
 pub struct StepsHandle<'a, G: Entity, I>
 where
@@ -119,9 +119,9 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's step memo (spec §7.17). Compiles exactly when the entity
+    /// The entity's step memo (spec facets §4.6). Compiles exactly when the entity
     /// declares the [`Steps`] facet (`type Facets = (Steps, …)`). Recording is
-    /// valid only inside a command handler (§7.12); reads are valid anywhere.
+    /// valid only inside a command handler (facets §3); reads are valid anywhere.
     pub fn steps<I>(&self) -> StepsHandle<'_, G, I>
     where
         G::Facets: HasFacet<Steps, I>,
@@ -139,7 +139,7 @@ where
 {
     /// The memoized result of step `id`, decoded, or `None` if the step has not yet
     /// completed. Resolves a result recorded earlier this command over the committed
-    /// map (read-your-staged-writes, §7.12). A completed step returns `Some` on every
+    /// map (read-your-staged-writes, facets §3). A completed step returns `Some` on every
     /// re-drive and after any replay.
     pub fn result<T: DeserializeOwned>(&self, id: StepId) -> Result<Option<T>, EntityError> {
         let bytes = self.cell.with_overlay::<Steps, I, _>(|form, stage| {
@@ -165,7 +165,7 @@ where
         })
     }
 
-    /// Record step `id`'s result, staged into this command's atomic batch (§7.12).
+    /// Record step `id`'s result, staged into this command's atomic batch (facets §3).
     /// Called from the handler that receives a step effect's outcome (typically the
     /// [`StepDone`] handler via [`complete_step`]).
     pub fn record<T: Serialize>(&self, id: StepId, value: &T) {
@@ -181,7 +181,7 @@ where
 }
 
 /// The generic command a step's off-path effect self-`tell`s back with its encoded
-/// result (spec §7.17). The entity accepts it (`r.accept::<StepDone>()`) and its
+/// result (spec facets §4.6). The entity accepts it (`r.accept::<StepDone>()`) and its
 /// handler calls [`complete_step`] to journal the result, after which a re-drive
 /// resolves the step from the memo. A local self-`tell`, like the alarm and idle
 /// ticks.
@@ -211,7 +211,7 @@ impl Message for StepDone {
 /// Journal a returned step result: the body of an entity's `EntityHandler<StepDone>`.
 /// Stages the memo record so the step resolves on the next drive, unless it is
 /// already recorded (a duplicate `StepDone` after a re-launch commits nothing, the
-/// idempotency §7.5 gives for free). Returns the empty event list the handler
+/// idempotency §6 gives for free). Returns the empty event list the handler
 /// journals: the steps facet carries the durable change.
 pub fn complete_step<G, I>(ctx: &EntityCtx<G>, msg: StepDone) -> Vec<G::Event>
 where
@@ -225,7 +225,7 @@ where
 }
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
-/// already launched (spec §7.17), the launch-once half of the step pattern.
+/// already launched (spec facets §4.6), the launch-once half of the step pattern.
 /// Never journaled: a re-activation rebuilds it and re-launches any step still
 /// unresolved in the memo (the memo stays write-once because the *result*, not
 /// the launch, is the durable fact).

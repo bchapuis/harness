@@ -74,7 +74,7 @@ fn the_catalogue_covers_s1_through_s5() {
 #[test]
 fn no_entry_claims_a_continuous_checker() {
     // S4 is a journal audit at quiescence, never a stream checker: tool
-    // execution carries no events for one to consume (agent spec §5.6
+    // execution carries no events for one to consume (agent spec §4.5
     // item 6). Anyone adding a `Verify::Checker` entry here must wire the
     // checker into a live invariant set first, and then this assertion,
     // like its agent sibling, becomes the drift test between the two.

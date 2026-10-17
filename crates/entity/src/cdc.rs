@@ -1,7 +1,7 @@
 //! Content-defined chunking: cut a byte string at boundaries the *content*
 //! chooses, so an edit disturbs only the chunks it touches.
 //!
-//! The checkpointing facets cut at fixed offsets and are right to (§7.14, §7.15):
+//! The checkpointing facets cut at fixed offsets and are right to (facets §4.3, §4.4):
 //! a SQLite page and a disk block live at a fixed address, so an unchanged page
 //! occupies the same offsets in the next image and hashes to a blob already
 //! stored. Facet 0's `State` has no such addressing. It is a re-encoded value
@@ -15,7 +15,7 @@
 //! property of the bytes around it and not of its distance from the start: insert
 //! a kilobyte and the boundaries after it shift with the content, so the chunks
 //! after the edit are byte-identical to before and dedup against blobs already
-//! stored (§7.10).
+//! stored (storage §9).
 //!
 //! The hash is FastCDC's gear function without normalized chunking:
 //! `h = (h << 1) + GEAR[byte]`, cut when the top bits are clear. Normalization

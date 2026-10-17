@@ -9,7 +9,7 @@
 //!    workflow §3.1) even though a synthesized call id repeats across runs.
 //! 2. A straggler outcome of an ended run must not release the successor run's
 //!    launch claim, and a superseded call's response must never journal a second
-//!    `ModelResponse` for a step (§3.1 step 2, §9.1 item 4).
+//!    `ModelResponse` for a step (§3.2 step 2, §7.1 item 4).
 
 mod support;
 
@@ -128,7 +128,7 @@ fn a_submit_racing_the_post_end_advance_starts_clean() {
 fn a_straggler_model_done_never_unlocks_a_second_call() {
     // Deterministic timeline (10s model calls, 30s tool calls):
     //   t=0   run A starts; its model call flies until t=10.
-    //   t=1   run A is cancelled; the call keeps flying (§9.2 item 4).
+    //   t=1   run A is cancelled; the call keeps flying (§7.2 item 4).
     //   t=2   run B starts; its own model call flies until t=12.
     //   t=9   the first wait on B lapses (7s deadline).
     //   t=10  run A's straggler outcome lands, after B's call launched,
@@ -194,7 +194,7 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     );
     run_seed(&workload, 61).expect("invariants hold");
 
-    // Exactly one `ModelResponse` per step of run B (§3.1 step 2): the
+    // Exactly one `ModelResponse` per step of run B (§3.2 step 2): the
     // straggler neither journaled nor unlocked a duplicate call.
     let records = records.lock().unwrap();
     assert_eq!(

@@ -1,4 +1,4 @@
-//! Policy-bound, attributable, isolated egress (machine spec §5.2, M6).
+//! Policy-bound, attributable, isolated egress (machine spec §2.6, M6).
 //!
 //! A machine's guest gets an outbound path, unlike the agent sandbox, whose
 //! egress is default-deny per tool call. Three properties bind (M6):
@@ -57,7 +57,7 @@ const FORBIDDEN_V6: &[&str] = &[
     "::1/128",   // loopback
 ];
 
-/// Generate the nftables ruleset for one machine's egress (machine §5.2). One
+/// Generate the nftables ruleset for one machine's egress (machine §2.6). One
 /// chain per machine (named by [`tap_name`]): the forbidden-destination drops
 /// first, then the policy, then NAT masquerade out the node uplink with a
 /// counter for attribution.
@@ -135,7 +135,7 @@ pub(crate) fn nft_ruleset(
     out
 }
 
-/// Deployment-level egress configuration for a node (machine §5.2): the ranges
+/// Deployment-level egress configuration for a node (machine §2.6): the ranges
 /// the ruleset must fence off, the uplink it masquerades out, and the address
 /// pool per-machine guest /30s are carved from. The per-machine half (which
 /// slot, which policy) is decided per boot. Its presence is what turns egress
@@ -158,7 +158,7 @@ pub struct EgressConfig {
     pub guest_pool_slots: u32,
 }
 
-/// One machine's realized guest addressing (machine §5.2), carved from the
+/// One machine's realized guest addressing (machine §2.6), carved from the
 /// node's [`EgressConfig`] pool: the tap the guest's virtio-net binds to, the
 /// two addresses of its /30, and the guest's MAC.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,7 +188,7 @@ pub(crate) fn guest_mac(machine: &EntityName) -> String {
 }
 
 /// Carve the `index`-th guest /30 out of the pool based at `pool_base`
-/// (machine §5.2). Pure: the same machine + index always maps to the same
+/// (machine §2.6). Pure: the same machine + index always maps to the same
 /// addresses, so a crash-and-reboot that reallocates the same slot lands the
 /// same guest address.
 pub(crate) fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> GuestNet {
@@ -210,7 +210,7 @@ pub(crate) fn guest_ip_boot_arg(net: &GuestNet) -> String {
     format!("ip={}::{}:255.255.255.252::eth0:off", net.guest, net.host)
 }
 
-/// A node-local allocator for per-machine guest /30 slots (machine §5.2). One
+/// A node-local allocator for per-machine guest /30 slots (machine §2.6). One
 /// per node; a boot takes the lowest free slot and a kill returns it, so a
 /// machine that comes and goes never exhausts the pool.
 #[derive(Debug)]
@@ -241,7 +241,7 @@ impl GuestPool {
     }
 }
 
-/// Apply a machine's egress plumbing (machine §5.2): create the tap device,
+/// Apply a machine's egress plumbing (machine §2.6): create the tap device,
 /// address it, enable forwarding, and load the nftables ruleset. Linux +
 /// `CAP_NET_ADMIN` only; shells out to `ip`, `sysctl`, and `nft`. Returns an
 /// error the caller logs and degrades on, booting the machine without a NIC

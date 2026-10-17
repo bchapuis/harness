@@ -1,5 +1,5 @@
 //! The shard map: a consensus-agreed record of which nodes replicate each shard
-//! (spec §7.6).
+//! (spec storage §6).
 //!
 //! Storage distribution needs every node to agree on a shard's replica set, and a
 //! per-node view of live membership at `entities()` time would diverge with join
@@ -14,7 +14,7 @@
 //! [`LocalShardMap`] (the `Local` tier) and the [`RaftShardMap`] over a clustered system
 //! (the `Quorum` tier). The map records each shard's key range and replica set;
 //! the allocator rebalances replica sets as membership changes, and the partition
-//! itself changes on a shard **split** or **merge** (§7.7): driven by the
+//! itself changes on a shard **split** or **merge** (storage §7): driven by the
 //! `split_loop`/`merge_loop` on the shard leader, committed through this same log
 //! (`SplitStarted`/`SplitCommitted`, `MergeStarted`/`MergeCommitted`).
 
@@ -55,7 +55,7 @@ use crate::system::select_replicas_in;
 /// once the allocation is complete.
 const ALLOCATE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// A node's read access to the shard map (spec §7.6): which nodes replicate a
+/// A node's read access to the shard map (spec storage §6): which nodes replicate a
 /// shard, and (if this node is one of them) the local store for it. The map
 /// analogue of [`DynEntityJournal`]; erases the consensus type so the gateway stays
 /// generic over just the entity.
@@ -68,10 +68,10 @@ pub trait ShardMapSource: Send + Sync + 'static {
     /// it and has built the journal.
     fn journal(&self, shard: u32) -> Option<Arc<dyn DynEntityJournal>>;
 
-    /// The shard whose committed key range contains `hash` (spec §5.1), or `None`
+    /// The shard whose committed key range contains `hash` (spec §4.1), or `None`
     /// while the map is still bootstrapping (or on a routing-only client, which
     /// never holds the allocation). The authority once ranges have committed:
-    /// after a split or merge (§7.7) only the map knows the partition; the
+    /// after a split or merge (storage §7) only the map knows the partition; the
     /// founding [`shard_for`](crate::system::shard_for) fallback covers only bootstrap.
     fn shard_of(&self, hash: u64) -> Option<u32>;
 
@@ -80,7 +80,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
     /// map bootstraps or on a routing-only client.
     fn shard_indices(&self) -> Vec<u32>;
 
-    /// Request a split of `shard` at its range midpoint (§7.7), the admin/test
+    /// Request a split of `shard` at its range midpoint (storage §7), the admin/test
     /// seam behind [`Entities::split_shard`](crate::Entities::split_shard); the
     /// size trigger proposes through the same path. Best-effort: the request is
     /// picked up by the split proposer, validated against committed state, and
@@ -111,7 +111,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
     }
 
     /// Why this node stopped tracking the committed allocation, or `None` while
-    /// healthy (spec §7.6). One-way: nothing clears it, because nothing here can
+    /// healthy (spec storage §6). One-way: nothing clears it, because nothing here can
     /// establish that the entry became readable.
     ///
     /// Set when a committed map command cannot be decoded (`admit`). A poisoned
@@ -128,7 +128,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
     }
 
     /// Request a merge of `shard` with its **right** neighbour: the shard whose
-    /// range begins just past `shard`'s (§7.7), the mirror of a split. The seam
+    /// range begins just past `shard`'s (storage §7), the mirror of a split. The seam
     /// behind [`Entities::merge_shards`](crate::Entities::merge_shards). Best-
     /// effort: validated against committed state and silently dropped if either
     /// shard is unknown, not adjacent, or not idle. A no-op on the `Local` tier
@@ -136,7 +136,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
     fn request_merge(&self, _left: u32) {}
 }
 
-/// Resolve an entity key to its shard (spec §5.1): the committed key-range
+/// Resolve an entity key to its shard (spec §4.1): the committed key-range
 /// partition once the map has it ([`ShardMapSource::shard_of`]), else the
 /// founding partition ([`shard_for`](crate::system::shard_for)) while the map
 /// bootstraps; the two agree until the first split/merge, which only ever
@@ -169,16 +169,16 @@ fn shard_group_id(entity_type: &'static str, index: u32) -> GroupId {
     group_id_for(ShardId { entity_type, index })
 }
 
-/// One committed allocation command in the map group's log (spec §7.6, §7.7).
+/// One committed allocation command in the map group's log (spec storage §6, §7).
 #[derive(Serialize, Deserialize)]
 enum ShardMapCommand {
     /// Shard `shard` owns the key range `range` and is replicated by `replicas`:
-    /// the only nodes that hold its data and can lead it (§7.1). The **founding**
+    /// the only nodes that hold its data and can lead it (storage §3.1). The **founding**
     /// `Assign` sets the shard's range and replica set outright; a later `Assign`
     /// onto an already-allocated shard starts a **migration** toward `replicas`
-    /// (the committed `target`, §7.7): writes and recoveries switch to the joint
+    /// (the committed `target`, storage §6): writes and recoveries switch to the joint
     /// quorum, and the leader's migration driver catches every entity up on the
-    /// target set. Migration never moves the range, only a split or merge (§7.7)
+    /// target set. Migration never moves the range, only a split or merge (storage §7)
     /// changes the partition, so a non-founding `Assign`'s `range` is ignored.
     Assign {
         shard: u32,
@@ -187,10 +187,10 @@ enum ShardMapCommand {
     },
     /// The migration for `shard` is complete (every entity's records, snapshot,
     /// and blobs are on the target set), so the target becomes the current set
-    /// and the old-set members drop out (§7.7). Proposed only by the shard
+    /// and the old-set members drop out (storage §7). Proposed only by the shard
     /// leader's migration driver, only after a successful catch-up pass.
     Migrated { shard: u32 },
-    /// A shard split began (§7.7): `parent`'s range will divide at `boundary`;
+    /// A shard split began (storage §7): `parent`'s range will divide at `boundary`;
     /// the parent keeps `[start, boundary)` in place, the fresh `child` index
     /// will own `[boundary, end]` on the same replicas. From this commit the
     /// parent's replicas freeze appends to the moving range (the durable store
@@ -210,9 +210,9 @@ enum ShardMapCommand {
     /// commits, and the child's replicas create its leader-election group.
     /// Proposed only by the parent leader's split driver after a full transfer
     /// pass. Only from this commit does any node route the moved range to the
-    /// child (§7.7's ordering: the map commits BEFORE either side serves it).
+    /// child (storage §7's ordering: the map commits BEFORE either side serves it).
     SplitCommitted { parent: u32 },
-    /// A shard merge began (§7.7): the adjacent `right` shard will fold into
+    /// A shard merge began (storage §7): the adjacent `right` shard will fold into
     /// `left` (`left.end + 1 == right.start`), the mirror of a split. From this
     /// commit `right`'s replicas freeze their whole range and the `right` leader's
     /// merge driver transfers every entity into `left`'s keys. Validated
@@ -227,7 +227,7 @@ enum ShardMapCommand {
     MergeCommitted { left: u32, right: u32 },
 }
 
-/// The stamp on a committed `ShardMapCommand` (compatibility §3,
+/// The stamp on a committed `ShardMapCommand` (compatibility §4,
 /// `entity.shardmap`).
 ///
 /// The payload rides `EntryPayload::App` inside the stamped `actor.raft.log`,
@@ -356,7 +356,7 @@ impl ShardMapSource for EmptyShardMap {
 /// the apply loop (writer) and the [`ShardMapSource`] reads.
 #[derive(Default)]
 struct Inner {
-    /// shard index → the committed allocation (§7.7). Each is shared with the
+    /// shard index → the committed allocation (storage §7). Each is shared with the
     /// shard's replicator when this node hosts it, so a commit applied here is
     /// the one every in-flight journal reads; the per-shard mutex is only ever
     /// taken under this map's lock, never the other way round.
@@ -381,7 +381,7 @@ struct Inner {
     /// **every** tick: an O(shards) rendezvous sort ten times a second, forever,
     /// whose answer is identical each time. The generation makes the common case a
     /// single integer comparison, keeping the control plane's cost proportional to
-    /// cluster events rather than to wall-clock time (§7.8).
+    /// cluster events rather than to wall-clock time (storage §3.2).
     allocation_generation: u64,
     /// Why this node stopped applying the map's committed log, or `None` while
     /// healthy ([`ShardMapSource::poisoned`]). Written once by [`apply_loop`] and
@@ -450,7 +450,7 @@ impl Inner {
     }
 }
 
-/// The shard-event emitter (spec §13): how the map's loops put `ShardSplit`,
+/// The shard-event emitter (spec §10): how the map's loops put `ShardSplit`,
 /// `ShardMerged`, and `LeaderChanged` onto the framework's `Event` stream. A
 /// closure seam because the loops are generic over just `R: RaftConsensus`,
 /// which does not carry the `EntitySystem` event channel.
@@ -459,7 +459,7 @@ type EmitEvent = Arc<dyn Fn(EntityEvent) + Send + Sync>;
 /// The typed per-shard replicators the loops share (the [`ShardMapSource`] seam
 /// is object-safe, so these cannot live in [`Inner`]): one per shard this node
 /// hosts, the migration/split driver's handle. Each reads the shard's
-/// [`Allocation`] in `Inner` per operation (§7.7).
+/// [`Allocation`] in `Inner` per operation (storage §7).
 type ShardHandles<R> = BTreeMap<u32, Arc<QuorumReplicator<R>>>;
 
 /// A [`ShardMapSource`] backed by a per-type Raft group (the `Quorum` tier). The group's
@@ -476,7 +476,7 @@ pub(crate) struct RaftShardMap {
 }
 
 impl RaftShardMap {
-    /// Create the map group and start tracking the allocation (spec §7.6). The
+    /// Create the map group and start tracking the allocation (spec storage §6). The
     /// group's voters are the cluster's consensus-agreed control-plane voters
     /// ([`RaftConsensus::cluster_voters`]), so every node forms the identical group.
     /// Subscribes before driving and launches the apply loop and the leader-only
@@ -517,7 +517,7 @@ impl RaftShardMap {
         // the same group. A node that joined after the founding set is not in it:
         // it forms the group as a non-member (it never disrupts elections) and the
         // reconcile loop on the leader adds it, after which it catches up the
-        // committed allocation via replication and routes (spec §7.6).
+        // committed allocation via replication and routes (spec storage §6).
         consensus.create_group(group, consensus.configured_voters(), Vec::new());
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let handles: Arc<Mutex<ShardHandles<R>>> = Arc::new(Mutex::new(BTreeMap::new()));
@@ -613,7 +613,7 @@ const HANDOFF_ROUNDS: usize = 10;
 const HANDOFF_ROUND_WAIT: Duration = Duration::from_millis(50);
 
 /// Hand every shard this node leads to one of its other replicas, returning how many
-/// are still led when the attempt gives up (spec §7.1, §8.3).
+/// are still led when the attempt gives up (spec storage §3.1, §5.3).
 ///
 /// Ordered shard-by-shard rather than all at once: each handoff is one round trip,
 /// and issuing them serially keeps the departing node from flooding its peers with
@@ -736,7 +736,7 @@ impl ShardMapSource for RaftShardMap {
     }
 }
 
-/// The node-local half of the map group's committed commands (spec §7.6, §7.7),
+/// The node-local half of the map group's committed commands (spec storage §6, §7),
 /// and the state performing them takes.
 ///
 /// One value rather than a parameter list per command: the same ten handles serve
@@ -806,7 +806,7 @@ impl<R: RaftConsensus> ShardApply<R> {
     }
 
     /// The founding allocation for a shard, or the start of a migration toward
-    /// `replicas` (§7.7).
+    /// `replicas` (storage §7).
     fn assign(&self, shard: u32, replicas: Vec<NodeId>, range: KeyRange) {
         // Record the transition under the map lock; act on it below.
         enum Change {
@@ -817,7 +817,7 @@ impl<R: RaftConsensus> ShardApply<R> {
             /// ignored.
             Migration(Vec<NodeId>),
             /// A re-proposed identical allocation, or one that finds another
-            /// operation in flight (§7.7's one-op-at-a-time rule): nothing
+            /// operation in flight (storage §7's one-op-at-a-time rule): nothing
             /// changed. The allocator re-proposes once the shard is idle.
             Noop,
         }
@@ -878,7 +878,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         }
     }
 
-    /// A migration finished: the target set becomes the current one (§7.7).
+    /// A migration finished: the target set becomes the current one (storage §6).
     fn migrated(&self, shard: u32) {
         // Flip `current = target` (a duplicate `Migrated` finds no target
         // and is a no-op).
@@ -912,7 +912,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         }
     }
 
-    /// A split was proposed: record the plan and freeze the moving range (§7.7).
+    /// A split was proposed: record the plan and freeze the moving range (storage §7).
     async fn split_started(&self, parent: u32, child: u32, boundary: u64) {
         // Deterministic validation against committed state: a pure
         // function of (command, map state), so every node accepts or
@@ -949,7 +949,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         }
     }
 
-    /// A split committed: the child becomes a shard of its own (§7.7).
+    /// A split committed: the child becomes a shard of its own (storage §7).
     async fn split_committed(&self, parent: u32) {
         // Flip the mapping: shrink the parent's range, allocate the
         // child on the parent's replicas. A duplicate commit finds no
@@ -993,7 +993,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         // `SplitCommitted`.
         if self.hosts(parent) {
             // One bound and one range reclamation, rather than a walk of every
-            // entity in the shard (§7.7). The bound lands first, so no append to the
+            // entity in the shard (storage §7). The bound lands first, so no append to the
             // moved range can reach this store after its data is gone.
             self.local.seal_range(parent, plan.boundary).await;
             self.local.remove_range(parent, plan.boundary).await;
@@ -1001,7 +1001,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         // Child replicas (the parent's set, inherited): create the
         // child's leader-election group and journal, only now, so no
         // child term exists during the transfer and neither side served
-        // the moved range early (§7.7's commit-before-serve ordering).
+        // the moved range early (storage §7's commit-before-serve ordering).
         if current.contains(&self.self_node) {
             let child_group = shard_group_id(self.entity_type, plan.child);
             self.consensus
@@ -1017,7 +1017,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         });
     }
 
-    /// A merge was proposed: record both roles and freeze the right shard (§7.7).
+    /// A merge was proposed: record both roles and freeze the right shard (storage §7).
     async fn merge_started(&self, left: u32, right: u32) {
         // Deterministic validation: both allocated, both idle, adjacent
         // (left's range ends just below right's). Replica sets need not
@@ -1058,7 +1058,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         }
     }
 
-    /// A merge committed: left absorbs right's range, right is retired (§7.7).
+    /// A merge committed: left absorbs right's range, right is retired (storage §7).
     async fn merge_committed(&self, left: u32, right: u32) {
         // Flip the mapping: extend left over right, drop right. A
         // duplicate commit finds no merge role and is a no-op.
@@ -1099,7 +1099,7 @@ impl<R: RaftConsensus> ShardApply<R> {
         // Right replicas: GC the now-unreachable right-keyed data (the
         // entities live under left's keys after the transfer), drop the
         // journal/handles, and retire the group; it holds no data
-        // (§7.1), so no in-group consensus is needed; every node retires
+        // (storage §3.1), so no in-group consensus is needed; every node retires
         // it as it applies this commit (E7).
         let had_right = self
             .inner
@@ -1129,7 +1129,7 @@ impl<R: RaftConsensus> ShardApply<R> {
     }
 }
 
-/// Apply the map group's committed allocation records (spec §7.6, §7.7).
+/// Apply the map group's committed allocation records (spec storage §6, §7).
 ///
 /// Each command's committed meaning is on [`ShardMapCommand`]; its node-local
 /// effect is the [`ShardApply`] method of the same name. This loop is the
@@ -1144,7 +1144,7 @@ async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Co
             Ok(None) => continue, // no allocation in it (see `admit`)
             Err(why) => {
                 // **Fail closed on a committed entry** (compatibility **V2**, spec
-                // §7.6). Skipping it and applying the next would leave this node's
+                // storage §6). Skipping it and applying the next would leave this node's
                 // allocation a gap rather than a prefix; `admit` has the divergence
                 // that follows. So the loop stops here, for good.
                 //
@@ -1153,7 +1153,7 @@ async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Co
                 // path here already tolerates. A stale leader cannot serve a moved
                 // range from it either: its peers sealed their durable append bound
                 // before the move, and that bound, not the map, is the authoritative
-                // barrier (§7.7, `QuorumReplicator::seal_shard`).
+                // barrier (storage §7, `QuorumReplicator::seal_shard`).
                 //
                 // It does not crash, for the reason `RaftGroup::wal_failed` gives
                 // one boundary over: an unwind takes down a task and leaves the node
@@ -1251,7 +1251,7 @@ async fn driver_loop<R, D, Fut>(
     }
 }
 
-/// The leader-only allocator (spec §7.6, §7.7): while this node leads the map
+/// The leader-only allocator (spec storage §6, §7): while this node leads the map
 /// group, keep each shard's committed replica set equal to its rendezvous choice
 /// over the **current cluster voters**. It re-proposes an [`Assign`](ShardMapCommand::Assign)
 /// whenever a shard's desired set differs from the committed one, so as the
@@ -1333,7 +1333,7 @@ async fn allocator_loop<R: RaftConsensus>(
                 .0;
                 // Propose the founding allocation, or (when the desired set has
                 // drifted from the committed one) start a migration toward it
-                // (§7.7). Never re-propose while a migration is already in flight:
+                // (storage §6). Never re-propose while a migration is already in flight:
                 // retargeting mid-migration would flip `current` to a set the driver
                 // never caught up (the `Migrated` guard relies on this). Nor while a
                 // split is in flight: migration and split are mutually exclusive
@@ -1373,7 +1373,7 @@ async fn allocator_loop<R: RaftConsensus>(
     .await;
 }
 
-/// The reconcile loop (spec §7.6, §7.7): drive each group **this node leads**
+/// The reconcile loop (spec storage §6, §7): drive each group **this node leads**
 /// toward its intended membership.
 /// - The **map group** → the cluster's current `cluster_voters()`, so a node that
 ///   joins the cluster after the map formed is added (it then catches up the
@@ -1430,7 +1430,7 @@ async fn reconcile_loop<R: RaftConsensus>(
     .await;
 }
 
-/// The migration driver (spec §7.7): while this node leads a shard whose
+/// The migration driver (spec storage §6): while this node leads a shard whose
 /// allocation carries a `target`, catch every entity up on the target set
 /// (records via the joint-quorum recovery write-back, the snapshot via a joint
 /// `save_snapshot`, blobs via verified copy), and, once a full pass succeeds,
@@ -1505,7 +1505,7 @@ async fn migrate_loop<R: RaftConsensus>(
     .await;
 }
 
-/// One transfer pass shared by the split and merge drivers (spec §7.7): seal the
+/// One transfer pass shared by the split and merge drivers (spec storage §7): seal the
 /// moving range durably at `seal_from` (from here no append to it reaches a write
 /// quorum, E15), enumerate the shard's entities from a read quorum, and transfer
 /// every entity the `moves` predicate keeps to `dest` on `dest_replicas`. Returns
@@ -1538,7 +1538,7 @@ async fn transfer_pass<R: RaftConsensus>(
     true
 }
 
-/// The split proposer + driver (spec §7.7).
+/// The split proposer + driver (spec storage §7).
 ///
 /// **Proposer** (any node): drain locally-queued split requests
 /// ([`ShardMapSource::request_split`]; the admin/test seam and the size
@@ -1555,7 +1555,7 @@ async fn transfer_pass<R: RaftConsensus>(
 /// 3. **transfer** each moved entity's committed prefix, snapshot, and blobs to
 ///    the child's keys on a majority (the child inherits the parent's replicas);
 /// 4. **commit**: still leading with the plan still pending, propose
-///    `SplitCommitted`, which flips routing (§7.7's commit-before-serve).
+///    `SplitCommitted`, which flips routing (storage §7's commit-before-serve).
 ///
 /// Every step is idempotent and derived from committed state: a crash, leader
 /// change, or failed step just re-drives on the next tick (a re-driven transfer
@@ -1699,7 +1699,7 @@ async fn split_loop<R: RaftConsensus>(
     .await;
 }
 
-/// The merge proposer + driver (spec §7.7), the mirror of [`split_loop`].
+/// The merge proposer + driver (spec storage §7), the mirror of [`split_loop`].
 ///
 /// **Proposer** (any node): for each requested `left` (retained until the merge
 /// is observably started or moot), find its right neighbour and propose
@@ -1854,7 +1854,7 @@ async fn merge_loop<R: RaftConsensus>(
 /// maintained a running total would make this O(1) and is the real fix.
 const SPLIT_TRIGGER_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The size-based split trigger (spec §7.7): for each shard this node **leads**,
+/// The size-based split trigger (spec storage §7): for each shard this node **leads**,
 /// if its local durable footprint exceeds `target_bytes` and the shard is idle
 /// (no migration or split in flight) with a splittable range, request a split.
 /// The request rides the same [`request_split`](ShardMapSource::request_split)
@@ -1905,7 +1905,7 @@ async fn split_trigger_loop<R: RaftConsensus>(
     .await;
 }
 
-/// The leadership observer (spec §13): emit `LeaderChanged` once per (shard,
+/// The leadership observer (spec §10): emit `LeaderChanged` once per (shard,
 /// term) this node wins. Emitted by the winner itself (the node that will
 /// actually serve the shard's entities), so the stream carries one event per
 /// elected term without cross-node dedup. Exits when the map is dropped.

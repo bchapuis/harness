@@ -1,10 +1,10 @@
-//! A failed store is refused, not read as empty (entity §7.5, §11).
+//! A failed store is refused, not read as empty (entity §6, storage §10).
 //!
-//! The `Local` tier over a file-backed store (§7.4) has one store and no quorum to
+//! The `Local` tier over a file-backed store (storage §2.2) has one store and no quorum to
 //! outvote it. After that store fails, its unfenced reads describe an entity with
 //! no history; served as-is, the next activation would rehydrate from nothing and
 //! answer a fresh default state as the entity's truth, and a gateway read would
-//! serve an empty page as its history. §7.5 allows staleness and forbids
+//! serve an empty page as its history. §6 allows staleness and forbids
 //! invention, so the journal answers `Unavailable` to both (the unit tests in
 //! `memory.rs` pin that outcome at the seam); here both public paths are seen
 //! refusing, which without the gate they do not.
@@ -96,7 +96,7 @@ fn a_failed_store_is_unavailable_not_empty() {
     );
     assert!(store.failure().is_some(), "the store is poisoned");
 
-    // The gateway's non-activating read (§7.5): refused, never an empty history.
+    // The gateway's non-activating read (§6): refused, never an empty history.
     // The gateway's floor recovery retries a failed `head` until the read's
     // deadline, which the redirect loop reports as the last leader hint.
     let reread = counters.entity("counter/0");

@@ -1,4 +1,4 @@
-//! A real TCP cluster on the production runtime (spec §4.6, §7, §15).
+//! A real TCP cluster on the production runtime (spec §2.12.1, §2.13, §9).
 //!
 //! Brings up three nodes on loopback, wired with the tokio seam
 //! ([`TokioClock`]/[`OsEntropy`]/[`TokioSpawner`]) and a mutual-TLS

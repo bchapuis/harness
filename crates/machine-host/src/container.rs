@@ -1,5 +1,5 @@
-//! The container mechanism (sandbox spec §3.4's SHOULD grade, sandbox §3.5's
-//! development fallback; machine spec §2.1): OCI containers driven through the
+//! The container mechanism (sandbox spec §4.4's SHOULD grade, sandbox §4's
+//! development fallback; machine spec §2.3): OCI containers driven through the
 //! `docker` CLI.
 //!
 //! Confinement here is **shared-kernel**: the guest speaks to the host kernel,
@@ -14,7 +14,7 @@
 //!   `Native` tier needs, whose virtue is requiring *nothing* inside the image.
 //! - [`MachineHost::start`] holds a **block image** guest: the runner image
 //!   loop-mounts `spec.disk` and chroots into it, so the guest is the disk's own
-//!   rootfs and its writes land in that very file (entity §7.15). The container
+//!   rootfs and its writes land in that very file (facets §4.4). The container
 //!   half is `guest/machine-docker/init.sh`; `--privileged` is what `losetup`
 //!   and `mount` cost, and the reason this mechanism is a development one.
 //!
@@ -175,7 +175,7 @@ impl MachineHost for ContainerHost {
             if !matches!(spec.network, Network::None) {
                 // Refused rather than ignored: a guest that silently lost the
                 // NIC its consumer's policy asked for would be a policy
-                // failure disguised as a working boot (machine §5.2).
+                // failure disguised as a working boot (machine §2.6).
                 return Err(GuestError::Host(
                     "a container cannot take a host tap; only the microvm grade realizes egress"
                         .to_string(),
@@ -251,7 +251,7 @@ pub struct ContainerSpec {
 impl ContainerSpec {
     /// A container with no network, no mounts, and the image's own entrypoint.
     /// Egress is absent by construction in both consumers (sandbox §1.1;
-    /// machine §5.2's degradation), so there is no knob to grant it.
+    /// machine §2.6's degradation), so there is no knob to grant it.
     pub fn image(key: GuestKey, image: impl Into<String>) -> ContainerSpec {
         ContainerSpec {
             key,
@@ -455,7 +455,7 @@ impl MachineGuest for ContainerGuest {
             // none: the guest's blocks sit in this kernel's cache, not in the
             // image file a capture scans. So sync first, which makes this
             // mechanism's quiescent point filesystem-clean, not merely
-            // crash-consistent (machine §2.2).
+            // crash-consistent (machine §1.1).
             self.exec(&["sync"]).await?;
             let output = run(&self.cli, &["pause", &self.name]).await?;
             if output.status.success() {

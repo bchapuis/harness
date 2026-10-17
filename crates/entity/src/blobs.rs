@@ -1,6 +1,6 @@
-//! The entity-native content-addressed blob store (durable-workspace design).
+//! The entity-native content-addressed blob store (spec storage §9).
 //!
-//! Beside its ordered, term-fenced journal (§7.2), an entity node owns an
+//! Beside its ordered, term-fenced journal (storage §4), an entity node owns an
 //! **immutable content-addressed store**: a per-entity blob area replicated to the
 //! *same* shard replica set through the *same* [`ReplicaStore`](crate::replica_store)
 //! actor, but with the term, order, and read-repair removed: content addressing
@@ -14,7 +14,7 @@
 //! ([`EntityBlobs::destroy`]).
 //!
 //! **A sweep and a put never interleave.** A writer puts first and roots later (plan,
-//! then stage, §7.12): a facet's checkpoint puts its chunks and then extends its root
+//! then stage, facets §3): a facet's checkpoint puts its chunks and then extends its root
 //! set, a KV spill is rooted only when its command commits. A sweep that read the
 //! roots in between would delete bytes a manifest is about to reference, and the
 //! writer, having cached the ids as stored, would never put them again. So every put
@@ -24,7 +24,7 @@
 //!
 //! **Dedup saves bandwidth, not only space.** Content addressing was adopted so an
 //! unchanged region of a checkpointed facet hashes to something already stored
-//! (§7.10); on this deployment its larger effect is that the region is not
+//! (storage §9); on this deployment its larger effect is that the region is not
 //! *sent*. A byte costs roughly fifty times more to move to a replica than to write
 //! locally, and a replicated byte is billed once per peer, so a chunk that dedups is
 //! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2).
@@ -35,7 +35,7 @@
 //! content as one it already holds. Every writer into this area is built that way:
 //! the workspace facet caches each file's chunk ids, the disk facet captures only
 //! dirty blocks, and facet 0's state checks its own root set before putting a chunk
-//! (§7.12). A future writer that skips that check gets the space saving and none of
+//! (facets §3). A future writer that skips that check gets the space saving and none of
 //! the bandwidth one.
 
 use std::collections::BTreeSet;
@@ -58,6 +58,12 @@ use crate::journal::EntityJournalError;
 /// wherever it is stored, so a writer and a reader agree on a blob's name with no
 /// coordination, and a reader proves it received the right bytes by re-hashing them
 /// (the read path verifies before returning). Rendered in lowercase hex for display.
+///
+/// A blob is the one durable byte sequence entity leaves without a format stamp
+/// (compatibility spec §4): its name is the hash of its own bytes, so a stamp
+/// prefix would make the name disagree with what it addresses and the reader, which
+/// re-hashes on every read, would refuse what the writer wrote. The name is the
+/// stamp, checked on every read.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlobId([u8; 32]);
 
@@ -113,7 +119,7 @@ impl fmt::Debug for BlobId {
 }
 
 /// The blobs an activation has put that its roots may not show yet, and the gate that
-/// orders its puts against its sweeps (spec §7.12, **F3**). One per activation, shared
+/// orders its puts against its sweeps (spec facets §3, **F3**). One per activation, shared
 /// by every [`EntityBlobs`] handle the activation builds.
 ///
 /// **Why both halves.** A put that lands while a sweep is in flight is deleted if the
@@ -168,7 +174,7 @@ impl PendingRoots {
 pub struct EntityBlobs {
     journal: Arc<dyn DynEntityJournal>,
     entity: EntityName,
-    /// The facets' live blob roots (spec §7.12), unioned into every
+    /// The facets' live blob roots (spec facets §3), unioned into every
     /// [`gc`](EntityBlobs::gc) sweep by the handle itself, so an application's
     /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for an
     /// entity with no facets.
@@ -197,7 +203,7 @@ impl EntityBlobs {
     }
 
     /// Re-replicate every facet-root blob to the entity's current shard replicas
-    /// (spec §7.10): source a verifying copy of each (E17) and re-`put` it,
+    /// (spec storage §9): source a verifying copy of each (E17) and re-`put` it,
     /// re-fanning the bytes to the current replica set; holders dedup (a
     /// no-op), a replica that lacked it receives it. Root-driven, additive, and
     /// idempotent; best-effort (a blob no reachable replica holds is skipped:
@@ -211,7 +217,7 @@ impl EntityBlobs {
         }
     }
 
-    /// Attach the facet root supplier (spec §7.12). Built by
+    /// Attach the facet root supplier (spec facets §3). Built by
     /// [`EntityCtx::blobs`](crate::EntityCtx::blobs); the roots are computed at
     /// sweep time, so they always reflect the *committed* forms.
     pub(crate) fn with_facet_roots(
@@ -313,7 +319,7 @@ impl EntityBlobs {
 
 /// The seam reports only `Unavailable` (a quorum could not be reached, or every
 /// reachable copy failed verification); the entity surfaces it as the same
-/// durability outcome a write pause uses (§11).
+/// durability outcome a write pause uses (storage §10).
 fn into_entity_error(err: EntityJournalError) -> EntityError {
     match err {
         EntityJournalError::Unavailable(why) => EntityError::Unavailable(why),

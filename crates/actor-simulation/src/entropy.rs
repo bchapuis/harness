@@ -1,5 +1,5 @@
-//! The single seeded source of randomness for a simulation run (spec §4.6,
-//! §18.2).
+//! The single seeded source of randomness for a simulation run (spec §2.12.1,
+//! §2.12.2).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,14 +18,14 @@ pub struct SimEntropy {
 }
 
 impl SimEntropy {
-    /// Seed a fresh stream. The same seed reproduces the same run (spec §18.1).
+    /// Seed a fresh stream. The same seed reproduces the same run (spec §2.12.2).
     pub fn new(seed: u64) -> SimEntropy {
         SimEntropy {
             rng: Arc::new(Mutex::new(ChaCha8Rng::seed_from_u64(seed))),
         }
     }
 
-    /// A deterministic fault gate (spec §18.3): fires with probability
+    /// A deterministic fault gate (docs/simulation-testing.md): fires with probability
     /// `numerator / denominator`, drawn from this seeded stream.
     ///
     /// Fault injection is simulation-only, so it lives here rather than on the

@@ -1,4 +1,4 @@
-//! Facet 0's state through the blob area (entity §9).
+//! Facet 0's state through the blob area (storage §8).
 //!
 //! A composite snapshot used to carry the entity's whole encoded `State` inline, so
 //! a snapshot cost what the entity had accumulated, and on the `Quorum` tier that
@@ -33,7 +33,7 @@ use serde::Serialize;
 // --- An entity whose state grows, the shape facet-0 chunking exists for ---------
 
 /// A folded transcript: state grows by an entry per command and is never
-/// rewritten. The agent entity's shape (agent §7), reduced to what matters here.
+/// rewritten. The agent entity's shape (agent §5), reduced to what matters here.
 #[derive(Default)]
 struct Transcript;
 

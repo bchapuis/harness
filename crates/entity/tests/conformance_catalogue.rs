@@ -1,4 +1,4 @@
-//! Catalogue drift test (entity spec §15): the machine-readable E1–E21 table
+//! Catalogue drift test (entity spec §12): the machine-readable E1–E21 table
 //! stays complete, and every file it points at still exists.
 //!
 //! The spec↔code drift gate for entity, the same pattern that guards the core,
@@ -16,7 +16,7 @@ use spec::catalogue;
 
 use support::catalogue::e_catalogue;
 
-/// The table above and the spec's §15 copy of it are the same table.
+/// The table above and the spec's §12 copy of it are the same table.
 ///
 /// The rest of this file holds the Rust copy internally consistent; this holds it
 /// equal to the prose one a reader trusts. An invariant added to one, or a
@@ -25,7 +25,7 @@ use support::catalogue::e_catalogue;
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("entity");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("entity §15 parses");
+    let documented = catalogue::documented(&root, site).expect("entity §12 parses");
     let implemented: Vec<catalogue::Row> = e_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -34,7 +34,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "entity spec §15 and e_catalogue() disagree:\n  {}\n",
+        "entity spec §12 and e_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

@@ -49,7 +49,7 @@ fn prompt_completes_through_a_tool_step() {
     assert_eq!(sandboxes.stats.opened(), 1);
 }
 
-/// §7.4: a kind outside this node's directory is an error value; kind names
+/// §5.3: a kind outside this node's directory is an error value; kind names
 /// arrive from outside (a gateway's URL path), so the miss must not panic.
 #[test]
 fn addressing_an_unknown_kind_is_an_error_value() {
@@ -68,9 +68,9 @@ fn addressing_an_unknown_kind_is_an_error_value() {
     assert!(err.to_string().contains("reseacher"), "{err}");
 }
 
-/// §7.1: the directory must close over delegation; a hosted kind whose
+/// §5.1: the directory must close over delegation; a hosted kind whose
 /// allowlisted child this node neither hosts nor routes fails at build, not
-/// per-call at launch (§8.1) or silently in cancel propagation (§9.2).
+/// per-call at launch (§6.1) or silently in cancel propagation (§7.2).
 #[test]
 #[should_panic(expected = "neither hosts nor routes")]
 fn building_a_node_whose_directory_misses_a_delegate_panics() {

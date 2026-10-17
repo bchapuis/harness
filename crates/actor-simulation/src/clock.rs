@@ -1,4 +1,4 @@
-//! The virtual clock (spec §4.6, §18.2): logical time that advances only at
+//! The virtual clock (spec §2.12.1, §2.12.2): logical time that advances only at
 //! quiescence, driven by [`Simulation::run`](crate::Simulation::run).
 
 use std::future::Future;

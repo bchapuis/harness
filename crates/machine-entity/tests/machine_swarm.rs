@@ -1,4 +1,4 @@
-//! The machine entity under the cluster fault swarm (machine §7; entity §14).
+//! The machine entity under the cluster fault swarm (machine §6; entity §11).
 //!
 //! `tests/machine_sim.rs` proves the lifecycle on the `Local` tier; this file
 //! hosts machines on the leader-based clustered system and sweeps seeds while
@@ -53,7 +53,7 @@ use machine_entity::fake::FakeRuntimeProvider;
 
 type ClusterMachine = Machine<SimNode>;
 
-/// The front-door member stand-in (machine §5.1): one per node; a node crash
+/// The front-door member stand-in (machine §2.5): one per node; a node crash
 /// kills it, and the machines watching it fold `Detached { FrontDoorLost }`.
 #[derive(Default)]
 struct DoorStub;

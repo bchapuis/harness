@@ -1,4 +1,4 @@
-//! The `Workspace` tier (sandbox spec §3.1): typed tools over a capability
+//! The `Workspace` tier (sandbox spec §4.1): typed tools over a capability
 //! handle.
 //!
 //! Confinement is the [`Dir`] handle itself: cap-std re-resolves each path
@@ -10,7 +10,7 @@
 //! The tools are pure functions of the call and the filesystem: no ambient
 //! clock or entropy reaches an output (no mtimes, and `list_dir` is
 //! name-sorted), so they run unmodified under the deterministic simulator
-//! (core spec §18.1).
+//! (core spec §2.12.2).
 
 use std::path::Path;
 
@@ -29,7 +29,7 @@ const READ_CAP: usize = 256 * 1024;
 /// The workspace tier's tool declarations, ready for [`agent::Kind::declare`]:
 /// every declaration is `Tier::Workspace`, and every tool is idempotent, so
 /// blind re-execution after a crash is safe (`OnOrphan::Reexecute`,
-/// agent spec §5.5).
+/// agent spec §4.4).
 pub fn workspace_tools() -> Vec<ToolDecl> {
     let decl = |name: &str, description: &str, schema: Value| ToolDecl {
         name: name.to_string(),

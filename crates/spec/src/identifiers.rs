@@ -46,11 +46,11 @@
 //! Some names a spec uses are correct and will never be in the index. They come in
 //! three kinds, and [`EXEMPT`] records each with its reason:
 //!
-//! - **Not this tree's**: `Option`, `HashMap`, `Serialize`, Akka's `ClusterClient`.
-//! - **Not an identifier**: the `TODO` the docs promise you will not find, SQL's
-//!   `TRUNCATE`.
-//! - **Named to say it does not exist**: the agent runtime "mints no `RunResumed` event
-//!   of its own". This kind is the reason a plain "every name must resolve" rule
+//! - **Not this tree's**: `Option`, `HashMap`, `Serialize`.
+//! - **Not an identifier**: the `TODO` the docs promise you will not find.
+//! - **Named to say it does not exist**: the entity's `Quorum` durability tier,
+//!   which the code expresses by the hosting system type rather than a named
+//!   variant. This kind is the reason a plain "every name must resolve" rule
 //!   would be wrong: a specification says what a system does *not* have, in the
 //!   same voice it says what it does.
 //!
@@ -101,7 +101,6 @@ pub const EXEMPT: &[Exempt] = &[
     e("Option", Why::Elsewhere, "std"),
     e("Result", Why::Elsewhere, "std"),
     e("HashMap", Why::Elsewhere, "std"),
-    e("Copy", Why::Elsewhere, "std, a derive"),
     e("Default", Why::Elsewhere, "std, a derive"),
     e("Debug", Why::Elsewhere, "std, a derive"),
     e("Eq", Why::Elsewhere, "std, a derive"),
@@ -113,15 +112,8 @@ pub const EXEMPT: &[Exempt] = &[
     e("Ord", Why::Elsewhere, "std, a bound on a workflow key"),
     e("Fn", Why::Elsewhere, "std, a closure bound"),
     e("FnMut", Why::Elsewhere, "std, a closure bound"),
-    e("FnOnce", Why::Elsewhere, "std, a closure bound"),
     e("Future", Why::Elsewhere, "std, the seams' return type"),
-    e("Item", Why::Elsewhere, "std, `Stream`'s associated type"),
     e("Range", Why::Elsewhere, "std, a blob `get`'s byte range"),
-    e(
-        "PhantomData",
-        Why::Elsewhere,
-        "std, in the receptionist `Key`",
-    ),
     e(
         "Duration::from_secs",
         Why::Elsewhere,
@@ -137,34 +129,14 @@ pub const EXEMPT: &[Exempt] = &[
         Why::Elsewhere,
         "serde, the serialization requirement's bound",
     ),
-    e(
-        "InvalidData",
-        Why::Elsewhere,
-        "std, the `io::ErrorKind` a `wal` open refusal rides",
-    ),
     e("Serialize", Why::Elsewhere, "serde, a derive"),
     e("Deserialize", Why::Elsewhere, "serde, a derive"),
-    e(
-        "ChaCha8",
-        Why::Elsewhere,
-        "rand_chacha: the simulation's seeded generator",
-    ),
-    e(
-        "ClusterClient",
-        Why::Elsewhere,
-        "Akka's, cited by multi-tenant-edge for the tradeoff the gateway takes",
-    ),
     e(
         "unwrap()",
         Why::Elsewhere,
         "std, cited as a thing not to write",
     ),
     // Not identifiers.
-    e(
-        "TRUNCATE",
-        Why::NotAnIdentifier,
-        "SQL, in the SQL facet's discussion",
-    ),
     e(
         "TODO",
         Why::NotAnIdentifier,
@@ -174,22 +146,11 @@ pub const EXEMPT: &[Exempt] = &[
     e("HACK", Why::NotAnIdentifier, "as TODO"),
     // Named to say the tree does not have it.
     e(
-        "RunResumed",
-        Why::DeclaredAbsent,
-        "agent §10: a resume is recognized from Activated plus ModelCompleted, so \
-         \"the agent runtime mints no RunResumed event of its own\"",
-    ),
-    e(
         "Quorum",
         Why::DeclaredAbsent,
-        "entity §7.4 names the two durability tiers Local and Quorum; the code \
-         distinguishes them by which Replicator is installed, not by a named variant",
-    ),
-    e(
-        "MachineId",
-        Why::DeclaredAbsent,
-        "machine §1: a machine's identity is an EntityName, and MachineId is the spec's \
-         word for it rather than a type",
+        "the entity spec names the two durability tiers Local and Quorum; the code \
+         distinguishes them by the system type that hosts the entity, not by a \
+         named variant",
     ),
 ];
 
@@ -210,13 +171,21 @@ pub struct Unknown {
     pub looked_up: String,
     /// Enough surrounding text to judge it.
     pub quote: String,
+    /// Whether the name is declared, but only as a crate-private type, which a
+    /// specification must not name: it is the code's choice, not the contract.
+    pub private: bool,
 }
 
 impl fmt::Display for Unknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what = if self.private {
+            "is declared only as a crate-private type"
+        } else {
+            "is declared nowhere in crates/"
+        };
         write!(
             f,
-            "{}:{}: `{}`, nothing named `{}` is declared in crates/\n    {}",
+            "{}:{}: `{}`: `{}` {what}\n    {}",
             self.from, self.line, self.token, self.looked_up, self.quote,
         )
     }
@@ -229,9 +198,17 @@ impl fmt::Display for Unknown {
 /// contents of string literals (a format magic like `GRSNAP` is a name a spec
 /// cites and the code writes as bytes). Over-inclusion costs a missed rename;
 /// under-inclusion costs a false alarm on every build, which is worse.
+///
+/// Beside the flat set it keeps which type names are declared with a restricted
+/// visibility only (`struct`, `enum`, `trait`, or a top-level `type`, never as
+/// `pub` and never as an enum variant or associated type of the same name). A
+/// specification names public seams; a crate-private type is mechanism, and a
+/// spec that names one is describing the implementation.
 #[derive(Debug, Default)]
 pub struct Index {
     names: BTreeSet<String>,
+    public_types: BTreeSet<String>,
+    restricted_types: BTreeSet<String>,
 }
 
 impl Index {
@@ -242,22 +219,27 @@ impl Index {
     /// because the tree does *not* have them, so indexing itself would answer its
     /// own questions.
     pub fn build(root: &Path) -> io::Result<Self> {
-        let mut names = BTreeSet::new();
+        let mut index = Self::default();
         for entry in std::fs::read_dir(root.join("crates"))? {
             let dir = entry?.path();
             if dir.file_name().is_some_and(|n| n == "spec") {
                 continue;
             }
             for sub in ["src", "tests"] {
-                collect(&dir.join(sub), &mut names)?;
+                collect(&dir.join(sub), &mut index)?;
             }
         }
-        Ok(Self { names })
+        Ok(index)
     }
 
     /// Whether anything under `crates/` declares this name.
     pub fn contains(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// Whether this name is declared only as a crate-private type.
+    pub fn is_private_type(&self, name: &str) -> bool {
+        self.restricted_types.contains(name) && !self.public_types.contains(name)
     }
 
     /// How many names were indexed.
@@ -271,16 +253,18 @@ impl Index {
     }
 }
 
-fn collect(dir: &Path, names: &mut BTreeSet<String>) -> io::Result<()> {
+fn collect(dir: &Path, index: &mut Index) -> io::Result<()> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(()); // a crate need not have tests/
     };
     for entry in entries {
         let path = entry?.path();
         if path.is_dir() {
-            collect(&path, names)?;
+            collect(&path, index)?;
         } else if path.extension().is_some_and(|x| x == "rs") {
-            harvest(&std::fs::read_to_string(&path)?, names);
+            let text = std::fs::read_to_string(&path)?;
+            harvest(&text, &mut index.names);
+            visibilities(&text, &mut index.public_types, &mut index.restricted_types);
         }
     }
     Ok(())
@@ -348,6 +332,48 @@ fn harvest(text: &str, names: &mut BTreeSet<String>) {
             names.insert(literal.to_string());
         }
         rest = &after[close + 1..];
+    }
+}
+
+/// Sort one file's type declarations by visibility: a `pub` declaration, an
+/// enum variant, or an associated `type` makes a name public; any other
+/// `struct`, `enum`, `trait`, or `type` declares it restricted.
+fn visibilities(text: &str, public: &mut BTreeSet<String>, restricted: &mut BTreeSet<String>) {
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let indented = trimmed.len() < line.len();
+        // An enum variant: indented, capitalised, alone or before a delimiter.
+        if indented && let Some(name) = leading_ident(trimmed).filter(|n| type_like(n)) {
+            let tail = trimmed[name.len()..].trim();
+            if tail.is_empty() || tail.starts_with(['{', '(', ',', '=']) {
+                public.insert(name.to_string());
+            }
+        }
+        let (visible, rest) = match trimmed.strip_prefix("pub ") {
+            Some(rest) => (true, rest),
+            None => match trimmed.strip_prefix("pub(") {
+                Some(rest) => (false, rest.split_once(") ").map_or("", |(_, r)| r)),
+                None => (false, trimmed),
+            },
+        };
+        let mut words = rest.split_whitespace();
+        let (Some(kind), Some(next)) = (words.next(), words.next()) else {
+            continue;
+        };
+        if let Some(name) = leading_ident(next).filter(|n| type_like(n)) {
+            match kind {
+                "struct" | "enum" | "trait" | "type" if visible => {
+                    public.insert(name.to_string());
+                }
+                "type" if indented => {
+                    public.insert(name.to_string());
+                }
+                "struct" | "enum" | "trait" | "type" => {
+                    restricted.insert(name.to_string());
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -454,7 +480,11 @@ pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
                 let Some((token, name)) = claimed(token) else {
                     continue;
                 };
-                if exempt.contains(token) || exempt.contains(name) || index.contains(name) {
+                if exempt.contains(token) || exempt.contains(name) {
+                    continue;
+                }
+                let private = index.is_private_type(name);
+                if index.contains(name) && !private {
                     continue;
                 }
                 out.push(Unknown {
@@ -463,6 +493,7 @@ pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
                     token: token.to_string(),
                     looked_up: name.to_string(),
                     quote: quote_near(line.text, token),
+                    private,
                 });
             }
         }
@@ -486,11 +517,11 @@ fn code_block(
     for (n, line) in lines {
         let code = code_only(line, &mut in_comment);
         for (token, name) in code_claims(&code) {
-            if local.contains(name)
-                || exempt.contains(token)
-                || exempt.contains(name)
-                || index.contains(name)
-            {
+            if local.contains(name) || exempt.contains(token) || exempt.contains(name) {
+                continue;
+            }
+            let private = index.is_private_type(name);
+            if index.contains(name) && !private {
                 continue;
             }
             out.push(Unknown {
@@ -499,6 +530,7 @@ fn code_block(
                 token: token.to_string(),
                 looked_up: name.to_string(),
                 quote: quote_near(line, token),
+                private,
             });
         }
     }
@@ -621,9 +653,32 @@ mod tests {
     use super::*;
 
     fn indexed(source: &str) -> Index {
-        let mut names = BTreeSet::new();
-        harvest(source, &mut names);
-        Index { names }
+        let mut index = Index::default();
+        harvest(source, &mut index.names);
+        visibilities(source, &mut index.public_types, &mut index.restricted_types);
+        index
+    }
+
+    #[test]
+    fn a_type_declared_only_crate_private_is_flagged() {
+        let index =
+            indexed("pub(crate) struct RecordSink;\nstruct Forwarder;\npub struct EntityRef;\n");
+        assert!(index.is_private_type("RecordSink"));
+        assert!(index.is_private_type("Forwarder"));
+        assert!(!index.is_private_type("EntityRef"));
+    }
+
+    #[test]
+    fn a_public_namesake_variant_or_associated_type_makes_a_name_public() {
+        let index = indexed(
+            "pub(crate) struct Envelope;\npub enum Frame {\n    Envelope { id: u8 },\n}\n\
+             pub trait Entity {\n    type State;\n}\nstruct State;\n",
+        );
+        assert!(
+            !index.is_private_type("Envelope"),
+            "a variant of a public enum"
+        );
+        assert!(!index.is_private_type("State"), "an associated type");
     }
 
     #[test]
@@ -832,10 +887,10 @@ mod tests {
 
     #[test]
     fn an_exemption_the_tree_defines_is_stale() {
-        let index = indexed("pub struct RunResumed;\n");
+        let index = indexed("pub struct Quorum;\n");
         let found = stale(&index);
         assert!(
-            found.iter().any(|x| x.name == "RunResumed"),
+            found.iter().any(|x| x.name == "Quorum"),
             "an exemption must fail once its reason stops holding",
         );
     }

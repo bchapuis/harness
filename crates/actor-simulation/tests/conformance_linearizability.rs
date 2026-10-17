@@ -1,8 +1,8 @@
-//! Conformance: linearizability checking over a live actor (spec §18.4).
+//! Conformance: linearizability checking over a live actor (docs/simulation-testing.md).
 //!
 //! A register actor is hammered by several concurrent client processes issuing
 //! reads, writes, and compare-and-sets. Each client records its operations into a
-//! shared [`History`] through the public API only (spec §18.4) (`invoke` just
+//! shared [`History`] through the public API only (docs/simulation-testing.md) (`invoke` just
 //! before the `ask`, `ok`/`info` just after), so the recorded order is the real
 //! (virtual) time interleaving. At quiescence the history is checked for
 //! linearizability against the [`Register`] reference model.

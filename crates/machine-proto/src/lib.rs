@@ -1,30 +1,36 @@
-//! The machine guest-agent wire protocol (machine spec §5.1), the **single
-//! definition** all three peers consume: the front door's channel relay
-//! (`machine-frontdoor`), the machine's workspace-sync driver
-//! (`machine_entity::runtime`), and the guest agent (`guest/machine-agent`, which path-
-//! depends on this crate from its own workspace).
+//! The machine guest-agent wire protocol: the **single definition** all three
+//! peers consume. The front door's channel relay (`machine-frontdoor`) and the
+//! machine's workspace-sync driver (`machine_entity::runtime`) speak it from the
+//! host; the guest agent (`guest/machine-agent`, which path-depends on this
+//! crate from its own workspace) answers it from inside the machine's rootfs.
 //!
-//! One vsock stream carries one SSH channel. After the muxer handshake the
-//! host sends a single **header** frame naming the [`ChannelKind`], then the
-//! two ends exchange [`Frame`]s: a `u32` little-endian length, then a
-//! one-byte tag, then the payload. Data and control (window change, signal,
-//! exit status) share the stream through the tag, so one channel's PTY resize
-//! never blocks another's bytes.
+//! The seam is the stream a mechanism hands back from
+//! `machine_host::MachineGuest::connect`. One stream carries one channel. After
+//! the mechanism's handshake the host sends a single **header** frame naming
+//! the [`ChannelKind`], then the two ends exchange [`Frame`]s: a `u32`
+//! little-endian length, then a one-byte tag, then the payload. Data and
+//! control (window change, signal, exit status) share the stream through the
+//! tag, so one channel's PTY resize never blocks another's bytes. The interop
+//! constants both ends must agree on are [`AGENT_PORT`], [`MAX_FRAME`], and
+//! [`MAX_TAR`]; the host enforces the caps before it allocates, because the
+//! agent is the user's own code.
 //!
-//! The async (tokio) realization of the same length-prefixed framing lives
-//! with the host's vsock transport (`machine_host::vsock`); this crate carries the
-//! sync (std) realization, so the guest stays free of an async runtime.
+//! This crate carries the sync (std) realization of the framing, so the guest
+//! stays free of an async runtime; the host's async twin lives with its vsock
+//! transport (`machine_host::vsock`).
+//!
+//! Specified by `docs/machine-spec.md` (the guest-agent wire seam).
 
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The vsock port the agent listens on. Distinct from the sandbox agent's 52
-/// (machine spec §5.1): the protocols differ, and a machine image running the
-/// wrong agent must not read as ready.
+/// The vsock port the agent listens on. Distinct from the sandbox agent's 52:
+/// the protocols differ, and a machine image running the wrong agent must not
+/// read as ready.
 pub const AGENT_PORT: u32 = 62;
 
 /// Cap on any single frame payload, mirroring the sandbox transport's 1 MiB
-/// (sandbox §3.2): a frame header's claim never becomes an unbounded
+/// (sandbox §4.2): a frame header's claim never becomes an unbounded
 /// allocation on either end.
 pub const MAX_FRAME: usize = 1024 * 1024;
 
@@ -56,7 +62,7 @@ pub enum ChannelKind {
     Sftp,
     /// Flush the guest's page cache to its block device (`sync(2)`). The host
     /// issues it before a capture's `pause` so the quiescent image is
-    /// filesystem-clean, not merely crash-consistent (machine §2.2, M3). No
+    /// filesystem-clean, not merely crash-consistent (machine §2.4, M3). No
     /// data follows; the agent replies with one [`Frame::ExitStatus`] `0`.
     Sync,
     /// Replace the guest's `/workspace` (a tmpfs, machine §3) with a tar

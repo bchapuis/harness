@@ -1,8 +1,8 @@
 //! Conformance: messaging interface; `ask` / `tell` / `ask_timeout` and the
-//! error model (spec §3.3, §6, §14). Covers the gaps the audit found; cases that
+//! error model (spec §2.2, §3.3, §8). Covers the gaps the audit found; cases that
 //! already have coverage elsewhere are not duplicated here. Also folds in the
-//! local actor-model messaging cases from actor.rs (spec §3, §6) and the
-//! multi-node routing cases from cluster.rs (spec §4, §7, invariant #21).
+//! local actor-model messaging cases from actor.rs (spec §2.1, §3.3) and the
+//! multi-node routing cases from cluster.rs (spec §2.8, §2.13, invariant #21).
 
 mod support;
 
@@ -45,7 +45,7 @@ use support::Inc;
 use support::Slow;
 use support::Work;
 
-// --- §6 #4: tell applies backpressure (awaits), never drops ------------------
+// --- §3.3 #4: tell applies backpressure (awaits), never drops ------------------
 
 #[test]
 fn tell_awaits_on_a_full_mailbox_then_delivers_everything() {
@@ -57,7 +57,7 @@ fn tell_awaits_on_a_full_mailbox_then_delivers_everything() {
     let served = sim.block_on(async move {
         let slow = system.spawn(Slow::new(system.clock().clone()));
         // Each handler sleeps, so the bounded mailbox fills; `tell` must await
-        // space rather than drop or error (spec §6 #4, #5).
+        // space rather than drop or error (spec §3.3 #4, #5).
         for _ in 0..5 {
             slow.tell(Work { ms: 1 }).await.unwrap();
         }
@@ -71,11 +71,11 @@ fn tell_awaits_on_a_full_mailbox_then_delivers_everything() {
     );
 }
 
-// --- §6 #5: the inbound remote path rejects with MailboxFull, never drops -----
+// --- §3.3 #5: the inbound remote path rejects with MailboxFull, never drops -----
 
 #[test]
 fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
-    // Backpressure on the *inbound remote* path (spec §6 #5): when a remote
+    // Backpressure on the *inbound remote* path (spec §3.3 #5): when a remote
     // actor's bounded mailbox is full, the enqueue is rejected with `MailboxFull`
     // (the receive loop must not block on one full mailbox), and the message is
     // never silently dropped; every caller still gets an outcome.
@@ -110,7 +110,7 @@ fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
     );
 }
 
-// --- §3.2 / §14.1: application errors live inside the reply (two-level) -------
+// --- §2.1 / §8.1: application errors live inside the reply (two-level) -------
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 enum MathError {
@@ -172,7 +172,7 @@ fn a_transport_failure_is_the_outer_error_not_the_inner() {
     let (sim, system) = support::local(3);
     let outcome = sim.block_on(async move {
         // No such actor: the call cannot complete; outer `CallError`, not an
-        // application error (spec §14.1, §14.3; the two levels stay distinct).
+        // application error (spec §8.1, §8.1; the two levels stay distinct).
         let ghost = ActorId::new(NodeId::new(0), Path::new("/user/404"), 0);
         system
             .resolve::<Fallible<SimSystem>>(ghost)
@@ -182,7 +182,7 @@ fn a_transport_failure_is_the_outer_error_not_the_inner() {
     assert_eq!(outcome, Err(CallError::DeadLetter));
 }
 
-// --- §14.2: deadlines on a slow-but-alive remote target -> Timeout -----------
+// --- §8.2: deadlines on a slow-but-alive remote target -> Timeout -----------
 
 fn two_nodes(seed: u64) -> (Simulation, SimNode, SimNode) {
     let (sim, net) = support::cluster(seed, None); // SWIM off: target stays alive
@@ -217,12 +217,12 @@ fn ask_default_deadline_elapses_to_timeout() {
     assert_eq!(outcome, Err(CallError::Timeout));
 }
 
-// --- §14.2: the deadline binds a local target too --------------------------------
+// --- §8.2: the deadline binds a local target too --------------------------------
 
 #[test]
 fn local_ask_to_a_handler_that_never_replies_is_timeout() {
-    // Every request carries an effective deadline (spec §14.2), local or remote
-    // alike (§3.3): a local ask must not hang on a handler that never comes
+    // Every request carries an effective deadline (spec §8.2), local or remote
+    // alike (§2.2): a local ask must not hang on a handler that never comes
     // back, and the timed-out ask still reaches its `AskOutcome` (invariant #1).
     let (sim, system, recorder) = support::local_recorded(6);
     let outcome = sim.block_on(async move {
@@ -244,12 +244,12 @@ fn local_ask_to_a_handler_that_never_replies_is_timeout() {
     );
 }
 
-// --- §6 #4: a remote tell refused by a full mailbox leaves a trace ------------
+// --- §3.3 #4: a remote tell refused by a full mailbox leaves a trace ------------
 
 #[test]
 fn a_remote_tell_into_a_full_mailbox_is_recorded_not_dropped() {
     // A one-way `tell` has no reply to carry `MailboxFull` back over the wire,
-    // so the refusal must surface on the event stream instead (spec §6 rule 4):
+    // so the refusal must surface on the event stream instead (spec §3.3 rule 4):
     // the sender saw the transport accept the frame, and the event is the only
     // trace that the message never reached the mailbox.
     let sim = Simulation::new(7);
@@ -294,7 +294,7 @@ fn a_remote_tell_into_a_full_mailbox_is_recorded_not_dropped() {
     );
 }
 
-// --- §4.4 / #10: an ActorRef in a message or reply rebinds on decode ----------
+// --- §2.10 / #10: an ActorRef in a message or reply rebinds on decode ----------
 
 // An actor that records the values it is told (lives on node A).
 #[derive(Serialize, Deserialize)]
@@ -354,7 +354,7 @@ fn actorref_in_a_message_rebinds_on_decode() {
         let collector = node_a.spawn(Collector { seen: observed });
         let echoer = node_b.spawn(Echoer);
         // A sends B a message embedding a ref to A's collector. B must decode the
-        // ref into a working handle and call back across the wire (spec §4.4).
+        // ref into a working handle and call back across the wire (spec §2.10).
         node_a
             .resolve::<Echoer>(echoer.id().clone())
             .tell(Callback {
@@ -373,7 +373,7 @@ fn actorref_in_a_message_rebinds_on_decode() {
     );
 }
 
-// A request whose *reply* carries an `ActorRef` (spec §4.4, #10).
+// A request whose *reply* carries an `ActorRef` (spec §2.10, #10).
 #[derive(Serialize, Deserialize)]
 struct Locate;
 impl Message for Locate {
@@ -402,7 +402,7 @@ fn actorref_in_a_reply_rebinds_on_decode() {
     // The message path (above) covers a ref carried *into* an actor; #10 also
     // requires rebinding a ref carried *out* in a reply. A asks B's provider for
     // a collector ref; the reply crosses the wire, so on decode at A the ref must
-    // rebind to a working handle that routes back to B (spec §4.4, #10).
+    // rebind to a working handle that routes back to B (spec §2.10, #10).
     let (sim, node_a, node_b) = two_nodes(11);
     let seen: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&seen);
@@ -427,7 +427,7 @@ fn actorref_in_a_reply_rebinds_on_decode() {
     );
 }
 
-// --- §4.3 #9: a local send performs no encode or decode -----------------------
+// --- §3.2 #9: a local send performs no encode or decode -----------------------
 
 /// The system codec with every call counted: a local `ask` or `tell` must leave
 /// both counters at zero (invariant #9). Delegates to JSON so a call that did
@@ -476,12 +476,12 @@ fn local_ask_and_tell_touch_no_codec() {
             codec.decodes.load(Ordering::SeqCst)
         ),
         (0, 0),
-        "a local ask/tell never encodes or decodes (spec §4.3, invariant #9)"
+        "a local ask/tell never encodes or decodes (spec §3.2, invariant #9)"
     );
 }
 
 // =============================================================================
-// Merged from actor.rs (spec §3, §6): the local actor model running on
+// Merged from actor.rs (spec §2.1, §3.3): the local actor model running on
 // `LocalSystem`; ask round-trip, registration, per-sender FIFO, serial
 // non-reentrant execution, and the bounded non-dropping mailbox.
 // =============================================================================
@@ -523,7 +523,7 @@ mod local_model {
     impl Actor for Greeter {
         type System = Sys;
 
-        // Macro-free remote registration, folded into the actor (spec §4.4).
+        // Macro-free remote registration, folded into the actor (spec §2.10).
         fn register(r: &mut HandlerRegistry<Self>) {
             r.accept::<Greet>();
         }
@@ -572,7 +572,7 @@ mod local_model {
         assert!(registry.dispatch("test.Unknown").is_none());
     }
 
-    // --- Per-sender FIFO (spec §6, invariant #3) ----------------------------------
+    // --- Per-sender FIFO (spec §3.3, invariant #3) ----------------------------------
 
     struct Log {
         seen: Arc<Mutex<Vec<u64>>>,
@@ -614,7 +614,7 @@ mod local_model {
         assert_eq!(*seen.lock().unwrap(), (0..10).collect::<Vec<_>>());
     }
 
-    // --- Serial, non-reentrant execution (spec §6, invariant #4) ------------------
+    // --- Serial, non-reentrant execution (spec §3.3, invariant #4) ------------------
 
     struct Guard {
         active: Arc<AtomicBool>,
@@ -664,7 +664,7 @@ mod local_model {
         assert_eq!((a, b), (Ok(true), Ok(true)));
     }
 
-    // --- Bounded, non-dropping mailbox (spec §6, invariant #5) --------------------
+    // --- Bounded, non-dropping mailbox (spec §3.3, invariant #5) --------------------
 
     struct Sink;
 
@@ -698,7 +698,7 @@ mod local_model {
 }
 
 // =============================================================================
-// Merged from cluster.rs (spec §4, §7): multi-node routing over the simulated
+// Merged from cluster.rs (spec §2.8, §2.13): multi-node routing over the simulated
 // network; the same `ask`/`tell` call site works whether the target is local
 // or remote (invariant #21), real JSON crosses every hop, and node/actor
 // failures surface as the right `CallError`.
@@ -847,7 +847,7 @@ mod remote_routing {
         let count = sim.block_on(async move {
             let counter = node_a.spawn(Counter { n: 0 });
             let remote = node_b.resolve::<Counter>(counter.id().clone());
-            // tell/ask from one sender to one recipient are FIFO (spec §6, §7.2).
+            // tell/ask from one sender to one recipient are FIFO (spec §3.3, §4).
             for _ in 0..5 {
                 remote.tell(Inc).await.unwrap();
             }
@@ -905,7 +905,7 @@ mod remote_routing {
         let (sim, node_a, node_b) = two_nodes(6);
         let result = sim.block_on(async move {
             let closed = node_a.spawn(Closed);
-            // Allowlist (spec §5, §15): the manifest is not registered on the target.
+            // Allowlist (spec §2.11, §9): the manifest is not registered on the target.
             node_b
                 .resolve::<Closed>(closed.id().clone())
                 .ask(Greet { name: "x".into() })

@@ -1,5 +1,5 @@
-//! The simulated external registry for registry-based mode (spec §9.4.2,
-//! §18.2, §18.3).
+//! The simulated external registry for registry-based mode (spec §6.4.2,
+//! §2.12.2, §10).
 //!
 //! [`SimRegistry`] implements the [`RegistryClient`] seam the registry-based
 //! control plane syncs against, with **seeded faults**: latency on every fetch,
@@ -38,11 +38,11 @@ struct SimRegistryState {
     entries: BTreeMap<NodeId, (RegistryState, u64)>,
     /// Recent snapshots, oldest first: what a stale read is served from.
     history: Vec<RegistrySnapshot>,
-    /// While `false`, every client call fails `Unavailable` (spec §9.4.2 item 6).
+    /// While `false`, every client call fails `Unavailable` (spec §6.4.2 item 6).
     available: bool,
-    /// Outage windows opened so far (coverage telemetry, spec §18.3).
+    /// Outage windows opened so far (coverage telemetry, docs/simulation-testing.md).
     outages: u64,
-    /// Stale snapshots served so far (coverage telemetry, spec §18.3).
+    /// Stale snapshots served so far (coverage telemetry, docs/simulation-testing.md).
     stale_served: u64,
 }
 
@@ -72,7 +72,7 @@ impl SimRegistryState {
     }
 }
 
-/// The simulated external registry (spec §9.4.2, §18.2). Cloning shares the same
+/// The simulated external registry (spec §6.4.2, §2.12.2). Cloning shares the same
 /// registry. [`client`](SimRegistry::client) yields the [`RegistryClient`] handle
 /// a [`SimNetwork`](crate::SimNetwork) node syncs against; the mutation methods
 /// are the operator side a test drives directly.
@@ -104,7 +104,7 @@ impl SimRegistry {
         }
     }
 
-    /// Enable seeded registry faults (spec §18.3).
+    /// Enable seeded registry faults (docs/simulation-testing.md).
     pub fn with_faults(mut self, faults: RegistryFaultPolicy) -> SimRegistry {
         self.faults = faults;
         self
@@ -115,7 +115,7 @@ impl SimRegistry {
         Arc::new(self.clone())
     }
 
-    /// Toggle availability (spec §9.4.2 item 6): while unavailable, every
+    /// Toggle availability (spec §6.4.2 item 6): while unavailable, every
     /// client call fails `Unavailable`. Mutations through this operator handle
     /// still apply: the registry exists; only the cluster's path to it is out.
     pub fn set_available(&self, available: bool) {
@@ -126,7 +126,7 @@ impl SimRegistry {
         state.available = available;
     }
 
-    /// The registry faults this instance has exercised so far (spec §18.3), as
+    /// The registry faults this instance has exercised so far (docs/simulation-testing.md), as
     /// the registry rows of [`FaultStats`]. The cluster driver sums them with
     /// the network's.
     pub fn fault_stats(&self) -> FaultStats {
@@ -147,7 +147,7 @@ impl SimRegistry {
     }
 
     /// Register `node` as a member (`Up`): the operator/platform admission
-    /// (spec §9.4.2 item 2). Returns the mutation's revision.
+    /// (spec §6.4.2 item 2). Returns the mutation's revision.
     pub fn register(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
             let revision = state.revision;
@@ -155,13 +155,13 @@ impl SimRegistry {
         })
     }
 
-    /// Cordon `node` for maintenance (spec §9.4.2 item 5). A no-op revision
+    /// Cordon `node` for maintenance (spec §6.4.2 item 5). A no-op revision
     /// bump if `node` is not registered.
     pub fn drain(&self, node: NodeId) -> u64 {
         self.set_state(node, RegistryState::Draining)
     }
 
-    /// Return a drained `node` to service (spec §9.4.2 item 5).
+    /// Return a drained `node` to service (spec §6.4.2 item 5).
     pub fn resume(&self, node: NodeId) -> u64 {
         self.set_state(node, RegistryState::Up)
     }
@@ -176,7 +176,7 @@ impl SimRegistry {
     }
 
     /// Remove `node` from the registry: the removal finalizes `down` at this
-    /// revision (spec §9.4.2 items 3–4).
+    /// revision (spec §6.4.2 items 3–4).
     pub fn deregister(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
             state.entries.remove(&node);
@@ -189,7 +189,7 @@ impl RegistryClient for SimRegistry {
         let registry = self.clone();
         Box::pin(async move {
             // Seeded latency: the read takes virtual time, so a sync can lag a
-            // mutation (spec §18.3).
+            // mutation (docs/simulation-testing.md).
             if !registry.faults.max_latency.is_zero() {
                 let span = registry.faults.max_latency.as_nanos() as u64 + 1;
                 let delay = Duration::from_nanos(registry.entropy.next_u64() % span);

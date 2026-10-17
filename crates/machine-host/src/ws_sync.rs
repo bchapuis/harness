@@ -1,9 +1,9 @@
 //! The workspace as a tar stream, through a capability handle (sandbox spec
-//! §3.1, S1; feature `ws`).
+//! §4.1, S1; feature `ws`).
 //!
 //! Both microVM consumers move a host-side workspace directory in and out of
 //! a guest as a capped tar stream over vsock: the agent sandbox's `Native`
-//! tier brackets every call with it (sandbox spec §3.5), and the persistent
+//! tier brackets every call with it (sandbox spec §4), and the persistent
 //! machine syncs its workspace facet at boot and at capture quiescent points
 //! (machine spec §4). This module owns the codec; each consumer keeps its own
 //! wire protocol around it.
@@ -19,7 +19,7 @@
 //! deterministic (sorted entries, zero mtimes) and budgeted against
 //! [`MAX_TAR`] *before* bytes accumulate (headers and all), so a workspace
 //! beyond the cap fails the pack rather than sizing an unmetered host
-//! allocation (the sandbox spec §3.2 stance).
+//! allocation (the sandbox spec §4.2 stance).
 
 use std::path::Path;
 

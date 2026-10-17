@@ -1,16 +1,18 @@
-//! Catalogue drift test (wal spec §7): the machine-readable L1–L4 table stays
-//! complete, and every test it names still exists.
+//! Catalogue drift test: the machine-readable L1-L4 table stays complete, every
+//! test it names still exists, and it agrees with the invariant table in the
+//! crate docs, which state the contract.
 //!
 //! # Why this one is self-contained
 //!
-//! Its siblings share `actor_simulation::{CatalogueEntry, Verify}`. This crate
-//! cannot: `wal` "sits below its callers and depends on none of them" (spec §1),
-//! and `actor-simulation` depends on `actor-cluster`, which depends on `wal` for
-//! its Raft log. A dev-dependency on the shared types would close that loop:
-//! Cargo tolerates a dev-dependency cycle, but the layering claim in §1 is load
-//! bearing, and a crate that quietly depends on its own consumers is exactly what
-//! it exists to rule out. So the shape is mirrored here in a dozen lines rather
-//! than imported.
+//! Its siblings share `actor_simulation::{CatalogueEntry, Verify}`. Nothing
+//! forbids that here (`actor-simulation` does not depend on this crate, so the
+//! dev-dependency would close no cycle), but it would cost more than it gives.
+//! `wal` is a leaf: it depends on `compat` and third-party crates only, and a
+//! dev-dependency on the simulation crate would build the actor runtime and the
+//! cluster stack beneath it to run this crate's tests, for a struct of four
+//! fields. And the shared `Verify` is a vocabulary for pointing at suites and
+//! checkers, while every row here names test functions only. So the shape is
+//! mirrored here in a dozen lines rather than imported.
 //!
 //! # Why this one checks names, not files
 //!
@@ -18,18 +20,17 @@
 //! Nearly all of wal's verification is `#[test]` functions inside `src/lib.rs`, so
 //! a file-existence check would assert only that `lib.rs` still exists: true, and
 //! worth nothing. This scans for each named function instead, which is the check
-//! that catches the failure that matters: a renamed test leaving the spec's
-//! "Verified by" column pointing at nothing.
+//! that catches the failure that matters: a renamed test leaving a row pointing at
+//! nothing.
 
 use std::path::Path;
 
-use spec::catalogue;
-
-/// One row of the L-catalogue: the invariant number, the spec sections defining
-/// it, a one-line property, and the test functions verifying it.
+/// One row of the L-catalogue: the invariant number, the crate-doc sections
+/// defining it, a one-line property, and the test functions verifying it.
 struct CatalogueEntry {
     invariant: u8,
-    spec: &'static str,
+    /// Headings of the crate root's `# Contract` section, as written there.
+    defined_in: &'static [&'static str],
     property: &'static str,
     tests: &'static [&'static str],
 }
@@ -37,7 +38,7 @@ struct CatalogueEntry {
 const L_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
-        spec: "wal §3.1",
+        defined_in: &["Opening and recovery"],
         property: "Prefix recovery: open returns exactly the maximal prefix of valid frames; the first incomplete, oversized, checksum-failing, or unparsable frame and everything after it is discarded, and the file is truncated to the valid length before any append",
         tests: &[
             "a_torn_tail_is_discarded_and_appends_continue",
@@ -50,7 +51,7 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 2,
-        spec: "wal §3.2-§3.4",
+        defined_in: &["Writing"],
         property: "Acknowledged-record durability: a record acknowledged by a returned append/append_batch/rewrite is recovered byte-identically across a reopen, unless a later truncate or rewrite removes it",
         tests: &[
             "records_round_trip_across_a_reopen",
@@ -61,7 +62,7 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 3,
-        spec: "wal §3.4, §5",
+        defined_in: &["Writing", "Whole-file replacement and sidecars"],
         property: "Atomic whole-file replacement: rewrite and atomic_replace leave, after any crash, either the whole prior file or the whole new file, never a torn intermediate; concurrent atomic_replace calls on one name all succeed, and the file that lands is one caller's whole bytes",
         tests: &[
             "rewrite_replaces_the_whole_file_and_reopens",
@@ -73,7 +74,7 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 4,
-        spec: "wal §4",
+        defined_in: &["The record bound"],
         property: "Write/recovery bound agreement: max_record bounds a frame's payload identically at both ends, so a payload recovery would reject for size cannot be written; the write panics instead of acknowledging a record the next open would silently drop",
         tests: &["appending_a_record_past_the_limit_panics_instead_of_losing_it"],
     },
@@ -106,7 +107,7 @@ fn every_invariant_l1_through_l4_is_present_exactly_once() {
 }
 
 #[test]
-fn every_entry_has_spec_property_and_a_verification_method() {
+fn every_entry_has_a_section_property_and_a_verification_method() {
     for e in L_CATALOGUE {
         assert!(
             !e.tests.is_empty(),
@@ -114,8 +115,8 @@ fn every_entry_has_spec_property_and_a_verification_method() {
             e.invariant
         );
         assert!(
-            !e.spec.is_empty() && !e.property.is_empty(),
-            "L{} is missing spec or property text",
+            !e.defined_in.is_empty() && !e.property.is_empty(),
+            "L{} is missing its defining section or property text",
             e.invariant
         );
     }
@@ -131,7 +132,7 @@ fn every_named_test_exists() {
             assert!(
                 sources.contains(&format!("fn {name}(")),
                 "L{} names test {name:?}, which is not defined in this crate; \
-                 a rename left the spec's \"Verified by\" column pointing at nothing",
+                 a rename left this row pointing at nothing",
                 e.invariant,
             );
         }
@@ -143,9 +144,9 @@ fn every_named_test_exists() {
 ///
 /// Only `crash_points.rs` is held to this. `src/lib.rs` legitimately carries tests
 /// that pin no numbered invariant (the header re-stamping rule, the
-/// `max_record`/magic aliasing assert), and requiring an
-/// L-number for each would push those numbers into the spec to satisfy a test,
-/// which is backwards. The crash-point suite has no such cases: it exists solely
+/// `max_record`/magic aliasing assert), and requiring an L-number for each
+/// would push those numbers into the contract to satisfy a test, which is
+/// backwards. The crash-point suite has no such cases: it exists solely
 /// to decide L1 and L2.
 #[test]
 fn every_crash_point_test_is_claimed_by_an_invariant() {
@@ -178,33 +179,44 @@ fn every_crash_point_test_is_claimed_by_an_invariant() {
     }
 }
 
-/// The table above and the wal spec's §7 copy of it are the same table.
+/// The table above and the crate docs' invariant table are the same table.
 ///
 /// The gates above hold this copy internally consistent and its names real. This
-/// holds it equal to the prose one, which is the copy a reader trusts.
-///
-/// `spec` is safe to take here where `actor-simulation` was not (see the
-/// header): it reads `docs/` and depends on nothing, so it adds no layer beneath
-/// this crate and closes no cycle. Both copies name test *functions*, which makes
-/// this the one catalogue whose "Verified by" column compares as written.
+/// holds it equal to the one in `src/lib.rs`, which is the copy a reader trusts:
+/// each row's number appears there exactly once, and each section it names is a
+/// heading of the crate docs.
 #[test]
-fn the_specification_and_this_catalogue_agree() {
-    let site = catalogue::site("wal");
-    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("wal spec §7 parses");
-    let implemented: Vec<catalogue::Row> = L_CATALOGUE
-        .iter()
-        .map(|e| catalogue::Row::new(e.invariant, e.spec))
+fn the_crate_docs_and_this_catalogue_agree() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let source = std::fs::read_to_string(&path).expect("src/lib.rs is readable");
+    let docs: Vec<&str> = source
+        .lines()
+        .take_while(|line| line.starts_with("//!"))
         .collect();
 
-    let found = catalogue::compare(site, &documented, &implemented);
-    assert!(
-        found.is_empty(),
-        "wal spec §7 and L_CATALOGUE disagree:\n  {}\n",
-        found
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n  "),
+    let rows: Vec<&str> = docs
+        .iter()
+        .filter_map(|line| line.strip_prefix("//! | L"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        L_CATALOGUE.len(),
+        "the crate docs' invariant table and L_CATALOGUE list different rows",
     );
+    for e in L_CATALOGUE {
+        let label = format!("{} |", e.invariant);
+        assert_eq!(
+            rows.iter().filter(|row| row.starts_with(&label)).count(),
+            1,
+            "L{} must appear exactly once in the crate docs' invariant table",
+            e.invariant,
+        );
+        for section in e.defined_in {
+            assert!(
+                docs.contains(&format!("//! ## {section}").as_str()),
+                "L{} is defined in {section:?}, which is not a heading of the crate docs",
+                e.invariant,
+            );
+        }
+    }
 }

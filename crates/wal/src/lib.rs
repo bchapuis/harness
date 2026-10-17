@@ -1,27 +1,171 @@
-//! A generic, framed, checksummed write-ahead log on the local filesystem.
+//! A framed, checksummed, append-only write-ahead log on the local filesystem, and
+//! the atomic whole-file replacement that goes with it.
 //!
-//! A divergence between the write path and the recovery path mis-recovers a node, so
-//! framing, checksumming, recovery, and atomic rewrite live here, once.
+//! This crate owns the **durable-file contract**: how a record is framed, what
+//! recovery returns, and what survives a crash. Its callers are the file-backed
+//! implementations of two storage seams, `actor-runtime`'s `FileRaftWAL` (for
+//! `actor-cluster`'s `RaftWAL`) and `entity`'s `FileEntityStore` (for its
+//! `EntityStore`); each seam also has an in-memory implementation that never
+//! touches this crate. What a record means, and what a failure to persist one
+//! implies, stay with the caller. The write path and the recovery path are one
+//! contract read from two ends: if they disagreed on what a valid record is, a node
+//! would silently drop a record it acknowledged, or replay one it never finished
+//! writing, while each path looked correct alone. So both are built here, from one
+//! framing and one bound. The crate sits below its callers and depends on none of
+//! them, only on [`compat`] for the stamp vocabulary.
 //!
-//! # The log
+//! # Contract
 //!
-//! [`Wal<T>`] is a 12-byte header followed by an append-only run of postcard-encoded
-//! `T` records, each framed
-//! `[u32 little-endian length][postcard payload][u64 little-endian checksum]`
-//! and fsynced before the call that wrote it returns. It exposes four operations:
+//! ## Seams
 //!
-//! - [`append`](Wal::append) / [`append_batch`](Wal::append_batch): frame and fsync
-//!   one record, or many in a single write and a single fsync.
-//! - [`truncate`](Wal::truncate): drop a conflicting suffix back to the first `keep`
-//!   records, a `set_len` at the record's recorded offset.
-//! - [`rewrite`](Wal::rewrite): atomically replace the whole file with exactly the
-//!   given records (compaction to a retained suffix, or to a single record that
-//!   subsumes the prior history).
+//! - [`Wal<T>`]: one log file of `postcard`-encoded `T` records
+//!   (`T: Serialize + DeserializeOwned`), opened under the caller's record
+//!   [`compat::Format`]. Synchronous and single-handle: one `Wal` owns one append
+//!   handle to one file. Two handles on one path are outside the contract; the
+//!   caller serializes access through its own single writer.
+//! - [`atomic_replace`] and [`Sidecar`]: durable state that is one small file
+//!   rewritten whole, such as a fence term or a seal bound.
+//! - [`checksum`], [`sync_dir`], and [`HEADER_LEN`]: the frame digest, the directory
+//!   fsync, and the header width, for a caller that frames its own bytes or edits a
+//!   log's (a crash-point test, a corruption fixture).
 //!
-//! [`open`](Wal::open) scans the file into its records, **truncating any torn tail to
-//! disk** before returning: a record whose write never completed was never
-//! acknowledged, so dropping it is correct. Whatever higher-level recovery runs on top
-//! operates on the returned records.
+//! ## The file
+//!
+//! A log file is a header followed by zero or more frames in append order. There is
+//! no trailer and no file-wide checksum: past the header, the file means the maximal
+//! run of valid frames.
+//!
+//! ```text
+//! header: [magic: 89 57 41 4C 0D 0A 1A 0A][u16 frame version][u16 record schema]
+//! frame:  [u32 length][payload: the postcard encoding of one T][u64 checksum]
+//! ```
+//!
+//! Integers are little-endian, `length` counts the payload's bytes alone, and fields
+//! are contiguous, with no padding. The magic follows the PNG convention: a high-bit
+//! byte, the name, then a CRLF/EOF trap that catches a text-mode transfer. The checksum is XXH3-64 over the payload alone. It
+//! detects torn and partial writes, not tampering, and it does not vary across
+//! platforms, builds, or runs, so a file one build wrote recovers identically under
+//! another. The header carries no checksum of its own: each of its bytes is
+//! validated against a known value.
+//!
+//! The header's length and layout belong to the frame version (the `wal.frame`
+//! format; version 1 is the twelve bytes above). Only the magic and the `u16` after
+//! it are fixed across versions, because a reader consults them before it knows the
+//! layout. The record-schema field belongs to the caller: [`Wal::open`] writes the
+//! caller's version into a new file, admits it on an existing one, and never
+//! interprets it. Records are positional `postcard`, so `T` can carry no version of
+//! its own, and **any change to `T` is a new record-schema version**, an enum variant
+//! appended at the end included. A build that cannot decode a record reads it as a
+//! torn tail and drops it (L1), where a bumped version is refused by name.
+//!
+//! ## Opening and recovery
+//!
+//! [`Wal::open`] admits the whole header (the magic, then the frame version, then the
+//! record schema) before it scans a single frame, so a file this build cannot read is
+//! never partially interpreted. A refusal is an [`io::ErrorKind::InvalidData`] error
+//! whose message names the format and either the version found or that the file is
+//! not stamped. A file whose bytes are a prefix of the header `open` would write (a
+//! missing file, an empty one, a header torn by a crash before its fsync) holds no
+//! records, because the header is fsynced before any frame can follow it: `open`
+//! stamps it in place. Any other file too short to hold a header is refused, so that
+//! rule cannot overwrite a foreign file.
+//!
+//! Past the header, the log is the **maximal valid prefix** of frames. The scan stops
+//! at the first frame that is incomplete (fewer bytes remain than it claims),
+//! oversized (`length > max_record`), checksum-failing, or unparsable as `T`. That
+//! frame and everything after it is the torn tail, which no returned append ever
+//! acknowledged, so dropping it is correct. When the tail is not empty, `open`
+//! truncates the file to the valid length and fsyncs it before returning, so no later
+//! append lands after unacknowledged bytes. A scanned `length` never drives an
+//! allocation. When `open` creates the file, it fsyncs the parent directory; a
+//! directory the caller created to hold the log is the caller's to sync
+//! ([`sync_dir`]).
+//!
+//! ## Writing
+//!
+//! - [`append`](Wal::append) and [`append_batch`](Wal::append_batch) frame their
+//!   records into one buffer, write it at the end of the file, and fsync before
+//!   returning: a returned append is durable and acknowledged. A batch is one write
+//!   and one fsync; an empty batch is a no-op.
+//! - [`truncate(keep)`](Wal::truncate) drops every record past the first `keep` and
+//!   fsyncs before returning; `keep >= len()` is a no-op. It discards a diverging
+//!   suffix before its replacement is appended.
+//! - [`rewrite`](Wal::rewrite) replaces the whole file with exactly the given
+//!   records, under a fresh header, by the [`atomic_replace`] discipline, and reopens
+//!   the append handle: a crash leaves the whole old file or the whole new one. It is
+//!   the compaction primitive; when and what to compact is the caller's policy.
+//! - [`len`](Wal::len) and [`is_empty`](Wal::is_empty) reflect the records the log
+//!   holds. The crate keeps no copy of a record after `open` returns it.
+//!
+//! ## The record bound
+//!
+//! `max_record`, given at `open`, bounds one frame's payload at both ends. Recovery
+//! treats a larger `length` as corruption that ends the valid prefix, and framing a
+//! larger payload **panics** rather than writing it (L4): written, it would be
+//! acknowledged and then dropped by the next `open`. The panic is right because an
+//! over-bound record is a caller bug (a mis-sized bound, an unexpectedly large `T`),
+//! not a runtime condition. `max_record` must stay below `0x4C41_5789`, the magic's
+//! first four bytes read as a little-endian `u32` (`open` asserts it): a headerless
+//! file begins with a frame length no larger than `max_record`, so it can never begin
+//! with the magic, and its refusal is certain rather than probable.
+//!
+//! ## Whole-file replacement and sidecars
+//!
+//! [`atomic_replace`] writes a scratch file in the target's directory, fsyncs it,
+//! renames it over the target, and fsyncs the directory, so a reader sees either the
+//! old file or the whole new one. Concurrent calls on one name all succeed, and the
+//! file that lands is exactly one caller's bytes; which one is unspecified, since the
+//! call replaces atomically and does not serialize. A crash between create and rename
+//! may leave a scratch file behind, under a name no caller reads back as content. A
+//! caller that enumerates such a directory must skip names it cannot decode, and must
+//! not delete them while a call may be replacing into the directory: a stray cannot
+//! be told from a live scratch file, and deleting that fails the call's rename. Strays
+//! go with the whole directory.
+//!
+//! [`Sidecar`] is the stamped `u64` file built on it. Its body behind the
+//! [`compat::Stamp`] is positional `postcard`, `{ checksum, value }`, the checksum
+//! being [`checksum`] over the value's little-endian bytes. A read admits the stamp
+//! before any field and answers `None` for an absent file only: a short or long file,
+//! a foreign or missing magic, or a checksum mismatch is an `InvalidData` refusal
+//! naming the format and the path, because a durable fence read back as *no fence*
+//! loses a safety property with no diagnostic anywhere.
+//!
+//! ## Failure policy
+//!
+//! Every fallible call returns [`io::Result`], and the crate decides nothing about
+//! what an I/O failure means: it neither retries, nor masks, nor panics on one (the
+//! over-bound panic is a caller bug, not an I/O failure). Both callers poison
+//! themselves on one, recording the cause and refusing every later write, because a
+//! store that could not persist a record cannot safely acknowledge anything after
+//! it. Nor does the crate mask corruption: a checksum failure, a torn tail, and a
+//! parse failure all surface as a shorter valid prefix, never as an error and never
+//! as a patched record.
+//!
+//! ## Invariants
+//!
+//! | # | Invariant | Defined in |
+//! |---|---|---|
+//! | L1 | **Prefix recovery.** `open` returns exactly the maximal prefix of valid frames, discards the first incomplete, oversized, checksum-failing, or unparsable frame and everything after it, and truncates the file to the valid length before any append. | [Opening and recovery](#opening-and-recovery) |
+//! | L2 | **Acknowledged-record durability.** A record acknowledged by a returned `append`, `append_batch`, or `rewrite` is recovered byte-identically across a reopen, unless a later `truncate` or `rewrite` removes it; each such call fsyncs its effect, and the directory entry of a file it creates, before returning. | [Writing](#writing) |
+//! | L3 | **Atomic whole-file replacement.** After any crash, `rewrite` and `atomic_replace` leave either the whole prior file or the whole new one. Concurrent `atomic_replace` calls on one name all succeed, and the file that lands is one caller's whole bytes. | [Writing](#writing), [Whole-file replacement and sidecars](#whole-file-replacement-and-sidecars) |
+//! | L4 | **Write/recovery bound agreement.** `max_record` bounds a payload identically at both ends: a payload recovery would reject for size cannot be written. | [The record bound](#the-record-bound) |
+//!
+//! `tests/conformance_catalogue.rs` holds the tests that decide each row and checks
+//! this table against them; `tests/crash_points.rs` decides L1 and L2 at every byte
+//! offset and every single-byte corruption rather than sampling them.
+//!
+//! ## Non-goals
+//!
+//! - **Concurrency.** One handle, one writer; the crate adds no locking.
+//! - **Tamper resistance.** The digest catches accidental corruption, not a
+//!   malicious edit.
+//! - **Segmentation or rotation.** A `Wal` is one file. A caller that wants bounded
+//!   files segments above the crate and compacts with `rewrite`.
+//! - **Deferred: group commit across handles.** Batching fsyncs for many small logs
+//!   sharing a disk would trade a bounded latency for throughput; not built until a
+//!   caller needs it.
+//!
+//! # Mechanism
 //!
 //! The scan reads the whole file and verifies every frame, rather than trusting a
 //! stored checkpoint offset and starting from there. That is a deliberate purchase of
@@ -30,41 +174,15 @@
 //! fraction of a second, and a checkpoint pointer is one more thing a crash can leave
 //! lying (`docs/hardware-envelope.md` §3.3).
 //!
-//! # The header
-//!
-//! The header carries a magic, the **frame layout's** version (this crate's own), and
-//! a **record-schema** version that belongs to the caller and that this crate admits
-//! against the caller's [`compat::Format`] and never interprets. That last field is
-//! the load-bearing one: a `Wal<T>`'s records are postcard, which is positional and
-//! has no field names, so `T` cannot gain a field and its version has nowhere to
-//! live except outside the payload.
-//!
-//! [`open`](Wal::open) therefore takes the caller's format and does the refusing
-//! itself, rather than exposing the header for a caller to check.
-//!
-//! # Sidecars
-//!
-//! Some durable state is not a log but a single small file rewritten in place (a
-//! generation counter, a small piece of metadata, a checkpoint pointer). For those,
-//! [`atomic_replace`] writes `tmp → fsync → rename → fsync dir` so a reader sees
-//! either the old file or the whole new one, never a torn mix. [`Sidecar`] is the
-//! stamped, checksummed `u64` sidecar every such file in the tree is (a fence term,
-//! a seal bound), written and read here once; [`checksum`] and
-//! [`sync_dir`] are exposed for framing one's own sidecar bytes.
-//!
-//! # Failure policy
-//!
-//! Every method returns [`io::Result`]: this crate does not decide what an I/O
-//! failure *means*. The caller does. Code that cannot persist a record it must not
-//! lose cannot safely acknowledge anything after it, so both callers in this tree
-//! poison themselves: they record the cause and refuse every later write, rather
-//! than unwinding a task and leaving the node up with nothing behind it.
-//!
-//! [`open`](Wal::open) has a second failure that is not an I/O event at all: a file
-//! this build cannot read. The bytes are intact and the disk is fine; the refusal is
-//! policy. It surfaces as [`io::ErrorKind::InvalidData`] whose message names the
-//! format and the version found (compatibility §2), so a caller that logs it says
-//! which file and which build disagree.
+//! The write path and the scan share one framing definition (`frame_onto` and
+//! `scan`, both sized from the same length and checksum widths), and an append frames
+//! into a buffer the log keeps across calls, so a steady-state append allocates
+//! nothing (see [`Wal::append_batch`] for the buffer policy and the choice of
+//! `sync_all`). [`Wal`] keeps each record's frame offset, which makes `truncate` a
+//! single `set_len`. A refusal from [`compat`] becomes an `InvalidData` error carrying
+//! the [`compat::Incompatible`] itself, whose message names the format and the
+//! version found (compatibility §2.1), so a caller that logs it says which file and
+//! which build disagree.
 
 use std::fs;
 use std::fs::File;
@@ -174,7 +292,7 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
-/// A stamped **sidecar**: one `u64` written whole to a small file of its own (§5),
+/// A stamped **sidecar**: one `u64` written whole to a small file of its own,
 /// the shape of a fence term or a seal bound.
 ///
 /// The body behind the stamp is positional `postcard`: a [`checksum`] over the value,
@@ -311,11 +429,12 @@ const CHECKSUM_BYTES: usize = size_of::<u64>();
 /// instead of scanned for frames that happen to parse.
 const MAGIC: &[u8] = b"\x89WAL\r\n\x1a\n";
 
-/// The frame layout's version (compatibility spec §3). Version 1 is the
-/// `[len][payload][checksum]` framing of §2.
+/// The frame layout's version (compatibility spec §4). Version 1 is the
+/// `[len][payload][checksum]` framing the crate docs describe under
+/// [The file](crate#the-file).
 const FRAME: compat::Stamp = compat::Stamp::new(MAGIC, compat::Format::new("wal.frame", 1));
 
-/// The file header's width: the frames begin after it (§2.1). Public because a
+/// The file header's width: the frames begin after it. Public because a
 /// caller that edits a log's bytes (a crash-point test, a corruption fixture)
 /// needs the offset the framing starts at, and a second copy of it would not
 /// move when the header does.
@@ -329,7 +448,7 @@ const FRAME: compat::Stamp = compat::Stamp::new(MAGIC, compat::Format::new("wal.
 pub const HEADER_LEN: usize = 12;
 
 /// Build the header a new log opens with. `records` is the caller's schema
-/// version: this crate stores and returns it without interpreting it (§2).
+/// version: this crate stores and returns it without interpreting it.
 fn header(records: compat::Version) -> Vec<u8> {
     let bytes = FRAME.stamp(&records.0.to_le_bytes());
     debug_assert_eq!(bytes.len(), HEADER_LEN, "the header is a fixed width");
@@ -905,7 +1024,7 @@ mod tests {
     }
 
     /// A sidecar file longer than the body this build writes is a refusal, not a
-    /// value read out of its prefix (§5 rule 4). `postcard` stops at the end of the
+    /// value read out of its prefix ([`Sidecar`]). `postcard` stops at the end of the
     /// fields it wanted and says nothing about what follows, so a decoder that does
     /// not check the remainder reads a foreign or half-rewritten file as a good one.
     #[test]
@@ -1093,7 +1212,7 @@ mod tests {
     }
 
     /// The one crash point the replace discipline leaves visible: a crash between
-    /// creating the scratch file and renaming it (§5 rule 1). The scratch file is
+    /// creating the scratch file and renaming it ([`atomic_replace`]). The scratch file is
     /// a whole or partial *replacement* that never landed, so the log a reopen
     /// finds is the whole prior file, and the stray is left where it is rather
     /// than adopted or removed (a caller that enumerates the directory skips it).

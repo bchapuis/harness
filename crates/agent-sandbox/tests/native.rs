@@ -1,7 +1,7 @@
 //! Native-tier conformance (feature `native`): S1 (the container reaches the
 //! host filesystem through the workspace mount only, and no network) and S5
 //! (the container is removed on release, idempotently), plus the loss
-//! conduct of sandbox spec §4.
+//! conduct of sandbox spec §5.
 //!
 //! Tests that drive docker probe for it first and skip (eprintln + return)
 //! when unavailable, so a machine without docker stays green. The pinned
@@ -246,7 +246,7 @@ async fn a_named_egress_allowlist_fails_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let provider = TieredSandboxes::new().with_container_cli("docker");
 
-    // §2.2: holding Native implies Network's grants; --network none delivers
+    // §3.2: holding Native implies Network's grants; --network none delivers
     // an empty allowlist only, so a profile naming egress must fail loudly.
     let mut egress = SandboxProfile::image(IMAGE);
     egress.egress = vec!["api.example.com".to_string()];
@@ -273,7 +273,7 @@ async fn provisioning_is_lazy_and_counted() {
     let provider = TieredSandboxes::new().with_container_cli("docker");
     let sandbox = open(&provider, "lazy", &dir.path().join("lazy")).await;
 
-    // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
+    // A Workspace call provisions nothing (sandbox spec §3.3 item 2).
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await
         .expect("write");
@@ -316,7 +316,7 @@ async fn release_removes_the_container_and_is_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// Loss conduct (sandbox spec §4)
+// Loss conduct (sandbox spec §5)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -338,7 +338,7 @@ async fn an_externally_killed_container_is_single_tier_loss() {
     assert!(killed.status.success());
 
     // Single-tier loss: an ordinary ToolError, never EnvironmentLost, never
-    // a silent re-grant on this call (sandbox spec §4).
+    // a silent re-grant on this call (sandbox spec §5).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::Sandbox(_))),
@@ -372,7 +372,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
     assert!(killed.status.success());
     std::fs::remove_dir_all(dir.path().join("lost")).expect("external loss");
 
-    // Only EnvironmentLost engages the agent runtime's reset protocol (agent §5.5).
+    // Only EnvironmentLost engages the agent runtime's reset protocol (agent §4.4).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::EnvironmentLost(_))),

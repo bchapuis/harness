@@ -1,13 +1,13 @@
-//! Conformance: node **restart** under deterministic simulation (spec §9.1,
-//! §9.4, §18.3); the crash-and-recover scenario the isolation-style `crash`
+//! Conformance: node **restart** under deterministic simulation (spec §6.1,
+//! §6.4, §10); the crash-and-recover scenario the isolation-style `crash`
 //! cannot model.
 //!
 //! [`SimNetwork::restart`] stops a node abruptly (no graceful leave) and brings
 //! up a successor under the same identity. What must survive is exactly the
 //! durable state each mode defines: a voter's Raft term, vote, and log (spec
-//! §9.4.3 item 2; the double-vote hazard), and the node's *identity* in the
-//! modes that require it stable across restarts (static §9.4.1, registry-based
-//! §9.4.2 item 5). Everything else (actors, the membership view, Raft's
+//! §6.4.3 item 2; the double-vote hazard), and the node's *identity* in the
+//! modes that require it stable across restarts (static §6.4.1, registry-based
+//! §6.4.2 item 5). Everything else (actors, the membership view, Raft's
 //! volatile role) is correctly lost and rebuilt.
 
 mod support;
@@ -38,7 +38,7 @@ const C: NodeId = NodeId::new(3);
 
 #[test]
 fn a_restarted_voter_recovers_its_persisted_raft_state() {
-    // Spec §9.4.3 item 2: a voter's term, vote, and log survive a restart.
+    // Spec §6.4.3 item 2: a voter's term, vote, and log survive a restart.
     // Commit a drain, restart a voter, and the restarted instance (whose
     // volatile membership view started empty) reconverges on the committed
     // state from its persisted log and the leader's replication, then takes
@@ -129,7 +129,7 @@ fn restarting_a_majority_does_not_lose_committed_state() {
 
 #[test]
 fn a_restarted_registry_member_keeps_its_membership() {
-    // Spec §9.4.2 item 5: node identity is stable across restarts in
+    // Spec §6.4.2 item 5: node identity is stable across restarts in
     // registry-based mode; a draining member that restarts is still the same
     // draining member, resynced from the registry, never evicted.
     let sim = Simulation::new(3);
@@ -160,7 +160,7 @@ fn a_restarted_registry_member_keeps_its_membership() {
     assert_eq!(
         a.membership().status(B),
         Some(MemberStatus::Draining),
-        "B is the same member throughout: a restart never evicts (spec §9.4.2 item 5)",
+        "B is the same member throughout: a restart never evicts (spec §6.4.2 item 5)",
     );
     assert_eq!(
         a.membership().reachability(B),
@@ -171,7 +171,7 @@ fn a_restarted_registry_member_keeps_its_membership() {
 
 #[test]
 fn a_restarted_static_member_resumes_its_place_in_the_roster() {
-    // Spec §9.4.1: static identity is stable; a restarted node resumes its
+    // Spec §6.4.1: static identity is stable; a restarted node resumes its
     // place, ActorIds minted by its previous run dead-letter like any resigned
     // actor's, and fresh actors on it are addressable again.
     let sim = Simulation::new(4);
@@ -192,7 +192,7 @@ fn a_restarted_static_member_resumes_its_place_in_the_roster() {
     assert_eq!(
         a.membership().status(B),
         Some(MemberStatus::Up),
-        "the roster is exactly as configured: a restart changes nothing (spec §9.4.1)",
+        "the roster is exactly as configured: a restart changes nothing (spec §6.4.1)",
     );
     // The previous run's ActorId still resolves to B and dead-letters there.
     let stale: ActorRef<Echo> = a.resolve(old_id);
@@ -200,7 +200,7 @@ fn a_restarted_static_member_resumes_its_place_in_the_roster() {
     assert_eq!(
         reply,
         Err(CallError::DeadLetter),
-        "an id minted by the previous run dead-letters (spec §9.4.1)",
+        "an id minted by the previous run dead-letters (spec §6.4.1)",
     );
     // A fresh actor on the restarted node is addressable as ever.
     let new_echo = b2.spawn(Echo);

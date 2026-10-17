@@ -1,4 +1,4 @@
-//! The actor and handler traits, and termination reasons (spec §3.1, §3.2, §12).
+//! The actor and handler traits, and termination reasons (spec §2.1, §2.1, §2.5).
 
 use std::future::Future;
 
@@ -17,7 +17,7 @@ use crate::system::ActorSystem;
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Why an actor stopped, as observed by its own [`Actor::stopped`] hook (spec
-/// §12). An actor runs `stopped` only on its own node, so it never sees
+/// §2.5). An actor runs `stopped` only on its own node, so it never sees
 /// `NodeDown`; that case is observed by *watchers* as
 /// [`TerminationReason::NodeDown`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub enum StopReason {
     Failed,
 }
 
-/// Why a *watched* actor terminated, as delivered to watchers (spec §12).
+/// Why a *watched* actor terminated, as delivered to watchers (spec §2.5).
 /// Extends [`StopReason`] with the `NodeDown` case, where the actor's node died
 /// and no local `stopped` could run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +50,7 @@ impl From<StopReason> for TerminationReason {
     }
 }
 
-/// The death-watch signal (spec §12): delivered into a watcher's mailbox when a
+/// The death-watch signal (spec §2.5): delivered into a watcher's mailbox when a
 /// watched actor terminates. A watcher observes it by implementing
 /// `Handler<Terminated>`; it arrives in the watcher's serial order like any
 /// other message (invariant #13).
@@ -66,7 +66,7 @@ impl Message for Terminated {
 }
 
 /// A unit of state plus behavior that processes messages one at a time (spec
-/// §3.1). An ordinary Rust struct; its fields are private state, reachable only
+/// §2.1). An ordinary Rust struct; its fields are private state, reachable only
 /// from its own handlers.
 ///
 /// The lifecycle hooks use `-> impl Future + Send` rather than `async fn` so
@@ -87,15 +87,15 @@ pub trait Actor: Sized + Send + 'static {
         async {}
     }
 
-    /// List the messages this actor accepts over the network (spec §4.4).
+    /// List the messages this actor accepts over the network (spec §2.10).
     ///
     /// Each `r.accept::<M>()` captures the dispatch entry for `(Self, M)`. The
     /// default registers nothing: a purely local actor. An actor addressable
     /// remotely overrides this (or an optional derive generates it); the
-    /// registry it fills is the deserialization allowlist (spec §5, §15).
+    /// registry it fills is the deserialization allowlist (spec §2.11, §9).
     fn register(_registry: &mut HandlerRegistry<Self>) {}
 
-    /// This actor's supervision strategy (spec §11.2). The default is `Stop`.
+    /// This actor's supervision strategy (spec §2.4). The default is `Stop`.
     /// `Restart` is only honored for actors spawned with a factory
     /// (`ActorSystem::spawn_with` for a root, `Ctx::spawn_with` for a child); a
     /// value-spawned actor (`spawn`/`Ctx::spawn`) cannot be re-created, so a
@@ -105,10 +105,10 @@ pub trait Actor: Sized + Send + 'static {
     }
 }
 
-/// An actor's implementation for one message type (spec §3.2).
+/// An actor's implementation for one message type (spec §2.1).
 ///
 /// `handle` takes `&mut self`; exclusive mutation is sound because the executor
-/// is serial (spec §6). An actor accepts exactly the set of `M` for which it
+/// is serial (spec §3.3). An actor accepts exactly the set of `M` for which it
 /// implements `Handler<M>`, anything else is a compile error at the call site.
 pub trait Handler<M: Message>: Actor {
     /// Process one message and produce its reply.

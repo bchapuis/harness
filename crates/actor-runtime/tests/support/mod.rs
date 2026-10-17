@@ -127,7 +127,7 @@ impl<S: ActorSystem> Handler<Get> for Counter<S> {
 }
 
 /// A JSON codec under a chosen `name`, so a test can stand up two ends that
-/// disagree on the codec (spec §5 #2, §7.1). Encoding and decoding delegate to
+/// disagree on the codec (spec §2.11 #2, §2.14). Encoding and decoding delegate to
 /// the bundled JSON codec; only the advertised name differs.
 pub struct NamedJson(pub &'static str);
 
@@ -189,7 +189,7 @@ pub fn start_node_swim(cfg: TcpConfig, listener: TcpListener, swim: SwimConfig) 
     start_node_cfg(cfg, listener, Some(swim))
 }
 
-/// Start a cluster node in **leader-based** mode (spec §9.4.3): membership
+/// Start a cluster node in **leader-based** mode (spec §6.4.3): membership
 /// transitions are quorum-committed Raft log entries, with `raft` supplying the
 /// voter set, timing, and (durable) storage.
 pub fn start_node_leader(
@@ -259,7 +259,7 @@ fn start_node_cfg(cfg: TcpConfig, listener: TcpListener, swim: Option<SwimConfig
     )
 }
 
-// --- TLS material (spec §15) -------------------------------------------------
+// --- TLS material (spec §9) -------------------------------------------------
 
 /// The DNS name every node certificate is issued for, so all nodes can share one
 /// cluster identity and dial each other under a single server name.
