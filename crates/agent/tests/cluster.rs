@@ -15,7 +15,6 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -90,22 +89,14 @@ fn model() -> ScriptedModel {
     ])
 }
 
-/// Drive an async call to completion under the perpetually-running cluster loops.
+/// Drive an async call under the perpetually running cluster loops for a fixed
+/// `settle` window; the contract is [`Simulation::run_for_output`]'s.
 fn drive<T: Send + 'static>(
     sim: &Simulation,
     settle: Duration,
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete in the settle window")
+    sim.run_for_output(settle, future)
 }
 
 /// Bring up a 3-node leader cluster, host the worker kind on every node, and

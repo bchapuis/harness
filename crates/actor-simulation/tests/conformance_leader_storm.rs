@@ -26,18 +26,17 @@
 //! timeout while every member stays alive, so any final disagreement is a true log
 //! fork, never an expected eviction.
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_cluster::MemberStatus;
 use actor_core::Event;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
@@ -46,6 +45,7 @@ use actor_simulation::raft_config;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
 use actor_simulation::swim_config;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -55,23 +55,6 @@ const E: NodeId = NodeId::new(5);
 const F: NodeId = NodeId::new(6); // a non-voter member: the drain/resume payload
 
 const VOTERS: [NodeId; 5] = [A, B, C, D, E];
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
-}
 
 /// Bring up the 5-voter cluster plus the non-voter member F, with an event
 /// recorder. Returns `(net, systems, F-system, recorder)`; `systems` is indexed to

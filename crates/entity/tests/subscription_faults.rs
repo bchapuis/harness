@@ -11,8 +11,6 @@
 
 mod support;
 
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -20,7 +18,6 @@ use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
@@ -30,6 +27,7 @@ use entity::EntityExt;
 use entity::EntityRef;
 use entity::Seq;
 
+use support::drive;
 use support::log::Append;
 use support::log::LogEntity;
 use support::log::RESYNC;
@@ -69,23 +67,6 @@ fn config() -> EntityConfig {
         snapshot_every: 8,
         ..EntityConfig::default()
     }
-}
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Entities<LogEntity>>) {

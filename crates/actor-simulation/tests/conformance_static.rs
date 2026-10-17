@@ -8,6 +8,8 @@
 //! mode is also the default the messaging/location-transparency tests in
 //! `cluster.rs` already run under; here we pin the membership properties.)
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,47 +17,20 @@ use actor_cluster::MemberStatus;
 use actor_cluster::MembershipMode;
 use actor_cluster::Reachability;
 use actor_cluster::SwimConfig;
-use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
 use actor_core::CallError;
-use actor_core::Ctx;
 use actor_core::Event;
-use actor_core::Handler;
-use actor_core::HandlerRegistry;
-use actor_core::Manifest;
-use actor_core::Message;
 use actor_core::NodeId;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
-use serde::Deserialize;
-use serde::Serialize;
+use support::Echo;
+use support::Ping;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-struct Echo;
-impl Actor for Echo {
-    type System = SimNode;
-    fn register(r: &mut HandlerRegistry<Self>) {
-        r.accept::<Ping>();
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Ping;
-impl Message for Ping {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("static.Ping");
-}
-impl Handler<Ping> for Echo {
-    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
-        1
-    }
-}
 
 #[test]
 fn static_mode_runs_no_failure_detector() {

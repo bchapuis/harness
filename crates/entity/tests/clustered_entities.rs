@@ -10,6 +10,8 @@
 //! (**E11**, CP). The agent runtime mirrors `tests/raft_journal.rs`; the entity is the
 //! Appendix A `Account`, hosted on the clustered `SimNode`.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -44,6 +46,7 @@ use entity::EntityExt;
 use entity::EntityHandler;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -181,25 +184,6 @@ fn config() -> EntityConfig {
         snapshot_every: 8,
         ..EntityConfig::default()
     }
-}
-
-/// Drive an async call to completion under the perpetually-running cluster loops
-/// (copied from the actor-cluster conformance harness).
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 /// Bring up a 3-node leader cluster and host `Account` on every node, so each

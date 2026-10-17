@@ -13,6 +13,8 @@
 //! (append visible on every replica, follower fenced, quorum loss → `Unavailable`)
 //! live in `tests/clustered_entities.rs` and `tests/partition_safety.rs`.
 
+mod support;
+
 use actor_serialization::JsonCodec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +25,6 @@ use actor_cluster::DowningPolicy;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
@@ -41,6 +42,7 @@ use entity::store::FileEntityStore;
 use entity::store::MemoryEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -157,24 +159,6 @@ fn config(entity_store: EntityStoreFactory, snapshot_every: u64) -> EntityConfig
         entity_store: Some(entity_store),
         ..EntityConfig::default()
     }
-}
-
-/// Drive an async call to completion under the perpetually-running cluster loops.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 /// Commit `deposits` to `key` through the cluster, returning the final balance.

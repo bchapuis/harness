@@ -9,14 +9,12 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_core::EventSink;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
@@ -171,22 +169,12 @@ impl Cluster {
     }
 }
 
-/// Drive a call for exactly `settle` of virtual time under the perpetually-running
-/// cluster loops, then read it back. Unlike `Simulation::block_on` it does not
-/// return early, which is what gives every step of a scenario the same envelope.
+/// Drive a call under the perpetually running cluster loops for a fixed `settle`
+/// window; the contract is [`Simulation::run_for_output`]'s.
 pub fn drive<T: Send + 'static>(
     sim: &Simulation,
     settle: Duration,
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete within the settle window")
+    sim.run_for_output(settle, future)
 }

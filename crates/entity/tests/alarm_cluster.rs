@@ -12,7 +12,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -34,6 +33,7 @@ use entity::cluster::alarm_index::DueBefore;
 use entity::cluster::alarm_index::index_key;
 use entity::cluster::shard_for;
 
+use support::drive;
 use support::timer::Arm;
 use support::timer::ReadFired;
 use support::timer::TIMER_TYPE;
@@ -56,25 +56,6 @@ fn config() -> EntityConfig {
         snapshot_every: 8,
         ..EntityConfig::default()
     }
-}
-
-/// Drive an async call to completion under the perpetually-running cluster loops.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    use actor_core::Spawner;
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 type Indexes = Vec<Entities<AlarmIndex<SimNode>>>;

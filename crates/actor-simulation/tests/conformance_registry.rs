@@ -11,39 +11,33 @@
 //! against the simulated registry with seeded latency, staleness, and outage
 //! (spec §18.2, §18.3).
 
-use std::future::Future;
+mod support;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::MemberStatus;
 use actor_cluster::Reachability;
-use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
-use actor_core::BoxError;
 use actor_core::CallError;
-use actor_core::Ctx;
 use actor_core::Event;
-use actor_core::Handler;
-use actor_core::HandlerRegistry;
 use actor_core::Key;
-use actor_core::Manifest;
-use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
-use actor_core::Terminated;
 use actor_core::TerminationReason;
 use actor_simulation::FaultPolicy;
 use actor_simulation::Recorder;
 use actor_simulation::RegistryFaultPolicy;
 use actor_simulation::SimNetwork;
-use actor_simulation::SimNode;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
 use actor_simulation::swim_config;
-use serde::Deserialize;
-use serde::Serialize;
+use support::Echo;
+use support::Ping;
+use support::Reasons;
+use support::Watcher;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -61,69 +55,6 @@ fn registry_cluster(sim: &Simulation, nodes: &[NodeId]) -> (SimRegistry, SimNetw
     }
     let net = SimNetwork::new(sim).with_registry(swim_config(), registry.client(), SYNC);
     (registry, net)
-}
-
-/// Drive an async system call (an operator command, an `ask`) to completion
-/// under a running detector (a SWIM cluster never quiesces, so `block_on` would
-/// never return): launch the future and advance a bounded `settle` span.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
-}
-
-// --- A trivial addressable actor, to exercise the cascade and routing ---------
-
-struct Echo;
-
-impl Actor for Echo {
-    type System = SimNode;
-    fn register(r: &mut HandlerRegistry<Self>) {
-        r.accept::<Ping>();
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Ping;
-impl Message for Ping {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("registry.Ping");
-}
-impl Handler<Ping> for Echo {
-    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
-        1
-    }
-}
-
-type Reasons = Arc<Mutex<Vec<TerminationReason>>>;
-
-/// Watches `target` from start, recording the reason of every `Terminated`.
-struct Watcher {
-    target: ActorRef<Echo>,
-    got: Reasons,
-}
-impl Actor for Watcher {
-    type System = SimNode;
-    async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
-        ctx.watch(&self.target);
-        Ok(())
-    }
-}
-impl Handler<Terminated> for Watcher {
-    async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Self>) {
-        self.got.lock().unwrap().push(signal.reason);
-    }
 }
 
 // --- Tests -------------------------------------------------------------------

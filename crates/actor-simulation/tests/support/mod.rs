@@ -3,12 +3,14 @@
 //! Defines reusable actors and messages that work on *both* the single-node
 //! `SimSystem` and the multi-node `SimNode` (the actors are generic over the
 //! system type: generic actors are allowed by the spec, §1.2), plus builders
-//! for the common system topologies. Each conformance test file pulls this in
-//! with `mod support;`.
+//! for the common system topologies. The cluster suites also share a few
+//! `SimNode`-only fixtures: `Echo`, `Watcher`, and the `drive` window. Each
+//! conformance test file pulls this in with `mod support;`.
 
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,7 +19,9 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
+use actor_core::ActorRef;
 use actor_core::ActorSystem;
+use actor_core::BoxError;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Ctx;
@@ -28,6 +32,7 @@ use actor_core::LocalSystem;
 use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
 use actor_core::Message;
+use actor_core::Terminated;
 use actor_core::TerminationReason;
 use actor_simulation::History;
 use actor_simulation::Recorder;
@@ -36,6 +41,7 @@ use actor_simulation::RegisterOp;
 use actor_simulation::RegisterRet;
 use actor_simulation::SimClock;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -226,6 +232,48 @@ impl<S: ActorSystem> Handler<Get> for Slow<S> {
     }
 }
 
+// --- Echo and Watcher: an addressable cluster actor and a deathwatch probe ---
+
+/// A trivial addressable actor, to exercise the cascade and routing.
+pub struct Echo;
+
+impl Actor for Echo {
+    type System = SimNode;
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Ping>();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Ping;
+impl Message for Ping {
+    type Reply = u64;
+    const MANIFEST: Manifest = Manifest::new("conf.Ping");
+}
+impl Handler<Ping> for Echo {
+    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
+        1
+    }
+}
+
+/// Watches `target` from start, recording the reason of every `Terminated`.
+pub struct Watcher {
+    pub target: ActorRef<Echo>,
+    pub got: Reasons,
+}
+impl Actor for Watcher {
+    type System = SimNode;
+    async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
+        ctx.watch(&self.target);
+        Ok(())
+    }
+}
+impl Handler<Terminated> for Watcher {
+    async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Self>) {
+        self.got.lock().unwrap().push(signal.reason);
+    }
+}
+
 // --- Builders ----------------------------------------------------------------
 
 /// A single-node system on the simulator.
@@ -255,6 +303,17 @@ pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) 
         net = net.with_gossip(config, DowningPolicy::Conservative);
     }
     (sim, net)
+}
+
+/// Drive an async call (an operator command, an `ask`) under the cluster's
+/// perpetually running loops for a fixed `settle` window; the contract is
+/// [`Simulation::run_for_output`]'s.
+pub fn drive<T: Send + 'static>(
+    sim: &Simulation,
+    settle: Duration,
+    future: impl Future<Output = T> + Send + 'static,
+) -> T {
+    sim.run_for_output(settle, future)
 }
 
 // --- Linearizability: the shared register object (spec §18.4) ----------------

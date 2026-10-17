@@ -11,8 +11,9 @@
 //! crash-the-driver re-drive, compacted (snapshot-only) entities, and blob
 //! areas.
 
+mod support;
+
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -48,6 +49,7 @@ use entity::EntityHandler;
 use entity::facet::BlobId;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -298,23 +300,6 @@ fn one_shard_config() -> EntityConfig {
         snapshot_every: 4,
         ..EntityConfig::default()
     }
-}
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 /// The committed splits observed on the stream, deduplicated to the

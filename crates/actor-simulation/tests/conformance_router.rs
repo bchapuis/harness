@@ -10,9 +10,6 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::RouteStrategy;
@@ -24,7 +21,6 @@ use actor_core::CallError;
 use actor_core::Clock;
 use actor_core::Key;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
@@ -32,6 +28,7 @@ use actor_simulation::Simulation;
 use support::Greet;
 use support::Greeter;
 use support::Stop;
+use support::drive;
 
 const GREETERS: Key<Greeter<SimNode>> = Key::new("greeters");
 const ABSENT: Key<Greeter<SimNode>> = Key::new("absent");
@@ -54,26 +51,6 @@ fn greet() -> Greet {
     Greet {
         name: "world".into(),
     }
-}
-
-/// Run `future` to completion under modes whose background loops never quiesce
-/// (gossip detector/anti-entropy, so `block_on` would run forever): launch it
-/// and advance a bounded `settle` span.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 #[test]

@@ -9,9 +9,7 @@
 
 mod support;
 
-use std::future::Future;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -19,7 +17,6 @@ use actor_core::ActorId;
 use actor_core::CallError;
 use actor_core::Event;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
@@ -29,6 +26,7 @@ use actor_simulation::swim_config;
 use support::Greet;
 use support::Greeter;
 use support::Stop;
+use support::drive;
 
 const NAME: &str = "greeter-singleton";
 
@@ -40,25 +38,6 @@ const C: NodeId = NodeId::new(3);
 /// hosting node, per utilities spec §4 item 1.
 fn host(node: &SimNode) -> actor_cluster::SingletonProxy<Greeter<SimNode>> {
     node.singleton(NAME, || Greeter::new("Hello"), Stop)
-}
-
-/// Run `future` to completion by advancing virtual time (cluster background
-/// loops never quiesce, so `block_on` does not apply).
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 /// The `(name, actor)` pairs of `SingletonStarted` events, in emission order.

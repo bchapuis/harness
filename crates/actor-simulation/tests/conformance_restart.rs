@@ -10,80 +10,29 @@
 //! §9.4.2 item 5). Everything else (actors, the membership view, Raft's
 //! volatile role) is correctly lost and rebuilt.
 
-use std::future::Future;
-use std::sync::Arc;
-use std::sync::Mutex;
+mod support;
+
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_cluster::MemberStatus;
 use actor_cluster::Reachability;
-use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
 use actor_core::CallError;
-use actor_core::Ctx;
-use actor_core::Handler;
-use actor_core::HandlerRegistry;
-use actor_core::Manifest;
-use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNetwork;
-use actor_simulation::SimNode;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
 use actor_simulation::raft_config;
 use actor_simulation::swim_config;
-use serde::Deserialize;
-use serde::Serialize;
+use support::Echo;
+use support::Ping;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-/// Drive an async system call to completion under perpetually-running detector
-/// and Raft loops (`block_on` would never quiesce): launch the future and
-/// advance a bounded `settle` span.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
-}
-
-// --- A trivial addressable actor ----------------------------------------------
-
-struct Echo;
-
-impl Actor for Echo {
-    type System = SimNode;
-    fn register(r: &mut HandlerRegistry<Self>) {
-        r.accept::<Ping>();
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Ping;
-impl Message for Ping {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("restart.Ping");
-}
-impl Handler<Ping> for Echo {
-    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
-        1
-    }
-}
 
 // --- Tests ---------------------------------------------------------------------
 

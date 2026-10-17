@@ -30,8 +30,6 @@
 
 mod support;
 
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -48,6 +46,7 @@ use entity::EntityConfig;
 use entity::EntityExt;
 use entity::cluster::AlarmIndex;
 
+use support::drive;
 use support::timer::Arm;
 
 /// The `Timer` at this suite's tier.
@@ -93,25 +92,6 @@ fn lossy(one_in: u64) -> FaultPolicy {
         drop_den: one_in,
         ..FaultPolicy::default()
     }
-}
-
-/// Drive an async call to completion under the perpetually-running cluster loops.
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    use actor_core::Spawner;
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 /// Whether this arm wires the timer to the alarm index: the one variable.

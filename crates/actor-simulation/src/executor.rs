@@ -414,6 +414,41 @@ impl Simulation {
         }
     }
 
+    /// Spawn `future`, drive the runtime for exactly `settle` of virtual time
+    /// (as [`run_for`] does), then return the future's output.
+    ///
+    /// The fixed-window sibling of [`block_on`], for workloads that never
+    /// quiesce (a failure detector, Raft loops). `block_on` returns at the poll
+    /// that resolves the future; this always runs the whole window, so each step
+    /// of a scenario advances the clock by the same span however fast the reply
+    /// came, and whatever the reply set in motion within the window has run by
+    /// the time it returns.
+    ///
+    /// Panics if the future has not resolved by the end of the window.
+    ///
+    /// [`run_for`]: Simulation::run_for
+    /// [`block_on`]: Simulation::block_on
+    pub fn run_for_output<F>(&self, settle: Duration, future: F) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let cell: Arc<Mutex<Option<F::Output>>> = Arc::new(Mutex::new(None));
+        let out = Arc::clone(&cell);
+        self.shared.lock().expect("scheduler mutex poisoned").spawn(
+            Box::pin(async move {
+                let value = future.await;
+                *out.lock().expect("result mutex poisoned") = Some(value);
+            }),
+            None,
+        );
+        self.run_for(settle);
+        cell.lock()
+            .expect("result mutex poisoned")
+            .take()
+            .expect("run_for_output: the future did not complete in the settle window")
+    }
+
     /// Pick the next ready task. With more than one ready, selection is
     /// seed-randomized (spec §18.3) to surface ordering-dependent bugs.
     fn take_ready(&self) -> Option<u64> {

@@ -4,8 +4,8 @@
 //! discovers a host's gateway through the receptionist gossip and routes an `ask`
 //! to the shard leader, getting the same reply a host would.
 
-use std::sync::Arc;
-use std::sync::Mutex;
+mod support;
+
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -13,7 +13,6 @@ use actor_core::ActorSystem;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
@@ -27,6 +26,7 @@ use entity::EntityHandler;
 use entity::EntityRegistry;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -111,23 +111,6 @@ fn config() -> EntityConfig {
         snapshot_every: 8,
         ..EntityConfig::default()
     }
-}
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 #[test]

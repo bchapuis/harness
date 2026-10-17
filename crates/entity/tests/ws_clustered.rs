@@ -7,11 +7,11 @@
 //! checkpoint chunk to a replica that missed its write, restoring the
 //! durability margin.
 
+mod support;
+
 use actor_serialization::JsonCodec;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -20,7 +20,6 @@ use actor_core::BoxError;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
@@ -41,6 +40,7 @@ use entity::facet::WsError;
 use entity::store::FileEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -166,23 +166,6 @@ fn config(scratch: &Path) -> EntityConfig {
         data_dir: Some(scratch.to_path_buf()),
         ..EntityConfig::default()
     }
-}
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 fn cluster(sim: &Simulation, cfg: EntityConfig) -> (SimNetwork, Vec<SimNode>, Vec<Studios>) {

@@ -24,8 +24,8 @@
 //! - **Liveness.** The cluster reconverges and serves the durable value from every
 //!   node after the heal (`cluster_reconverges_after_a_partition_heals`).
 
-use std::sync::Arc;
-use std::sync::Mutex;
+mod support;
+
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -57,6 +57,7 @@ use entity::EntityExt;
 use entity::EntityHandler;
 use serde::Deserialize;
 use serde::Serialize;
+use support::drive;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -158,23 +159,6 @@ fn config() -> EntityConfig {
         snapshot_every: 8,
         ..EntityConfig::default()
     }
-}
-
-fn drive<T: Send + 'static>(
-    sim: &Simulation,
-    settle: Duration,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> T {
-    let cell: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&cell);
-    sim.spawner().launch(Box::pin(async move {
-        *out.lock().unwrap() = Some(future.await);
-    }));
-    sim.run_for(settle);
-    cell.lock()
-        .unwrap()
-        .take()
-        .expect("future did not complete")
 }
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Entities<Account>>) {

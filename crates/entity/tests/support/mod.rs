@@ -18,6 +18,8 @@
 //! - [`pipeline`]: the steps-facet `Pipeline`, likewise generic over the
 //!   system, shared by `steps.rs` (scenarios) and `steps_swarm.rs` (the sweep).
 //!   Its shape varies by `PipelineConfig` rather than by a second entity.
+//! - [`drive`]: the fixed-window call driver the clustered suites step their
+//!   scenarios with.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
 //! globs would make the name ambiguous, and since `ledger` is feature-gated the
@@ -27,6 +29,11 @@
 // Every test binary compiles this module in full but uses only the fixtures it
 // drives, so unused items and re-exports here are the normal case, not a smell.
 #![allow(dead_code, unused_imports)]
+
+use std::future::Future;
+use std::time::Duration;
+
+use actor_simulation::Simulation;
 
 pub mod catalogue;
 
@@ -48,3 +55,13 @@ pub mod pipeline;
 
 #[cfg(feature = "sql")]
 pub mod ledger;
+
+/// Drive an async call under the cluster's perpetually running loops for a
+/// fixed `settle` window; the contract is [`Simulation::run_for_output`]'s.
+pub fn drive<T: Send + 'static>(
+    sim: &Simulation,
+    settle: Duration,
+    future: impl Future<Output = T> + Send + 'static,
+) -> T {
+    sim.run_for_output(settle, future)
+}
