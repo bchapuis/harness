@@ -48,6 +48,7 @@ use std::io;
 use std::path::Path;
 
 use crate::DOCUMENTS;
+use crate::markdown;
 
 /// How a specification writes its invariant catalogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,45 +382,24 @@ pub fn compare(site: &CatalogueSite, documented: &[Row], implemented: &[Row]) ->
 fn section_body<'a>(text: &'a str, number: &str) -> Option<&'a str> {
     let mut start = None;
     let mut depth = 0usize;
-    let mut inside = false;
-    let mut offset = 0usize;
 
-    for line in text.split_inclusive('\n') {
-        let fence = line.trim_start().starts_with("```");
-        if fence {
-            inside = !inside;
+    for line in markdown::lines(text) {
+        if line.fenced() {
+            continue;
         }
-        if !inside
-            && !fence
-            && let Some((hashes, found)) = heading(line)
-        {
-            match start {
-                None if found == number => {
-                    depth = hashes;
-                    start = Some(offset + line.len());
-                }
-                Some(begin) if hashes <= depth => return Some(&text[begin..offset]),
-                _ => {}
+        let Some((hashes, found)) = markdown::heading(line.text) else {
+            continue;
+        };
+        match start {
+            None if found == number => {
+                depth = hashes;
+                start = Some(line.end);
             }
+            Some(begin) if hashes <= depth => return Some(&text[begin..line.start]),
+            _ => {}
         }
-        offset += line.len();
     }
     start.map(|begin| &text[begin..])
-}
-
-/// `### 18.5 Invariant catalogue` → `(3, "18.5")`.
-fn heading(line: &str) -> Option<(usize, String)> {
-    let hashes = line.len() - line.trim_start_matches('#').len();
-    if hashes < 2 {
-        return None;
-    }
-    let rest = line[hashes..].strip_prefix(' ')?;
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(rest.len());
-    let number = rest[..end].trim_end_matches('.');
-    (!number.is_empty() && number.starts_with(|c: char| c.is_ascii_digit()))
-        .then(|| (hashes, number.to_string()))
 }
 
 /// Rows of the first table in `body` that has `Invariant` and `Verified by`
@@ -457,14 +437,11 @@ fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
 fn list_rows(body: &str) -> Vec<Row> {
     body.lines()
         .filter_map(|line| {
-            let end = line.find(|c: char| !c.is_ascii_digit())?;
-            if end == 0 || !line[end..].starts_with(". ") {
-                return None;
-            }
-            let number: u8 = line[..end].parse().ok()?;
+            let (number, item) = markdown::list_item(line)?;
+            let number = u8::try_from(number).ok()?;
             // Sections live in the bold lead-in; the rest of the item is prose
             // that cites other sections incidentally.
-            let lead = line[end..].split("**").nth(1).unwrap_or("");
+            let lead = item.split("**").nth(1).unwrap_or("");
             Some(Row {
                 number,
                 sections: section_numbers(lead),
@@ -494,11 +471,7 @@ fn label_number(cell: &str, label: &str) -> Option<u8> {
 fn section_numbers(text: &str) -> Vec<String> {
     text.match_indices('§')
         .filter_map(|(pos, _)| {
-            let after = &text[pos + '§'.len_utf8()..];
-            let end = after
-                .find(|c: char| !c.is_ascii_digit() && c != '.')
-                .unwrap_or(after.len());
-            let number = after[..end].trim_end_matches('.');
+            let (number, _) = markdown::dotted_number(&text[pos + '§'.len_utf8()..]);
             (!number.is_empty()).then(|| number.to_string())
         })
         .collect()
@@ -510,16 +483,9 @@ fn section_numbers(text: &str) -> Vec<String> {
 /// specific test function inside a file. [`Pointers`] says which of its backticked
 /// tokens are the pointers, and the rest are left alone.
 fn suite_pointers(cell: &str, kind: Pointers) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut rest = cell;
-    while let Some(open) = rest.find('`') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('`') else { break };
-        let token = after[..close].trim();
-        rest = &after[close + 1..];
-        out.extend(pointer_tokens(token, kind));
-    }
-    out
+    markdown::backticked(cell)
+        .flat_map(|token| pointer_tokens(token, kind))
+        .collect()
 }
 
 /// The suite pointers inside a run of text, under one vocabulary.

@@ -14,6 +14,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use actor_cluster::MembershipMode;
+use actor_core::Event;
+use actor_core::EventSink;
+use actor_core::JsonCodec;
+use actor_core::NodeId;
+use actor_runtime::Encryption;
+use actor_runtime::JoinOptions;
+use actor_runtime::TcpCluster;
 use agent::EntityConfig;
 use agent::HarnessSystem;
 use agent_gateway::Gateway;
@@ -22,7 +30,6 @@ use agent_gateway::auth::InsecureTokens;
 use agent_gateway::auth::StaticTokens;
 use agent_gateway::auth::TokenVerifier;
 use agent_gateway::auth::bind_is_loopback;
-use agent_gateway::cluster::ClusterOptions;
 
 const USAGE: &str = "\
 usage:
@@ -122,6 +129,14 @@ async fn run(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    // A voter's id is already a node's, so the gateway would collide with it on
+    // the transport.
+    if (1..=nodes).contains(&node_id) {
+        return Err(format!(
+            "--node-id {node_id} collides with the voter roster 1..={nodes}: the gateway must \
+             use a non-voting id outside it"
+        ));
+    }
 
     let tokens: Arc<dyn TokenVerifier> = match &auth_tokens {
         Some(path) => {
@@ -150,16 +165,31 @@ async fn run(args: &[String]) -> Result<(), String> {
         }
     };
 
-    let system = agent_gateway::cluster::join(ClusterOptions {
-        node_id,
-        nodes,
+    // Join as a client: brought into the membership view so the receptionist
+    // gossip (the host gateway refs) reaches it, but never a voter and never a
+    // host, since it builds no Raft engine and hosts no entity type.
+    let node = NodeId::new(node_id);
+    let system: TcpCluster = actor_runtime::join(JoinOptions {
+        node: node_id,
+        voters: nodes,
+        peer_hosts,
+        clients: BTreeMap::new(),
         bind_host,
         advertise_host,
-        peer_hosts,
         port_base,
         secret,
+        codec: Arc::new(JsonCodec),
+        events: Arc::new(GatewayEvents { node }),
+        // The gateway joins inside the cluster's trust boundary (see
+        // `docs/multi-tenant-edge.md`); the same plaintext caveat applies.
+        encryption: Encryption::PlaintextTrusted,
+        // `Static` without a detector is the non-participating mode: a client
+        // observes membership but does not drive it, and with no shard groups it
+        // has nothing to elect and nothing to down.
+        membership: Box::new(|_| MembershipMode::Static { detector: None }),
     })
     .await?;
+    eprintln!("[gateway {node}] joined the cluster (client of nodes 1..={nodes})");
 
     // Discover the host gateways and assemble the routing-only state.
     if roster.is_empty() {
@@ -191,6 +221,20 @@ async fn run(args: &[String]) -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal(gateway))
         .await
         .map_err(|e| format!("serve: {e}"))
+}
+
+/// Membership and reachability transitions on stderr: enough for an operator to
+/// see the gateway join and the nodes come and go.
+struct GatewayEvents {
+    node: NodeId,
+}
+
+impl EventSink for GatewayEvents {
+    fn emit(&self, event: Event) {
+        if event.is_membership() {
+            eprintln!("[gateway {}] {event:?}", self.node);
+        }
+    }
 }
 
 /// Resolve once a shutdown signal (SIGTERM or SIGINT) arrives, then flip the

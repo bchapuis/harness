@@ -41,6 +41,7 @@ use entity::Entities;
 use entity::EntityConfig;
 use entity::cluster::EntityNode;
 use machine_frontdoor::serve_connection;
+use machine_entity::EgressConfig;
 use machine_entity::MACHINE_TYPE;
 use machine_entity::Machine;
 use machine_entity::MachineRuntimeProvider;
@@ -101,6 +102,10 @@ pub struct NodeOptions {
     /// <port>=<machine>`. One machine per port, because SSH fixes the host key
     /// at KEX: before a username exists to name a machine with.
     pub doors: BTreeMap<u16, String>,
+    /// This node's egress (machine §5.2, M6), from `--egress-uplink`,
+    /// `--egress-pool`, and `--cluster-cidr`. `None` boots every machine with
+    /// no NIC.
+    pub egress: Option<EgressConfig>,
 }
 
 impl Default for NodeOptions {
@@ -121,6 +126,7 @@ impl Default for NodeOptions {
             docker_cli: "docker".to_string(),
             docker_image: "harness-machine-runner:1".to_string(),
             doors: BTreeMap::new(),
+            egress: None,
         }
     }
 }
@@ -244,7 +250,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // anything durable starts: a mechanism the operator named but this build or
     // host cannot supply is a configuration error, not a half-booted node.
     let host = machine_host(&opts, machine_kind)?;
-    let provider = runtime_provider(&host, node, &system);
+    let provider = runtime_provider(&host, node, &system, opts.egress.clone());
     // This node's durable store, I/O pool and metrics, shared by every type below
     // (entity §7.4, §13). The pool matters most in this deployment: a machine's disk
     // facet writes whole 1 MiB image blocks, so an inline fsync would stall the
@@ -289,6 +295,20 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         opts.nodes,
         opts.data.display()
     );
+    if let Some(egress) = &opts.egress {
+        // Only a mechanism that takes a tap realizes egress; elsewhere the flags
+        // configure nothing, which belongs here rather than in a guest found
+        // with no network.
+        let unused = if host.as_ref().is_some_and(|h| h.accepts_tap()) {
+            ""
+        } else {
+            ", unused: this mechanism takes no tap"
+        };
+        eprintln!(
+            "[{node}] egress out {} for up to {} machines from {}{unused}",
+            egress.uplink, egress.guest_pool_slots, egress.guest_pool_base
+        );
+    }
     actor_runtime::wait_for_cluster(&system, opts.nodes as usize, READY_TIMEOUT).await;
 
     if let Some(addr) = &opts.admin {
@@ -373,24 +393,29 @@ async fn serve_door(
 /// simulation's guest (machine §7) when no mechanism was named, else the real
 /// guest over whichever mechanism `--machine` selected (a Firecracker microVM or
 /// a container holding the same rootfs are one binding over
-/// `machine_host::MachineHost`; see [`machine_host`]).
+/// `machine_host::MachineHost`; see [`machine_host`]), with this node's egress.
 fn runtime_provider(
     host: &Option<Arc<dyn machine_host::MachineHost>>,
     node: NodeId,
     system: &TcpCluster,
+    egress: Option<EgressConfig>,
 ) -> Arc<dyn MachineRuntimeProvider> {
     match host {
         None => Arc::new(FakeRuntimeProvider::new(system.clone(), FAKE_WRITE_INTERVAL)),
         #[cfg(feature = "host")]
-        Some(mechanism) => Arc::new(machine_entity::hosted::HostedRuntimeProvider::new(
-            Arc::clone(mechanism),
-            machine_entity::hosted::HostedRuntimeConfig::new(node.to_string()),
-        )),
+        Some(mechanism) => {
+            let mut config = machine_entity::hosted::HostedRuntimeConfig::new(node.to_string());
+            config.egress = egress;
+            Arc::new(machine_entity::hosted::HostedRuntimeProvider::new(
+                Arc::clone(mechanism),
+                config,
+            ))
+        }
         // Unreachable: `machine_host` answers `None` for every mode this build
         // can serve.
         #[cfg(not(feature = "host"))]
         Some(_) => {
-            let _ = node;
+            let _ = (node, egress);
             unreachable!("no mechanism is built without the `host` feature")
         }
     }

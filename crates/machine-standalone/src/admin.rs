@@ -1,5 +1,5 @@
-//! The node's admin socket: how `create`, `status`, and `key` reach the
-//! cluster.
+//! The node's admin socket: how `create`, `status`, `key`, and `egress` reach
+//! the cluster.
 //!
 //! **Why the CLI is not a cluster client.** The agent runtime gateway joins the
 //! transport as a non-voting member and addresses entities directly, and that is
@@ -18,13 +18,16 @@
 //! control plane. It binds loopback because it carries no authentication: the
 //! machine's *own* boundary is the front door and its journaled key set (M4).
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use entity::Entities;
 use machine_entity::AddKey;
+use machine_entity::EgressPolicy;
 use machine_entity::MachineError;
 use machine_entity::Provision;
 use machine_entity::RevokeKey;
+use machine_entity::SetEgress;
 use machine_entity::Status;
 use machine_entity::StatusReply;
 use serde::Deserialize;
@@ -63,17 +66,24 @@ pub enum AdminRequest {
         machine: String,
         fingerprint: String,
     },
+    SetEgress {
+        machine: String,
+        policy: EgressPolicy,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum AdminReply {
     Done,
-    /// The machine was already provisioned: reported rather than failed, so a
-    /// re-run of a demo, or a retried command whose first landing was lost, is
-    /// a no-op instead of an error.
-    AlreadyProvisioned,
     Status(Box<StatusReply>),
-    Error(String),
+    /// The machine answered and said no (machine §3): not provisioned, already
+    /// provisioned, a base image that would not import. Final: every node
+    /// reaches the same journal, so asking again gets the same answer.
+    Refused(MachineError),
+    /// The command did not land (no shard leader yet, a timeout, a request
+    /// this node could not read), so nothing was decided and another attempt,
+    /// here or on another node, may succeed.
+    Unavailable(String),
 }
 
 /// Serve admin requests until the process ends. One connection, one request.
@@ -98,10 +108,10 @@ async fn handle(
     BufReader::new(read).read_line(&mut line).await?;
     let reply = match serde_json::from_str::<AdminRequest>(&line) {
         Ok(request) => dispatch(request, &machines).await,
-        Err(e) => AdminReply::Error(format!("malformed admin request: {e}")),
+        Err(e) => AdminReply::Unavailable(format!("malformed admin request: {e}")),
     };
     let mut encoded = serde_json::to_string(&reply)
-        .unwrap_or_else(|e| format!("{{\"Error\":\"reply could not be encoded: {e}\"}}"));
+        .unwrap_or_else(|e| format!("{{\"Unavailable\":\"reply could not be encoded: {e}\"}}"));
     encoded.push('\n');
     write.write_all(encoded.as_bytes()).await?;
     write.flush().await
@@ -118,8 +128,8 @@ async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> Ad
             checkpoint_secs,
             lease_secs,
             authorized_keys,
-        } => {
-            let outcome = machines
+        } => reply_of(
+            machines
                 .entity(machine)
                 .ask_timeout(
                     Provision {
@@ -133,14 +143,8 @@ async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> Ad
                     },
                     ADMIN_TIMEOUT,
                 )
-                .await;
-            match outcome {
-                Ok(Ok(())) => AdminReply::Done,
-                Ok(Err(MachineError::AlreadyProvisioned)) => AdminReply::AlreadyProvisioned,
-                Ok(Err(e)) => AdminReply::Error(e.to_string()),
-                Err(e) => AdminReply::Error(e.to_string()),
-            }
-        }
+                .await,
+        ),
         AdminRequest::Status { machine } => {
             match machines
                 .entity(machine)
@@ -148,7 +152,7 @@ async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> Ad
                 .await
             {
                 Ok(status) => AdminReply::Status(Box::new(status)),
-                Err(e) => AdminReply::Error(e.to_string()),
+                Err(e) => AdminReply::Unavailable(e.to_string()),
             }
         }
         AdminRequest::AddKey {
@@ -170,16 +174,22 @@ async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> Ad
                 .ask_timeout(RevokeKey { fingerprint }, ADMIN_TIMEOUT)
                 .await,
         ),
+        AdminRequest::SetEgress { machine, policy } => reply_of(
+            machines
+                .entity(machine)
+                .ask_timeout(SetEgress { policy }, ADMIN_TIMEOUT)
+                .await,
+        ),
     }
 }
 
-/// One reply shape for the two ways a policy command fails: the call did not
-/// land, or the machine refused it (unprovisioned, machine §3).
+/// A mutating command's reply, keeping apart the two ways it fails: the
+/// machine refused it, or the call did not land.
 fn reply_of<E: std::fmt::Display>(outcome: Result<Result<(), MachineError>, E>) -> AdminReply {
     match outcome {
         Ok(Ok(())) => AdminReply::Done,
-        Ok(Err(e)) => AdminReply::Error(e.to_string()),
-        Err(e) => AdminReply::Error(e.to_string()),
+        Ok(Err(refusal)) => AdminReply::Refused(refusal),
+        Err(e) => AdminReply::Unavailable(e.to_string()),
     }
 }
 
@@ -190,14 +200,13 @@ fn reply_of<E: std::fmt::Display>(outcome: Result<Result<(), MachineError>, E>) 
 /// is exactly what the failure drill does.
 pub async fn call(addrs: &[String], request: AdminRequest) -> Result<AdminReply, String> {
     let mut last = "no --admin address given".to_string();
-    // A node can answer `Error` while the cluster is still assembling (no
+    // A node answers `Unavailable` while the cluster is still assembling (no
     // shard leader yet); retry across all of them before giving up.
     for round in 0..30 {
         for addr in addrs {
-            match try_call(addr, &request).await {
-                Ok(AdminReply::Error(e)) => last = e,
-                Ok(reply) => return Ok(reply),
-                Err(e) => last = format!("{addr}: {e}"),
+            match verdict(addr, try_call(addr, &request).await) {
+                ControlFlow::Break(reply) => return Ok(reply),
+                ControlFlow::Continue(why) => last = why,
             }
         }
         if round == 0 {
@@ -206,6 +215,18 @@ pub async fn call(addrs: &[String], request: AdminRequest) -> Result<AdminReply,
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     Err(last)
+}
+
+/// Whether one attempt settles the command. Any answer from the machine does,
+/// a refusal included: re-sending it would only repeat the refusal on every
+/// node. A call that did not land leaves the reason to retry with.
+fn verdict(addr: &str, attempt: Result<AdminReply, String>) -> ControlFlow<AdminReply, String> {
+    match attempt {
+        Ok(AdminReply::Unavailable(why)) | Err(why) => {
+            ControlFlow::Continue(format!("{addr}: {why}"))
+        }
+        Ok(reply) => ControlFlow::Break(reply),
+    }
 }
 
 async fn try_call(addr: &str, request: &AdminRequest) -> Result<AdminReply, String> {
@@ -226,4 +247,28 @@ async fn try_call(addr: &str, request: &AdminRequest) -> Result<AdminReply, Stri
         .await
         .map_err(|e| e.to_string())?;
     serde_json::from_str(&line).map_err(|e| format!("malformed admin reply: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_call_that_did_not_land_is_retried() {
+        let unavailable = AdminReply::Unavailable("no shard leader".into());
+        assert!(verdict("a", Ok(unavailable)).is_continue());
+        assert!(verdict("a", Err("connection refused".into())).is_continue());
+
+        for refusal in [
+            MachineError::NotProvisioned,
+            MachineError::AlreadyProvisioned,
+            MachineError::Disk("base image unreadable".into()),
+        ] {
+            assert!(
+                verdict("a", Ok(AdminReply::Refused(refusal))).is_break(),
+                "a refusal is the machine's answer, not a reason to ask again",
+            );
+        }
+        assert!(verdict("a", Ok(AdminReply::Done)).is_break());
+    }
 }

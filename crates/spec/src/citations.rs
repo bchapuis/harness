@@ -79,6 +79,7 @@ use std::path::PathBuf;
 use crate::DOCUMENTS;
 use crate::DocSpec;
 use crate::Unprefixed;
+use crate::markdown;
 
 /// Prefixes that name a document outside this tree. Their citations are skipped.
 pub const EXTERNAL_PREFIXES: &[&str] = &["Raft"];
@@ -241,8 +242,9 @@ impl Registry {
 /// See the module docs for the three schemes. Content inside fenced code blocks
 /// is skipped: a `## 3.` in a shell transcript is a comment, not a section.
 pub fn anchors(text: &str) -> BTreeSet<String> {
-    let headings: Vec<(usize, String)> = fenced_lines(text)
-        .filter_map(|(i, line, fenced)| (!fenced).then(|| heading_number(line).map(|n| (i, n)))?)
+    let headings: Vec<(usize, String)> = markdown::lines(text)
+        .filter(|line| !line.fenced())
+        .filter_map(|line| Some((line.index, markdown::heading(line.text)?.1.to_string())))
         .collect();
 
     let mut out = BTreeSet::new();
@@ -264,20 +266,20 @@ pub fn anchors(text: &str) -> BTreeSet<String> {
             .any(|(_, o)| o.len() > n.len() && o.starts_with(n) && o.as_bytes()[n.len()] == b'.')
     };
     let mut current: Option<&str> = None;
-    for (i, line, fenced) in fenced_lines(text) {
-        if let Some((_, number)) = headings.iter().find(|(h, _)| *h == i) {
+    for line in markdown::lines(text) {
+        if let Some((_, number)) = headings.iter().find(|(h, _)| *h == line.index) {
             current = is_leaf(number).then_some(number.as_str());
             continue;
         }
-        if fenced {
+        if line.fenced() {
             continue;
         }
         if let Some(section) = current
-            && let Some(item) = list_item_number(line)
+            && let Some((item, _)) = markdown::list_item(line.text)
         {
             out.insert(format!("{section}.{item}"));
         }
-        if let Some(label) = bold_label_number(line) {
+        if let Some(label) = bold_label_number(line.text) {
             out.insert(label);
         }
     }
@@ -301,11 +303,7 @@ pub fn citations(text: &str) -> Vec<Citation> {
     let mut counted = 0usize;
 
     for (pos, _) in text.match_indices('§') {
-        let after = &text[pos + '§'.len_utf8()..];
-        let digits = &after[..after
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .unwrap_or(after.len())];
-        let number = digits.trim_end_matches('.');
+        let (number, number_len) = markdown::dotted_number(&text[pos + '§'.len_utf8()..]);
         if number.is_empty() {
             continue;
         }
@@ -323,7 +321,7 @@ pub fn citations(text: &str) -> Vec<Citation> {
             && is_separator(&text[previous_end..pos]);
         let target = if inherited { previous_target } else { written };
 
-        previous_end = pos + '§'.len_utf8() + digits.len();
+        previous_end = pos + '§'.len_utf8() + number_len;
         previous_target = target;
         out.push(Citation {
             line,
@@ -336,49 +334,6 @@ pub fn citations(text: &str) -> Vec<Citation> {
     out
 }
 
-/// Lines paired with their index and whether they sit inside a fenced code block.
-/// The fence line itself counts as fenced.
-fn fenced_lines(text: &str) -> impl Iterator<Item = (usize, &str, bool)> {
-    let mut inside = false;
-    text.lines().enumerate().map(move |(i, line)| {
-        let fence = line.trim_start().starts_with("```");
-        if fence {
-            inside = !inside;
-            return (i, line, true);
-        }
-        (i, line, inside)
-    })
-}
-
-/// `## 7. Durability` → `7`; `### 7.12 The facet model` → `7.12`.
-///
-/// Level one is the document title and is never cited. `## Appendix B: …` carries
-/// no number and nothing cites it by one.
-fn heading_number(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("##")?.trim_start_matches('#');
-    let rest = rest.strip_prefix(' ')?;
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(rest.len());
-    let (token, tail) = rest.split_at(end);
-    // The number must be the whole first word: `## 2026 latency figures` is prose.
-    if !tail.is_empty() && !tail.starts_with(' ') {
-        return None;
-    }
-    let number = token.trim_end_matches('.');
-    (!number.is_empty() && number.starts_with(|c: char| c.is_ascii_digit()))
-        .then(|| number.to_string())
-}
-
-/// `3. **Storage colocated with compute…**` → `3`, for a top-level ordered item.
-/// Indented items belong to a nested list and address nothing.
-fn list_item_number(line: &str) -> Option<u32> {
-    let end = line
-        .find(|c: char| !c.is_ascii_digit())
-        .filter(|&e| e > 0 && line[e..].starts_with(". "))?;
-    line[..end].parse().ok()
-}
-
 /// `**hw §3.1: Amortize round trips…**` → `3.1`.
 ///
 /// The colon is what separates a *definition* from a citation that happens to
@@ -387,11 +342,8 @@ fn bold_label_number(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("**")?;
     let pos = rest.find('§')?;
     let after = &rest[pos + '§'.len_utf8()..];
-    let end = after
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(after.len());
-    let number = after[..end].trim_end_matches('.');
-    if number.is_empty() || !after[end..].trim_start().starts_with(':') {
+    let (number, written) = markdown::dotted_number(after);
+    if number.is_empty() || !after[written..].trim_start().starts_with(':') {
         return None;
     }
     Some(number.to_string())
@@ -480,27 +432,10 @@ fn is_separator(gap: &str) -> bool {
 
 /// Enough of the line around `pos` to find the citation by eye in the source.
 fn quote_around(text: &str, pos: usize) -> String {
-    const WIDTH: usize = 48;
     let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
     let line_end = text[pos..].find('\n').map_or(text.len(), |i| pos + i);
-    let start = floor_boundary(text, pos.saturating_sub(WIDTH).max(line_start));
-    let end = floor_boundary(text, (pos + WIDTH).min(line_end));
-    let mut quote = String::new();
-    if start > line_start {
-        quote.push('…');
-    }
-    quote.push_str(text[start..end].trim());
-    if end < line_end {
-        quote.push('…');
-    }
-    quote
-}
-
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
+    let at = pos - line_start;
+    markdown::excerpt(&text[line_start..line_end], at, at, 48)
 }
 
 #[cfg(test)]

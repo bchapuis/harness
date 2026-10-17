@@ -17,9 +17,11 @@ default = ["host"]
 # KVM, a Linux host without, and macOS. Without this feature only
 # `--machine fake` remains.
 host = ["machine-entity/host"]
-# Policy-bound egress (machine §5.2, M6): the per-machine tap and node NAT.
-# Linux with CAP_NET_ADMIN; without it a machine boots with no NIC.
-net = ["machine-entity/net"]
+# Policy-bound egress (machine §5.2, M6): the per-machine tap and node NAT,
+# configured by `node --egress-uplink/--egress-pool/--cluster-cidr`. Linux with
+# CAP_NET_ADMIN; without it a machine boots with no NIC. Implies `host`: only
+# the hosted binding realizes egress.
+net = ["host", "machine-entity/net"]
 
 [dependencies]
 actor-core.workspace = true

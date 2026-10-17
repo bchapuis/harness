@@ -21,7 +21,6 @@
 //! balancer; each joins the cluster as its own client id.
 
 pub mod auth;
-pub mod cluster;
 pub mod error;
 pub mod http;
 

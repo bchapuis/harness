@@ -21,7 +21,7 @@ workspace = true
 host = ["dep:machine-host", "machine-host/ws", "dep:machine-proto", "dep:tokio", "tokio/process"]
 # Egress plumbing (machine §5.2): the per-machine tap device and node NAT that
 # realize the journaled policy. Linux + CAP_NET_ADMIN; shells out to `ip`/`nft`.
-# The pure rule generator (`nft_ruleset`) is available without the feature.
+# The pure rule generator, and the M6 tests over it, build without the feature.
 net = []
 
 [dependencies]

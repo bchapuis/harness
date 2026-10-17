@@ -18,12 +18,17 @@
 //!   over whichever mechanism the node's `machine_host::MachineHost` is; a
 //!   microVM or a container (machine §2.1, sandbox §3.5).
 //!
-//! The network seam, the SSH front door (machine §5.1, M4) and policy-bound
-//! egress (machine §5.2, M6), lives in its own crates; this one defines the
-//! journaled state both read (authorized keys, host key, egress policy,
-//! attachments).
+//! The network seam has two halves, and both read the journaled state this
+//! crate defines (authorized keys, host key, egress policy, attachments). The
+//! SSH front door (machine §5.1, M4) lives in `machine-frontdoor`. Policy-bound
+//! egress (machine §5.2, M6) lives here: the hosted binding realizes a
+//! machine's journaled policy at boot as a per-machine tap and ruleset, on a
+//! node configured with an [`EgressConfig`].
 
 mod entity;
+// Only the hosted binding applies egress. Without it the module still builds,
+// so the M6 ruleset tests run in every configuration.
+#[cfg_attr(not(feature = "host"), allow(dead_code))]
 mod net;
 mod runtime;
 
@@ -53,13 +58,6 @@ pub use entity::WsRead;
 pub use entity::WsRemove;
 pub use entity::WsWrite;
 pub use net::EgressConfig;
-pub use net::GuestNet;
-pub use net::GuestPool;
-pub use net::guest_ip_boot_arg;
-pub use net::guest_mac;
-pub use net::guest_net;
-pub use net::nft_ruleset;
-pub use net::tap_name;
 pub use runtime::BootSpec;
 pub use runtime::MachineRuntime;
 pub use runtime::MachineRuntimeProvider;

@@ -8,6 +8,7 @@
 //!                           --key ~/.ssh/id_ed25519.pub
 //! machine-standalone status dev-box --admin 127.0.0.1:7701
 //! machine-standalone key    dev-box --admin 127.0.0.1:7701 --add ~/.ssh/other.pub
+//! machine-standalone egress dev-box --admin 127.0.0.1:7701 --allow 93.184.216.0/24
 //! ```
 //!
 //! `node` hosts machine entities and opens SSH front doors. The rest are
@@ -22,6 +23,11 @@ mod backend;
 mod node;
 
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
+
+use machine_entity::EgressConfig;
+use machine_entity::EgressPolicy;
+use machine_entity::MachineError;
 
 use crate::admin::AdminReply;
 use crate::admin::AdminRequest;
@@ -35,6 +41,7 @@ machine-standalone: persistent lightweight VMs as entities (machine spec)
           [--fc-binary PATH] [--fc-kernel PATH]
           [--docker-cli docker] [--docker-image harness-machine-runner:1]
           [--door <port>=<machine>]…
+          [--egress-uplink IFACE --egress-pool CIDR [--cluster-cidr CIDR]…]
           [--admin ADDR] [--peer <id>=<host>]… [--bind-host H]
           [--port-base 7601] [--secret S] [--shards N]
 
@@ -42,9 +49,15 @@ machine-standalone: persistent lightweight VMs as entities (machine spec)
           [--vcpus 1] [--mem-mib 512] [--checkpoint-secs 30] [--lease-secs 10]
   status  <machine>
   key     <machine> [--add PUBKEY]… [--revoke FINGERPRINT]…
+  egress  <machine> (--policy open|none | --allow CIDR…)
 
 Every client subcommand takes one or more --admin ADDR (a node's admin socket);
 they are tried in turn, so a command still works after one node is killed.
+
+Egress (the `net` feature; Linux with CAP_NET_ADMIN; firecracker only) NATs
+each machine's tap out IFACE, giving each running machine one /30 of the pool;
+--cluster-cidr adds the cluster's own ranges to what a guest may never reach.
+A machine's `egress` policy takes effect at its next boot.
 ";
 
 #[tokio::main]
@@ -55,6 +68,7 @@ async fn main() {
         Some("create") => run_create(&args[1..]).await,
         Some("status") => run_status(&args[1..]).await,
         Some("key") => run_key(&args[1..]).await,
+        Some("egress") => run_egress(&args[1..]).await,
         Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
             return;
@@ -69,6 +83,9 @@ async fn main() {
 
 async fn run_node(args: &[String]) -> Result<(), String> {
     let mut opts = NodeOptions::default();
+    let mut egress_uplink = None;
+    let mut egress_pool = None;
+    let mut cluster_cidrs = Vec::new();
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         match flag.as_str() {
@@ -84,6 +101,9 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--docker-cli" => opts.docker_cli = next(&mut rest, flag)?,
             "--docker-image" => opts.docker_image = next(&mut rest, flag)?,
             "--admin" => opts.admin = Some(next(&mut rest, flag)?),
+            "--egress-uplink" => egress_uplink = Some(next(&mut rest, flag)?),
+            "--egress-pool" => egress_pool = Some(next(&mut rest, flag)?),
+            "--cluster-cidr" => cluster_cidrs.push(next(&mut rest, flag)?),
             "--machine" => {
                 let value = next(&mut rest, flag)?;
                 opts.machine = Some(match value.as_str() {
@@ -108,7 +128,75 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag `{other}`\n\n{USAGE}")),
         }
     }
+    opts.egress = egress_config(egress_uplink, egress_pool, cluster_cidrs)?;
+    #[cfg(not(feature = "net"))]
+    if opts.egress.is_some() {
+        return Err(
+            "--egress-uplink needs the `net` feature; this binary was built without it".to_string(),
+        );
+    }
     node::run(opts).await
+}
+
+/// The node's egress configuration (machine §5.2) from its three flags, or
+/// `None` when egress is off. An uplink turns it on and needs a pool beside it:
+/// nodes sharing a host must not carve guest addresses from one pool, so there
+/// is no default.
+fn egress_config(
+    uplink: Option<String>,
+    pool: Option<String>,
+    cluster_cidrs: Vec<String>,
+) -> Result<Option<EgressConfig>, String> {
+    let (uplink, pool) = match (uplink, pool) {
+        (None, None) if cluster_cidrs.is_empty() => return Ok(None),
+        (Some(uplink), Some(pool)) => (uplink, pool),
+        _ => {
+            return Err(
+                "egress needs --egress-uplink and --egress-pool together; --cluster-cidr \
+                 only extends them"
+                    .to_string(),
+            );
+        }
+    };
+    // Both are written into the nftables ruleset verbatim, so only an interface
+    // name and IPv4 ranges get that far.
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if uplink.is_empty() || uplink.len() > 15 || !uplink.chars().all(is_name_char) {
+        return Err(format!("--egress-uplink `{uplink}`: not an interface name"));
+    }
+    for cidr in &cluster_cidrs {
+        ipv4_cidr("--cluster-cidr", cidr)?;
+    }
+    let (base, prefix) = ipv4_cidr("--egress-pool", &pool)?;
+    // A running machine takes one /30: network, tap (its gateway), guest,
+    // broadcast.
+    if prefix > 30 {
+        return Err(format!(
+            "--egress-pool `{pool}`: narrower than the /30 one machine takes"
+        ));
+    }
+    if u32::from(base) & (u32::MAX >> prefix) != 0 {
+        return Err(format!(
+            "--egress-pool `{pool}`: {base} is not the range's network address"
+        ));
+    }
+    Ok(Some(EgressConfig {
+        cluster_cidrs,
+        uplink,
+        guest_pool_base: base,
+        guest_pool_slots: 1 << (30 - prefix),
+    }))
+}
+
+/// An IPv4 address or `address/prefix`, the forms nftables' `ip daddr` takes.
+fn ipv4_cidr(flag: &str, value: &str) -> Result<(Ipv4Addr, u8), String> {
+    let (addr, prefix) = value.split_once('/').unwrap_or((value, "32"));
+    let addr: Ipv4Addr = parse(flag, addr)?;
+    let prefix: u8 = parse(flag, prefix)?;
+    if prefix > 32 {
+        return Err(format!("{flag} `{value}`: an IPv4 prefix is at most /32"));
+    }
+    Ok((addr, prefix))
 }
 
 /// A client subcommand's parsed arguments: the machine it names, the admin
@@ -207,8 +295,10 @@ async fn run_create(args: &[String]) -> Result<(), String> {
     match reply {
         AdminReply::Done => println!("machine `{}` provisioned", common.machine),
         // A machine is a durable, named thing (machine §1): asking for one that
-        // exists is asking for the one that exists.
-        AdminReply::AlreadyProvisioned => {
+        // exists is asking for the one that exists. Reported rather than failed,
+        // so a re-run of a demo, or a retried command whose first landing was
+        // lost, is a no-op instead of an error.
+        AdminReply::Refused(MachineError::AlreadyProvisioned) => {
             println!(
                 "machine `{}` already exists, leaving it as it is",
                 common.machine
@@ -295,7 +385,7 @@ async fn run_key(args: &[String]) -> Result<(), String> {
         };
         match admin::call(&common.admin, request).await? {
             AdminReply::Done => {}
-            other => return Err(describe(other)),
+            other => return Err(format!("key {}: {}", common.machine, describe(other))),
         }
         println!("{done}");
         changed += 1;
@@ -306,11 +396,61 @@ async fn run_key(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_egress(args: &[String]) -> Result<(), String> {
+    let common = common(args)?;
+    let mut policy = None;
+    let mut allowed = Vec::new();
+    for (flag, value) in &common.rest {
+        match flag.as_str() {
+            "--policy" => {
+                policy = Some(match value.as_str() {
+                    "open" => EgressPolicy::Open,
+                    "none" => EgressPolicy::None,
+                    other => return Err(format!("--policy {other}: expected open|none")),
+                });
+            }
+            "--allow" => {
+                ipv4_cidr(flag, value)?;
+                allowed.push(value.clone());
+            }
+            other => return Err(format!("egress: unknown flag `{other}`")),
+        }
+    }
+    let policy = match (policy, allowed.is_empty()) {
+        (Some(policy), true) => policy,
+        (None, false) => EgressPolicy::Allowlist(allowed),
+        _ => {
+            return Err(
+                "egress: pass either --policy open|none or one or more --allow CIDR".to_string(),
+            );
+        }
+    };
+    let shown = format!("{policy:?}");
+    let reply = admin::call(
+        &common.admin,
+        AdminRequest::SetEgress {
+            machine: common.machine.clone(),
+            policy,
+        },
+    )
+    .await
+    .map_err(|e| format!("egress {}: {e}", common.machine))?;
+    match reply {
+        // Journaled now, realized when the machine next boots (machine §3).
+        AdminReply::Done => println!(
+            "machine `{}` egress set to {shown}, effective from its next boot",
+            common.machine
+        ),
+        other => return Err(format!("egress {}: {}", common.machine, describe(other))),
+    }
+    Ok(())
+}
+
 fn describe(reply: AdminReply) -> String {
     match reply {
-        AdminReply::Error(e) => e,
+        AdminReply::Refused(reason) => format!("refused: {reason}"),
+        AdminReply::Unavailable(why) => why,
         AdminReply::Done => "unexpected reply: done".to_string(),
-        AdminReply::AlreadyProvisioned => "machine already provisioned".to_string(),
         AdminReply::Status(_) => "unexpected reply: status".to_string(),
     }
 }
@@ -348,4 +488,66 @@ where
     T::Err: std::fmt::Display,
 {
     value.parse().map_err(|e| format!("{flag} `{value}`: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flags(
+        uplink: Option<&str>,
+        pool: Option<&str>,
+        cidrs: &[&str],
+    ) -> Result<Option<EgressConfig>, String> {
+        egress_config(
+            uplink.map(str::to_string),
+            pool.map(str::to_string),
+            cidrs.iter().map(|c| c.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn no_egress_flag_leaves_egress_off() {
+        assert!(flags(None, None, &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_pool_cidr_sets_the_base_and_one_slot_per_thirty() {
+        let egress = flags(Some("eth0"), Some("172.31.0.0/24"), &["10.100.0.0/16"])
+            .unwrap()
+            .expect("egress on");
+        assert_eq!(egress.uplink, "eth0");
+        assert_eq!(egress.guest_pool_base, Ipv4Addr::new(172, 31, 0, 0));
+        assert_eq!(egress.guest_pool_slots, 64, "a /24 holds 64 /30s");
+        assert_eq!(egress.cluster_cidrs, ["10.100.0.0/16"]);
+
+        let one = flags(Some("eth0"), Some("172.31.0.4/30"), &[]).unwrap();
+        assert_eq!(one.expect("egress on").guest_pool_slots, 1);
+    }
+
+    #[test]
+    fn an_uplink_and_a_pool_come_together() {
+        assert!(flags(Some("eth0"), None, &[]).is_err());
+        assert!(flags(None, Some("172.31.0.0/24"), &[]).is_err());
+        assert!(flags(None, None, &["10.100.0.0/16"]).is_err());
+    }
+
+    #[test]
+    fn what_would_reach_the_ruleset_unchecked_is_refused() {
+        for (uplink, pool, cidrs) in [
+            ("eth0\" accept", "172.31.0.0/24", &[][..]),
+            ("an-interface-name-too-long", "172.31.0.0/24", &[][..]),
+            ("eth0", "172.31.0.0/31", &[][..]),
+            ("eth0", "172.31.0.1/24", &[][..]),
+            ("eth0", "172.31.0.0/33", &[][..]),
+            ("eth0", "172.31.0.0", &[][..]),
+            ("eth0", "172.31.0.0/24", &["10.0.0.0/8; accept"][..]),
+            ("eth0", "172.31.0.0/24", &["fd00::/8"][..]),
+        ] {
+            assert!(
+                flags(Some(uplink), Some(pool), cidrs).is_err(),
+                "{uplink} {pool} {cidrs:?} must be refused",
+            );
+        }
+    }
 }

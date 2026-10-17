@@ -108,6 +108,8 @@ A machine's guest has a standing outbound path, unlike the agent sandbox's per-c
 - **Attributable.** The provider MUST be able to attribute egress flows to the machine that originated them (reference realization: a per-machine interface or address plus flow accounting), joinable with the attachment journal (§5.1) to answer *who was attached while this machine reached what*.
 - **Isolated: no lateral movement.** Whatever the policy grants toward the internet, the egress path MUST NOT reach another machine's guest, any agent-sandbox environment, the host's own services, or the cluster's control plane and node-internal addresses (link-local and metadata endpoints included). The reference realization is a per-machine tap device NAT-ed through a node gateway that filters cluster-internal destinations.
 
+A node realizes egress only when configured for it (`EgressConfig`: the uplink it NATs out, a guest address pool carved into one /30 per running machine, and the cluster's own ranges to drop; in `machine-standalone`, the `node --egress-uplink --egress-pool --cluster-cidr` flags of its `net` feature). Without that configuration, at the container grade (§2.1), or where the plumbing cannot be installed, a machine boots with no NIC rather than failing: egress degrades to none, never past the policy. The policy changes by `SetEgress` (`machine-standalone egress`) and applies from the machine's next boot.
+
 ---
 
 ## 6. Lifecycle and failure

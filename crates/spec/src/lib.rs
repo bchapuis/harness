@@ -38,6 +38,7 @@
 pub mod catalogue;
 pub mod citations;
 pub mod identifiers;
+mod markdown;
 pub mod ranges;
 
 use std::path::Path;
@@ -93,6 +94,11 @@ pub struct DocSpec {
     pub aliases: &'static [&'static str],
     /// How this document's own unprefixed citations resolve.
     pub unprefixed: Unprefixed,
+    /// Whether [`identifiers`] holds its backticked names to the tree. Off for the
+    /// research notes, which describe other systems (`storage.setAlarm()` is
+    /// correct there and absent here by nature), and for `docs/README.md`, which
+    /// describes this crate, whose own names the index leaves out.
+    pub scanned: bool,
 }
 
 /// Every document the gates read: the citation graph, the identifiers scanned out
@@ -107,24 +113,28 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "docs/distributed-actor-spec.md",
         aliases: &["actor", "core"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "utilities",
         path: "docs/cluster-utilities-spec.md",
         aliases: &["utilities", "util", "cluster-utilities"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "wal",
         path: "docs/wal-spec.md",
         aliases: &["wal"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "entity",
         path: "docs/entity-spec.md",
         aliases: &["entity"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     // The autonomous entity (the `workflow` crate). Cites the agent runtime: the
     // layer it generalizes, and the one that now sits on it.
@@ -133,12 +143,14 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "docs/workflow-spec.md",
         aliases: &["workflow"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "agent",
         path: "docs/agent-spec.md",
         aliases: &["agent"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     // §5 relates the tier model to the agent runtime's own §5, and cites into it bare.
     DocSpec {
@@ -146,24 +158,28 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "docs/sandbox-spec.md",
         aliases: &["sandbox"],
         unprefixed: Unprefixed::OwnThen(&["agent"]),
+        scanned: true,
     },
     DocSpec {
         id: "machine",
         path: "docs/machine-spec.md",
         aliases: &["machine"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "compatibility",
         path: "docs/compatibility-spec.md",
         aliases: &["compatibility", "compat"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     DocSpec {
         id: "hw",
         path: "docs/hardware-envelope.md",
         aliases: &["hw", "hardware-envelope"],
         unprefixed: Unprefixed::Own,
+        scanned: true,
     },
     // Numbers nothing of its own, and is written against the actor spec's §16–§18
     // (see its opening paragraph): every bare `§N` in it is an actor citation. It
@@ -175,6 +191,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "docs/simulation-testing.md",
         aliases: &["simulation-testing"],
         unprefixed: Unprefixed::Other(&["actor"]),
+        scanned: true,
     },
     // A deployment guide for the agent runtime; its bare `spec §6.1` is the agent spec.
     DocSpec {
@@ -182,18 +199,21 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "docs/standalone-deployment.md",
         aliases: &["standalone-deployment"],
         unprefixed: Unprefixed::Other(&["agent"]),
+        scanned: true,
     },
     DocSpec {
         id: "edge",
         path: "docs/multi-tenant-edge.md",
         aliases: &["multi-tenant-edge"],
         unprefixed: Unprefixed::Other(&["agent"]),
+        scanned: true,
     },
     DocSpec {
         id: "docs-index",
         path: "docs/README.md",
         aliases: &[],
         unprefixed: Unprefixed::Other(&["actor"]),
+        scanned: false,
     },
     // The rubric the specs were written against; its bare citations are the actor
     // spec's, which is the document its examples are drawn from.
@@ -202,6 +222,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "design-principles.md",
         aliases: &["design-principles"],
         unprefixed: Unprefixed::Other(&["actor"]),
+        scanned: true,
     },
     // A background note on Durable Objects that maps them onto this tree, so it
     // cites the actor spec's control-plane modes without a prefix.
@@ -210,11 +231,13 @@ pub const DOCUMENTS: &[DocSpec] = &[
         path: "research/durable-objects.md",
         aliases: &["DO"],
         unprefixed: Unprefixed::OwnThen(&["actor"]),
+        scanned: false,
     },
     DocSpec {
         id: "durable-sqlite",
         path: "research/durable-sqlite-and-filesystem.md",
         aliases: &["durable-sqlite-and-filesystem"],
         unprefixed: Unprefixed::OwnThen(&["entity"]),
+        scanned: false,
     },
 ];

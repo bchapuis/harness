@@ -29,7 +29,7 @@ use entity::facet::BlobId;
 /// The interface name for a machine's tap device: `hm-` plus 8 hex of the
 /// entity-name hash. Stable per machine: the attribution key (M6), and short
 /// enough for the 15-char Linux interface-name limit.
-pub fn tap_name(machine: &EntityName) -> String {
+pub(crate) fn tap_name(machine: &EntityName) -> String {
     let hash = BlobId::of(machine.to_string().as_bytes());
     format!("hm-{}", &hash.to_string()[..8])
 }
@@ -65,7 +65,7 @@ const FORBIDDEN_V6: &[&str] = &[
 /// - `cluster_cidrs`: the cluster's own control-plane and node-internal ranges,
 ///   dropped in addition to the RFC1918/link-local/metadata classes.
 /// - `uplink`: the node's egress interface for the masquerade.
-pub fn nft_ruleset(
+pub(crate) fn nft_ruleset(
     machine: &EntityName,
     policy: &EgressPolicy,
     cluster_cidrs: &[&str],
@@ -162,7 +162,7 @@ pub struct EgressConfig {
 /// node's [`EgressConfig`] pool: the tap the guest's virtio-net binds to, the
 /// two addresses of its /30, and the guest's MAC.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GuestNet {
+pub(crate) struct GuestNet {
     /// The tap device name: the stable per-machine attribution key ([`tap_name`]).
     pub tap: String,
     /// The tap's host-side address, e.g. `172.31.0.1`: what [`apply::install`]
@@ -178,7 +178,7 @@ pub struct GuestNet {
 /// A stable, locally-administered unicast MAC for a machine's guest NIC,
 /// derived from the entity-name hash (the `0x02` first octet marks it
 /// locally-administered). Stable per machine across reboots (M6 attribution).
-pub fn guest_mac(machine: &EntityName) -> String {
+pub(crate) fn guest_mac(machine: &EntityName) -> String {
     let hash = BlobId::of(machine.to_string().as_bytes());
     let b = hash.as_bytes();
     format!(
@@ -191,7 +191,7 @@ pub fn guest_mac(machine: &EntityName) -> String {
 /// (machine §5.2). Pure: the same machine + index always maps to the same
 /// addresses, so a crash-and-reboot that reallocates the same slot lands the
 /// same guest address.
-pub fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> GuestNet {
+pub(crate) fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> GuestNet {
     // Each /30 is four addresses; `index * 4` steps to this machine's block.
     let network = u32::from(pool_base).wrapping_add(index.wrapping_mul(4));
     GuestNet {
@@ -206,7 +206,7 @@ pub fn guest_net(machine: &EntityName, pool_base: Ipv4Addr, index: u32) -> Guest
 /// Linux IP autoconfiguration (`CONFIG_IP_PNP`), so the base image needs no
 /// DHCP client: `ip=<guest>::<gateway>:<netmask>::eth0:off`. Appended to the
 /// boot args when a machine boots with a NIC.
-pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
+pub(crate) fn guest_ip_boot_arg(net: &GuestNet) -> String {
     format!("ip={}::{}:255.255.255.252::eth0:off", net.guest, net.host)
 }
 
@@ -214,13 +214,13 @@ pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
 /// per node; a boot takes the lowest free slot and a kill returns it, so a
 /// machine that comes and goes never exhausts the pool.
 #[derive(Debug)]
-pub struct GuestPool {
+pub(crate) struct GuestPool {
     slots: u32,
     used: BTreeSet<u32>,
 }
 
 impl GuestPool {
-    pub fn new(slots: u32) -> GuestPool {
+    pub(crate) fn new(slots: u32) -> GuestPool {
         GuestPool {
             slots,
             used: BTreeSet::new(),
@@ -228,7 +228,7 @@ impl GuestPool {
     }
 
     /// Take the lowest free slot's index, or `None` when the pool is full.
-    pub fn allocate(&mut self) -> Option<u32> {
+    pub(crate) fn allocate(&mut self) -> Option<u32> {
         let index = (0..self.slots).find(|i| !self.used.contains(i))?;
         self.used.insert(index);
         Some(index)
@@ -236,7 +236,7 @@ impl GuestPool {
 
     /// Return a slot to the pool. Idempotent: freeing an already-free slot is a
     /// no-op, so a doubled teardown never disturbs a slot since reallocated.
-    pub fn free(&mut self, index: u32) {
+    pub(crate) fn free(&mut self, index: u32) {
         self.used.remove(&index);
     }
 }

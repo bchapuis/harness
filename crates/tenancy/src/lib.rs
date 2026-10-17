@@ -104,75 +104,11 @@ pub enum Recorded {
 ///
 /// A `BTreeMap` keyed by [`EntityName`] keeps the fold deterministic (entity
 /// invariant E2) and, because a name sorts by `(entity_type, key)`, keeps each
-/// entity type's entries contiguous, so by-type queries are range scans (§
-/// [`Ownership::entries_of_type`]).
+/// entity type's entries contiguous, so a [`ListByType`] is a range scan. The
+/// state is read only through the directory's own commands.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Ownership {
     entries: BTreeMap<EntityName, Meta>,
-}
-
-impl Ownership {
-    /// The names this principal owns, in stable order.
-    pub fn names(&self) -> impl Iterator<Item = &EntityName> {
-        self.entries.keys()
-    }
-
-    /// The entries this principal owns (name and metadata) in stable order.
-    pub fn entries(&self) -> impl Iterator<Item = (&EntityName, &Meta)> {
-        self.entries.iter()
-    }
-
-    /// The metadata for one owned name, if owned.
-    pub fn get(&self, name: &EntityName) -> Option<&Meta> {
-        self.entries.get(name)
-    }
-
-    /// The names this principal owns of one entity type, in stable key order. A
-    /// range scan over the contiguous type (see [`Ownership`]), not a full scan.
-    pub fn names_of_type<'a>(
-        &'a self,
-        entity_type: &'a str,
-    ) -> impl Iterator<Item = &'a EntityName> {
-        self.entries_of_type(entity_type).map(|(n, _)| n)
-    }
-
-    /// The entries this principal owns of one entity type (name and metadata) in
-    /// stable key order. The same range scan as [`names_of_type`](Self::names_of_type).
-    pub fn entries_of_type<'a>(
-        &'a self,
-        entity_type: &'a str,
-    ) -> impl Iterator<Item = (&'a EntityName, &'a Meta)> {
-        self.entries
-            .range(EntityName::new(entity_type, String::new())..)
-            .take_while(move |(n, _)| n.entity_type() == entity_type)
-    }
-
-    /// The distinct entity types this principal owns at least one of, in order.
-    ///
-    /// The map is sorted by `(entity_type, key)`, so equal types are adjacent and a
-    /// single dedup-adjacent pass suffices.
-    pub fn types(&self) -> impl Iterator<Item = &str> {
-        self.entries
-            .keys()
-            .map(EntityName::entity_type)
-            .scan(None, |last, t| {
-                let fresh = *last != Some(t);
-                *last = Some(t);
-                Some((fresh, t))
-            })
-            .filter(|(fresh, _)| *fresh)
-            .map(|(_, t)| t)
-    }
-
-    /// How many entities this principal owns.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether this principal owns no entities.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 /// The directory's journal record: the unit of durable change (entity §4.1).
@@ -232,10 +168,6 @@ impl<S: EntitySystem> Entity for Directory<S> {
         r.accept::<Get>();
         r.accept::<List>();
         r.accept::<ListByType>();
-        r.accept::<Types>();
-        r.accept::<Contains>();
-        r.accept::<Count>();
-        r.accept::<CountByType>();
     }
 }
 
@@ -297,8 +229,8 @@ impl Message for List {
 }
 
 /// Enumerate the entries the principal owns of one entity type: the query for "all
-/// my sessions" when a principal holds several entities per type. A range scan, not a
-/// full scan. Emits no events.
+/// my sessions" when a principal holds several entities per type. A range scan over
+/// the contiguous type (see [`Ownership`]), not a full scan. Emits no events.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListByType {
     pub entity_type: String,
@@ -306,44 +238,6 @@ pub struct ListByType {
 impl Message for ListByType {
     type Reply = Vec<Entry>;
     const MANIFEST: Manifest = Manifest::new("tenancy.ListByType");
-}
-
-/// The distinct entity types the principal owns at least one of. A read; emits no
-/// events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Types;
-impl Message for Types {
-    type Reply = Vec<String>;
-    const MANIFEST: Manifest = Manifest::new("tenancy.Types");
-}
-
-/// Whether the principal owns `name`. A read; emits no events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Contains {
-    pub name: EntityName,
-}
-impl Message for Contains {
-    type Reply = bool;
-    const MANIFEST: Manifest = Manifest::new("tenancy.Contains");
-}
-
-/// How many entities the principal owns. A read; emits no events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Count;
-impl Message for Count {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("tenancy.Count");
-}
-
-/// How many entities of one entity type the principal owns. A range scan; emits no
-/// events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CountByType {
-    pub entity_type: String,
-}
-impl Message for CountByType {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("tenancy.CountByType");
 }
 
 fn entry(name: &EntityName, meta: &Meta) -> Entry {
@@ -428,54 +322,12 @@ impl<S: EntitySystem> EntityHandler<ListByType> for Directory<S> {
         msg: ListByType,
         _: &EntityCtx<Self>,
     ) -> (Vec<Change>, Vec<Entry>) {
-        (
-            Vec::new(),
-            state
-                .entries_of_type(&msg.entity_type)
-                .map(|(n, m)| entry(n, m))
-                .collect(),
-        )
-    }
-}
-
-impl<S: EntitySystem> EntityHandler<Types> for Directory<S> {
-    async fn handle(
-        &self,
-        state: &Ownership,
-        _: Types,
-        _: &EntityCtx<Self>,
-    ) -> (Vec<Change>, Vec<String>) {
-        (Vec::new(), state.types().map(str::to_owned).collect())
-    }
-}
-
-impl<S: EntitySystem> EntityHandler<Contains> for Directory<S> {
-    async fn handle(
-        &self,
-        state: &Ownership,
-        msg: Contains,
-        _: &EntityCtx<Self>,
-    ) -> (Vec<Change>, bool) {
-        (Vec::new(), state.entries.contains_key(&msg.name))
-    }
-}
-
-impl<S: EntitySystem> EntityHandler<Count> for Directory<S> {
-    async fn handle(&self, state: &Ownership, _: Count, _: &EntityCtx<Self>) -> (Vec<Change>, u64) {
-        (Vec::new(), state.entries.len() as u64)
-    }
-}
-
-impl<S: EntitySystem> EntityHandler<CountByType> for Directory<S> {
-    async fn handle(
-        &self,
-        state: &Ownership,
-        msg: CountByType,
-        _: &EntityCtx<Self>,
-    ) -> (Vec<Change>, u64) {
-        (
-            Vec::new(),
-            state.names_of_type(&msg.entity_type).count() as u64,
-        )
+        let entries = state
+            .entries
+            .range(EntityName::new(msg.entity_type.as_str(), String::new())..)
+            .take_while(|(n, _)| n.entity_type() == msg.entity_type)
+            .map(|(n, m)| entry(n, m))
+            .collect();
+        (Vec::new(), entries)
     }
 }

@@ -15,9 +15,6 @@ use entity::EntityConfig;
 use entity::EntityExt;
 use entity::EntityName;
 use tenancy::Clear;
-use tenancy::Contains;
-use tenancy::Count;
-use tenancy::CountByType;
 use tenancy::Directory;
 use tenancy::Forget;
 use tenancy::Get;
@@ -26,7 +23,6 @@ use tenancy::ListByType;
 use tenancy::Meta;
 use tenancy::Record;
 use tenancy::Recorded;
-use tenancy::Types;
 
 fn owned(key: &str) -> EntityName {
     EntityName::new("app.Session", key)
@@ -96,10 +92,6 @@ fn records_enumerates_and_forgets() {
         .await
         .unwrap();
 
-        assert_eq!(dir.ask(Count).await.unwrap(), 3);
-        assert!(dir.ask(Contains { name: owned("s/2") }).await.unwrap());
-        assert!(!dir.ask(Contains { name: owned("s/9") }).await.unwrap());
-
         // Metadata round-trips: the listing shows the chosen label and time.
         let got = dir
             .ask(Get { name: owned("s/1") })
@@ -134,7 +126,7 @@ fn records_enumerates_and_forgets() {
             !dir.ask(Forget { name: owned("s/2") }).await.unwrap(),
             "absent name is a no-op"
         );
-        assert_eq!(dir.ask(Count).await.unwrap(), 2);
+        assert_eq!(dir.ask(List).await.unwrap().len(), 2);
 
         // Clear drops the rest and reports how many it forgot.
         assert_eq!(
@@ -206,33 +198,16 @@ fn queries_entities_by_type() {
         );
 
         assert_eq!(
-            dir.ask(CountByType {
-                entity_type: "app.Repo".into()
-            })
-            .await
-            .unwrap(),
-            2
-        );
-        assert_eq!(
-            dir.ask(CountByType {
+            dir.ask(ListByType {
                 entity_type: "app.Sandbox".into()
             })
             .await
-            .unwrap(),
+            .unwrap()
+            .len(),
             1
         );
-
-        // The distinct types owned, in order, deduped.
         assert_eq!(
-            dir.ask(Types).await.unwrap(),
-            vec![
-                "app.Repo".to_string(),
-                "app.Sandbox".to_string(),
-                "app.Session".to_string()
-            ],
-        );
-        assert_eq!(
-            dir.ask(Count).await.unwrap(),
+            dir.ask(List).await.unwrap().len(),
             5,
             "by-type views do not change the total"
         );

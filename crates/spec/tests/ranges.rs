@@ -26,17 +26,17 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every label a document writes is one `LABELS` knows.
+/// Every label a document writes is a registered catalogue's or an
+/// `UNREGISTERED` one.
 ///
-/// A new catalogue whose ranges resolve nowhere would otherwise be skipped in
-/// silence.
+/// A range whose label resolves nowhere would otherwise be skipped in silence.
 #[test]
 fn every_range_names_a_known_catalogue() {
     let scanned = scan(&root()).expect("scanning the document set");
     let unknown = unknown_labels(&scanned);
     assert!(
         unknown.is_empty(),
-        "invariant ranges naming no catalogue in `spec::ranges::LABELS`:\n{}",
+        "invariant ranges whose label names no catalogue and no `UNREGISTERED` entry:\n{}",
         unknown
             .iter()
             .map(|u| format!("  {}: {} ({})", u.path, u.range, u.range.label))
@@ -90,7 +90,7 @@ fn every_catalogues_last_invariant_is_named_somewhere() {
 
     let mut behind = Vec::new();
     for site in CATALOGUES {
-        let label = label_of(site.id).expect("a registered catalogue has a label");
+        let label = label_of(site);
         let (_, high) = extents[site.id];
         let reached = scanned
             .iter()
@@ -119,13 +119,11 @@ fn every_catalogues_last_invariant_is_named_somewhere() {
 /// here is what keeps them from looking checked.
 #[test]
 fn every_unregistered_label_says_why() {
-    for (label, owner) in spec::ranges::LABELS {
-        if let Owner::Unregistered(reason) = owner {
-            assert!(
-                reason.len() > 40,
-                "{label}: unregistered with no reason worth reading",
-            );
-        }
+    for (label, reason) in spec::ranges::UNREGISTERED {
+        assert!(
+            reason.len() > 40,
+            "{label}: unregistered with no reason worth reading",
+        );
     }
 }
 

@@ -45,6 +45,7 @@ use std::path::Path;
 
 use crate::DOCUMENTS;
 use crate::catalogue::CATALOGUES;
+use crate::catalogue::CatalogueSite;
 use crate::catalogue::documented;
 
 /// What a range label names.
@@ -59,35 +60,23 @@ pub enum Owner {
     Unregistered(&'static str),
 }
 
-/// Every label a range citation can carry.
+/// The labels that name no registered catalogue, each with the reason.
 ///
-/// The letters are the catalogues' own (`E` for `E1`, `#` for the core's bare
-/// numbering). A label absent from this table fails [`resolve`] rather than being
-/// skipped, so a new catalogue is registered here as part of adding it: the way
-/// a new spec is registered in [`DOCUMENTS`].
-pub const LABELS: &[(&str, Owner)] = &[
-    ("#", Owner::Catalogue("core")),
-    ("U", Owner::Catalogue("utilities")),
-    ("L", Owner::Catalogue("wal")),
-    ("E", Owner::Catalogue("entity")),
-    ("A", Owner::Catalogue("agent")),
-    ("S", Owner::Catalogue("sandbox")),
-    ("M", Owner::Catalogue("machine")),
+/// Every other label a range can carry is a registered catalogue's own
+/// ([`label_of`]), so a new catalogue's ranges resolve by its registration in
+/// [`CATALOGUES`]. A label in neither place fails [`resolve`] rather than being
+/// skipped.
+pub const UNREGISTERED: &[(&str, &str)] = &[
     (
         "F",
-        Owner::Unregistered(
-            "entity §7.12's facet contract: four rows beside the E catalogue rather \
-             than a site of its own, and no crate holds a Rust copy of it",
-        ),
+        "entity §7.12's facet contract: four rows beside the E catalogue rather \
+         than a site of its own, and no crate holds a Rust copy of it",
     ),
-    ("W", Owner::Catalogue("workflow")),
     (
         "V",
-        Owner::Unregistered(
-            "compatibility §1: a two-column table with neither a `Defined in` nor a \
-             `Verified by`, so there is no Rust copy to compare it against; each \
-             format's own tests hold V1 and V2 for it",
-        ),
+        "compatibility §1: a two-column table with neither a `Defined in` nor a \
+         `Verified by`, so there is no Rust copy to compare it against; each \
+         format's own tests hold V1 and V2 for it",
     ),
 ];
 
@@ -121,12 +110,26 @@ pub struct UnknownLabel {
     pub range: Range,
 }
 
-/// The owner of `label`, or `None` if [`LABELS`] does not list it.
+/// The owner of `label`: the catalogue whose label it is, else its
+/// [`UNREGISTERED`] entry, else `None`.
 pub fn resolve(label: &str) -> Option<Owner> {
-    LABELS
+    if let Some(site) = CATALOGUES.iter().find(|site| label_of(site) == label) {
+        return Some(Owner::Catalogue(site.id));
+    }
+    UNREGISTERED
         .iter()
         .find(|(l, _)| *l == label)
-        .map(|(_, owner)| *owner)
+        .map(|(_, why)| Owner::Unregistered(why))
+}
+
+/// The label a catalogue's ranges carry: its rows' own letter, or `#` for the
+/// core's bare numbering (`#1–#22`), since a range needs a label on both sides.
+pub fn label_of(site: &CatalogueSite) -> &'static str {
+    if site.label.is_empty() {
+        "#"
+    } else {
+        site.label
+    }
 }
 
 /// Every invariant range in `text`, in source order.
@@ -225,7 +228,7 @@ pub fn scan(root: &Path) -> io::Result<Vec<(&'static str, Range)>> {
     Ok(out)
 }
 
-/// Range citations whose label [`LABELS`] does not list.
+/// Range citations whose label [`resolve`] finds no owner for.
 pub fn unknown_labels(scanned: &[(&'static str, Range)]) -> Vec<UnknownLabel> {
     scanned
         .iter()
@@ -235,13 +238,6 @@ pub fn unknown_labels(scanned: &[(&'static str, Range)]) -> Vec<UnknownLabel> {
             range: range.clone(),
         })
         .collect()
-}
-
-/// The label a catalogue's rows carry, as [`LABELS`] spells it.
-pub fn label_of(catalogue: &str) -> Option<&'static str> {
-    LABELS.iter().find_map(|(label, owner)| {
-        matches!(owner, Owner::Catalogue(id) if *id == catalogue).then_some(*label)
-    })
 }
 
 fn dashes(text: &str) -> impl Iterator<Item = (usize, char)> + '_ {
@@ -327,16 +323,5 @@ mod tests {
     fn counts_lines_across_several_ranges() {
         let found = ranges("E1–E21\n\n\nS1–S5\nM1–M6");
         assert_eq!(found.iter().map(|r| r.line).collect::<Vec<_>>(), [1, 4, 5]);
-    }
-
-    #[test]
-    fn every_registered_catalogue_has_a_label() {
-        for site in CATALOGUES {
-            assert!(
-                label_of(site.id).is_some(),
-                "{}: no entry in LABELS, so ranges naming it resolve nowhere",
-                site.id,
-            );
-        }
     }
 }

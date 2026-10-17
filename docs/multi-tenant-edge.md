@@ -35,7 +35,7 @@ Because it holds `EntityRef`s and rides the receptionist gossip, the gateway sit
 |------|------|
 | `agent-gateway/src/auth.rs` | The `TokenVerifier` seam: `verify(token) -> Option<PrincipalId>`, with `StaticTokens` (opaque secrets from `--auth-tokens`) and `InsecureTokens` (the token is the principal, loopback-only); plus `scoped_session`/`unscope_session`. |
 | `agent-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`ListByType` go through the client `Entities<Directory>`. SSE carries the live record stream. The only unauthenticated routes are `/healthz` (liveness) and `/readyz` (200, then 503 once a shutdown signal starts the drain). |
-| `agent-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them, so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
+| `agent-gateway/src/main.rs` | Refuses a `--node-id` inside the voter roster, then joins the transport through `actor_runtime::join` in `MembershipMode::Static` with the cluster secret, dialing the nodes so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
 | `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entities<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
 | `agent-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). |
 
@@ -51,7 +51,7 @@ Only **root** sessions (the ones the client names) get a `Directory` `Record`; t
 
 - **Prompt**: `Record(P, name, meta)`, then proceed. `Record` is idempotent, so every prompt re-asserts ownership and a transient index failure heals on the next turn; the run proceeds regardless, since the index is best-effort.
 - **List**: `GET /v1/sessions?kind=…` -> `Directory(P).ListByType(kind)`, with the principal prefix stripped from each key so the client sees the session ids it supplied.
-- **Reads are not gated on `Contains`.** The principal prefix already isolates reads, so a gate adds no security.
+- **Reads are not gated on the `Directory`.** The principal prefix already isolates reads, so an ownership check (`Get`) adds no security.
 
 ## Security properties
 

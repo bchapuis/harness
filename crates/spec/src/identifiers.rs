@@ -65,27 +65,8 @@ use std::io;
 use std::path::Path;
 
 use crate::DOCUMENTS;
-
-/// The documents whose backticked identifiers name items in this tree.
-///
-/// The research notes are excluded: they describe other systems, so
-/// `storage.setAlarm()` and its neighbours are correct and absent by nature.
-pub const SCANNED: &[&str] = &[
-    "actor",
-    "utilities",
-    "wal",
-    "entity",
-    "workflow",
-    "agent",
-    "sandbox",
-    "machine",
-    "compatibility",
-    "hw",
-    "simulation",
-    "standalone",
-    "edge",
-    "principles",
-];
+use crate::markdown;
+use crate::markdown::Fence;
 
 /// Why a name a spec uses is not in the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,43 +415,42 @@ fn type_like(text: &str) -> bool {
         && text.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-/// Every identifier the [`SCANNED`] documents name that nothing declares.
+/// Every identifier the [`scanned`](crate::DocSpec::scanned) documents name that
+/// nothing declares.
 pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
     let exempt: BTreeSet<&str> = EXEMPT.iter().map(|x| x.name).collect();
     let mut out = Vec::new();
 
-    for id in SCANNED {
-        let doc = DOCUMENTS
-            .iter()
-            .find(|d| d.id == *id)
-            .ok_or_else(|| io::Error::other(format!("no document {id:?}")))?;
+    for doc in DOCUMENTS.iter().filter(|d| d.scanned) {
         let path = root.join(doc.path);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| io::Error::new(e.kind(), format!("reading {}: {e}", path.display())))?;
 
         // A rust fence is collected whole before it is checked, because an
-        // example may use a name above the line that declares it.
+        // example may use a name above the line that declares it. Other fences
+        // are diagrams and shell, read as prose.
         let mut rust_block: Option<Vec<(usize, &str)>> = None;
-        let mut other_fence = false;
-        for (n, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
-                if let Some(block) = rust_block.take() {
-                    code_block(doc.id, &block, &exempt, index, &mut out);
-                } else if other_fence {
-                    other_fence = false;
-                } else if trimmed.trim_start_matches('`').trim() == "rust" {
-                    rust_block = Some(Vec::new());
-                } else {
-                    other_fence = true;
+        for line in markdown::lines(&text) {
+            match line.fence {
+                Fence::Opens(info) => {
+                    if info == "rust" {
+                        rust_block = Some(Vec::new());
+                    }
+                    continue;
                 }
-                continue;
+                Fence::Closes => {
+                    if let Some(block) = rust_block.take() {
+                        code_block(doc.id, &block, &exempt, index, &mut out);
+                    }
+                    continue;
+                }
+                Fence::Inside | Fence::Outside => {}
             }
             if let Some(block) = rust_block.as_mut() {
-                block.push((n + 1, line));
+                block.push((line.index + 1, line.text));
                 continue;
             }
-            for token in backticked(line) {
+            for token in markdown::backticked(line.text) {
                 let Some((token, name)) = claimed(token) else {
                     continue;
                 };
@@ -479,10 +459,10 @@ pub fn unknown(root: &Path, index: &Index) -> io::Result<Vec<Unknown>> {
                 }
                 out.push(Unknown {
                     from: doc.id,
-                    line: n + 1,
+                    line: line.index + 1,
                     token: token.to_string(),
                     looked_up: name.to_string(),
-                    quote: quote_near(line, token),
+                    quote: quote_near(line.text, token),
                 });
             }
         }
@@ -632,43 +612,8 @@ pub fn stale(index: &Index) -> Vec<&'static Exempt> {
 
 /// Enough of `line` around `token` to judge the citation by eye.
 fn quote_near(line: &str, token: &str) -> String {
-    const WIDTH: usize = 44;
     let at = line.find(token).unwrap_or(0);
-    let start = floor_boundary(line, at.saturating_sub(WIDTH));
-    let end = floor_boundary(line, (at + token.len() + WIDTH).min(line.len()));
-    let mut quote = String::new();
-    if start > 0 {
-        quote.push('…');
-    }
-    quote.push_str(line[start..end].trim());
-    if end < line.len() {
-        quote.push('…');
-    }
-    quote
-}
-
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-/// The backticked spans of one line.
-fn backticked(line: &str) -> impl Iterator<Item = &str> {
-    let mut rest = line;
-    std::iter::from_fn(move || {
-        loop {
-            let open = rest.find('`')?;
-            let after = &rest[open + 1..];
-            let close = after.find('`')?;
-            let span = after[..close].trim();
-            rest = &after[close + 1..];
-            if !span.is_empty() {
-                return Some(span);
-            }
-        }
-    })
+    markdown::excerpt(line, at, at + token.len(), 44)
 }
 
 #[cfg(test)]
