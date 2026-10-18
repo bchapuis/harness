@@ -460,3 +460,55 @@ async fn a_streamed_reprompt_of_an_ended_turn_returns_its_outcome() {
         "nothing after the cursor: {stream}"
     );
 }
+
+/// An observe-only stream of `t-1`, resuming at cursor `from`.
+fn stream_req(session: &str, from: u64) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/v1/assistant/{session}/stream?turn=t-1&from={from}"))
+        .header("accept", "text/event-stream")
+        .header("authorization", "Bearer alice")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Watching a turn that ended behind the cursor ends at once: the follower
+/// never replays its `RunEnded`, so waiting for it would never end (edge §2.1).
+#[tokio::test]
+async fn a_stream_of_a_turn_that_ended_before_from_ends_at_once() {
+    let gw = gateway().await;
+    let resp = agent_gateway::http::router(gw.clone())
+        .oneshot(prompt_req(Some("alice"), "watched"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = agent_gateway::http::router(gw)
+        .oneshot(stream_req("watched", 1_000))
+        .await
+        .unwrap();
+    let stream = drained(resp).await;
+    assert!(stream.contains("event: end"), "{stream}");
+    assert!(!stream.contains("event: records"), "{stream}");
+}
+
+/// Watching from before the run replays its records, then ends after the
+/// `RunEnded` batch.
+#[tokio::test]
+async fn a_stream_from_before_the_run_replays_it_then_ends() {
+    let gw = gateway().await;
+    let resp = agent_gateway::http::router(gw.clone())
+        .oneshot(prompt_req(Some("alice"), "replayed-stream"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = agent_gateway::http::router(gw)
+        .oneshot(stream_req("replayed-stream", 0))
+        .await
+        .unwrap();
+    let stream = drained(resp).await;
+    let ended = stream.find("RunEnded").expect("the run's records replay");
+    let end = stream.find("event: end").expect("the stream ends");
+    assert!(ended < end, "`end` follows the `RunEnded` batch: {stream}");
+}

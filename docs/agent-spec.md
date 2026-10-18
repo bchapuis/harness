@@ -97,8 +97,9 @@ The consumer-facing boundary, used by applications, the HTTP edge (edge §2.4), 
 - `SessionRef::prompt` submits a turn and awaits its `RunOutcome` within the submit deadline (`prompt_within` takes an explicit one). It fails with `PromptError::Rejected` for a permanent rejection (§5.3) or `PromptError::Entity` for a failure to reach the session or commit the turn. A lapsed deadline MUST surface as `PromptError::Entity(EntityError::Call(CallError::Timeout))`, and the run continues.
 - `prompt` MUST NOT transparently retry a failed submit (actor §1.1). It MAY re-submit the same `TurnId` when the attempt's reply mailbox drops without an outcome.
 - `SessionRef::cancel` cancels the run a `TurnId` names (§7.2); `SessionRef::tail` and `SessionRef::follow` read committed records without activating the session (§8.2).
+- `SessionRef::outcome` reads the recorded `RunOutcome` of the turn a `TurnId` names, `None` while it is queued or running or when no such turn was accepted. It commits nothing but activates the session, and it answers from fold state, so it survives compaction of the turn's `RunEnded`.
 
-### 2.6 The session wire (`Submit`, `Cancel`, `RunCompleted`)
+### 2.6 The session wire (`Submit`, `Cancel`, `TurnOutcome`, `RunCompleted`)
 
 An internal boundary, crossing nodes, between `SessionRef` (or a delegating parent's node) and the session entity. The message types are private to the crate, and of the wire only `SubmitReject` is public. The manifests are interop constants every node agrees on.
 
@@ -106,12 +107,13 @@ An internal boundary, crossing nodes, between `SessionRef` (or a delegating pare
 |---|---|---|
 | `Submit { kind, turn, parent, reply_to }` | `Result<Accepted, SubmitReject>` | `agent.Submit` |
 | `Cancel { turn }` | `()` | `agent.Cancel` |
+| `TurnOutcome { turn }` | `Option<RunOutcome>` | `agent.TurnOutcome` |
 | `RunCompleted { session, turn, outcome }` | none: a `tell` | `agent.RunCompleted` |
 
 - `Submit` replies with an ack, `Accepted { turn, status }` (`Started`, `Attached`, or `Ended`), released only when the turn's `TurnSubmitted` commits (entity §5): an acked turn is durable.
 - `kind` rides every `Submit` and MUST equal the addressed entity's type; the first accepted `Submit` creates the session. `parent` carries a delegating parent's `Lineage`. `reply_to` is transient routing: never journaled, and outside the equality check (§5.3).
 - `RunCompleted` MUST reach each registered reply-to only after `RunEnded` commits, as at-most-once delivery under the subscriber discipline of workflow §2.7; the record, not the notification, is the source of truth.
-- Only `Submit` and `Cancel` are accepted from the network; the workflow's `Tick` and `Settled` are local-only, so no peer can inject an outcome.
+- Only `Submit`, `Cancel`, and `TurnOutcome` are accepted from the network; the workflow's `Tick` and `Settled` are local-only, so no peer can inject an outcome.
 
 ### 2.7 The journal schema (`Record`, `RecordBody`)
 

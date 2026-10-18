@@ -198,6 +198,20 @@ impl Message for Cancel {
     const MANIFEST: Manifest = Manifest::new("agent.Cancel");
 }
 
+/// Read the recorded outcome of the turn `turn` names (§2.5): `None` while the
+/// turn is queued or running, or when no such turn was ever accepted. Commits
+/// nothing. The outcome is fold state, so it survives compaction of the turn's
+/// `RunEnded` record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnOutcome {
+    pub turn: TurnId,
+}
+
+impl Message for TurnOutcome {
+    type Reply = Option<RunOutcome>;
+    const MANIFEST: Manifest = Manifest::new("agent.TurnOutcome");
+}
+
 /// The outbound notification carrying a run's outcome to a registered `reply_to`
 /// (§2.6): a `tell` delivered when `RunEnded` commits. Delivery, not the source
 /// of truth (the `RunEnded` record is); a lost one is recovered by re-contact.
@@ -1245,6 +1259,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
         // framework built-in that never touches the activation (§8.2).
         registry.accept::<Submit<S>>();
         registry.accept::<Cancel>();
+        registry.accept::<TurnOutcome>();
     }
 
     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), BoxError> {
@@ -1321,6 +1336,21 @@ impl<S: HarnessSystem> EntityHandler<Cancel> for Agent<S> {
         ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (self.on_cancel(state, msg.turn, ctx), ())
+    }
+}
+
+impl<S: HarnessSystem> EntityHandler<TurnOutcome> for Agent<S> {
+    async fn handle(
+        &self,
+        state: &SessionState,
+        msg: TurnOutcome,
+        _ctx: &EntityCtx<Self>,
+    ) -> (Vec<Record>, Option<RunOutcome>) {
+        let outcome = state
+            .turns
+            .get(&msg.turn)
+            .and_then(|facts| facts.outcome.clone());
+        (Vec::new(), outcome)
     }
 }
 

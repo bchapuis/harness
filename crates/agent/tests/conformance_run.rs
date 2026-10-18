@@ -93,6 +93,34 @@ fn a_final_message_completes_the_run() {
 }
 
 #[test]
+fn a_turns_recorded_outcome_reads_back_by_turn_id() {
+    // §2.5: `outcome` answers from the fold, commits nothing, and knows only
+    // turns that ended.
+    let model = Arc::new(ScriptedModel::steps(vec![Ok(final_message("the answer"))]));
+    let workload = Scenario::new(
+        "outcome-read",
+        echo_kind(),
+        model,
+        Arc::new(ScriptedSandboxes::echo()),
+        move |harness, system| {
+            Box::pin(async move {
+                let session = harness.session("echo", SessionId::new("s-1")).unwrap();
+                let ran = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call");
+                let read = session.outcome(&TurnId::new("t-1")).await.expect("read");
+                assert_eq!(read, Some(ran));
+                let unknown = session.outcome(&TurnId::new("t-9")).await.expect("read");
+                assert_eq!(unknown, None);
+                flush(&system).await;
+            })
+        },
+    );
+    run_seed(&workload, 7).expect("invariants hold");
+}
+
+#[test]
 fn the_tool_loop_journals_intent_before_effect() {
     let model = Arc::new(ScriptedModel::steps(vec![
         Ok(tool_call("c1", "shell", json!({ "cmd": "ls" }))),

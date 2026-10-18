@@ -43,6 +43,7 @@ use crate::agent::Cancel;
 use crate::agent::RunCompleted;
 use crate::agent::Submit;
 use crate::agent::SubmitReject;
+use crate::agent::TurnOutcome;
 use crate::config::HarnessConfig;
 use crate::kind::Kind;
 use crate::kind::Kinds;
@@ -537,6 +538,13 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// Cancel the run `turn` names (agent spec §2.6, §7.2): idempotent.
     pub async fn cancel(&self, turn: &TurnId) -> Result<(), EntityError> {
         self.entity.ask(Cancel { turn: turn.clone() }).await
+    }
+
+    /// The recorded outcome of the turn `turn` names (agent spec §2.5): `None`
+    /// while it is queued or running, or when no such turn was accepted.
+    /// Activates the session, unlike [`tail`](Self::tail).
+    pub async fn outcome(&self, turn: &TurnId) -> Result<Option<RunOutcome>, EntityError> {
+        self.entity.ask(TurnOutcome { turn: turn.clone() }).await
     }
 
     /// Read committed records (agent spec §8.2): at most `limit` records

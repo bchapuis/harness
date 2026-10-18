@@ -281,7 +281,8 @@ async fn list_sessions<S: HarnessSystem>(
 }
 
 /// Stream a run's records live as SSE (no prompt; observe an in-flight or past
-/// turn). Ends when the watched turn's `RunEnded` record arrives.
+/// turn). Ends when the watched turn's `RunEnded` record arrives, or at once
+/// when the turn ended behind the cursor, where the follower never replays it.
 async fn stream<S: HarnessSystem>(
     State(gw): State<Arc<Gateway<S>>>,
     Path((kind, session)): Path<(String, String)>,
@@ -290,6 +291,15 @@ async fn stream<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     let from = resume_from(&headers, q.from);
+    // Asked once, before following: a turn that ends after this answer commits
+    // its `RunEnded` past the cursor, where the follower delivers it. A failed
+    // read streams as before, the follower then reporting the same failure.
+    if let Ok(Some(_)) = session_ref.outcome(&TurnId::new(q.turn.clone())).await
+        && !ends_ahead(&session_ref, Seq::new(from), &q.turn).await
+    {
+        let end = futures::stream::iter([Ok::<_, Infallible>(end_event())]);
+        return Ok(Sse::new(end).into_response());
+    }
     let follower = session_ref.follow(Seq::new(from));
     Ok(sse_response(session_ref, follower, from, q.turn, Tail::End))
 }
@@ -446,10 +456,7 @@ async fn next_event<S: HarnessSystem>(
             };
             return Some((Ok(event), SessionStream::Streaming(live)));
         },
-        SessionStream::Terminal(Tail::End) => Some((
-            Ok(Event::default().event("end").data("")),
-            SessionStream::Done,
-        )),
+        SessionStream::Terminal(Tail::End) => Some((Ok(end_event()), SessionStream::Done)),
         SessionStream::Terminal(Tail::Settled(event)) => Some((Ok(event), SessionStream::Done)),
         SessionStream::Terminal(Tail::Outcome(prompt)) => {
             Some((Ok(prompt_event(prompt.await)), SessionStream::Done))
@@ -471,6 +478,11 @@ fn prompt_event(joined: Result<Result<RunOutcome, PromptError>, JoinError>) -> E
             format!("prompt task failed: {e}"),
         )),
     }
+}
+
+/// The observe-only stream's terminal event: payload-less.
+fn end_event() -> Event {
+    Event::default().event("end").data("")
 }
 
 fn outcome_event(outcome: &RunOutcome) -> Event {
