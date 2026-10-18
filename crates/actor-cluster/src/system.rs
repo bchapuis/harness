@@ -290,10 +290,11 @@ where
                 .launch(Box::pin(system.clone().detector()));
             // Anti-entropy rides alongside the detector on the same cadence: it
             // only makes sense for a live cluster, and gating it on SWIM keeps
-            // SWIM-off systems quiescent (spec §2.6, §2.12.2).
-            system.inner.spawner.launch(Box::pin(
-                system.clone().receptionist_gossip(swim.probe_interval),
-            ));
+            // SWIM-off systems quiescent (spec §2.5, §2.6, §2.12.2).
+            system
+                .inner
+                .spawner
+                .launch(Box::pin(system.clone().anti_entropy(swim.probe_interval)));
         }
         // Registry-based mode (spec §6.4.2).
         if let MembershipMode::Registry(registry) = &mode {
@@ -904,7 +905,7 @@ where
 
     fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId) {
         // Broadcast-on-change to every peer (spec §2.6); nodes that join later or
-        // miss a frame converge through `receptionist_gossip` anti-entropy.
+        // miss a frame converge through `anti_entropy`.
         for peer in self.inner.membership.members() {
             let frame = Frame::Receptionist {
                 key: key.to_string(),
@@ -1767,16 +1768,30 @@ impl<C: Clock, E: Entropy, S: Spawner, T: Transport> ClusterSystem<C, E, S, T> {
         }
     }
 
-    /// Receptionist anti-entropy (spec §2.6): every `interval`, push this node's full
-    /// registry to a random member, converging nodes that joined late or missed a
-    /// broadcast. Actors hosted on a down node are skipped so a pruned registration
-    /// is never resurrected (spec §5.1 step 5, §2.6 requirement 3).
-    async fn receptionist_gossip(self, interval: Duration) {
+    /// Anti-entropy (spec §2.5, §2.6): every `interval`, repair what a lost frame
+    /// left behind. Two repairs share the tick:
+    ///
+    /// - **Receptionist:** push this node's full registry to a random member,
+    ///   converging nodes that joined late or missed a broadcast. Actors hosted on
+    ///   a down node are skipped so a pruned registration is never resurrected
+    ///   (spec §5.1 step 5, §2.6 requirement 3).
+    /// - **Death watch:** re-send `Watch` for every remote watch this node holds on
+    ///   one peer, the peers taken in turn in `NodeId` order, so each is revisited
+    ///   within one tick per peer. A target's node answers a repeated `Watch`
+    ///   idempotently, and with `Terminated` once the target is gone, so a lost
+    ///   `Watch` registers late and a lost `Terminated` is answered again; the
+    ///   watcher's node drops a duplicate, its subscription already consumed. The
+    ///   receptionist prunes a terminated actor's registration through the same
+    ///   watch, so a lost `Terminated` cannot leave a stale listing either.
+    async fn anti_entropy(self, interval: Duration) {
+        let mut turn = 0usize;
         loop {
             self.inner.clock.sleep(interval).await;
             if self.is_shutting_down() {
                 return;
             }
+            self.repair_watches(turn).await;
+            turn = turn.wrapping_add(1);
 
             let entries: Vec<ReceptionistEntry> = self
                 .inner
@@ -1797,6 +1812,33 @@ impl<C: Clock, E: Entropy, S: Spawner, T: Transport> ClusterSystem<C, E, S, T> {
                 .inner
                 .transport
                 .send(target, Frame::ReceptionistSync { entries })
+                .await;
+        }
+    }
+
+    /// Re-assert this node's remote watches on the `turn`-th live peer (spec
+    /// §2.5): one `Watch` frame per subscription. A peer that is `down` already
+    /// had its watches answered by the node-down cascade (§5.1 step 4).
+    async fn repair_watches(&self, turn: usize) {
+        let me = self.node();
+        let peers: Vec<NodeId> = self
+            .inner
+            .membership
+            .members()
+            .into_iter()
+            .filter(|n| *n != me)
+            .collect();
+        let Some(&peer) = peers.get(turn % peers.len().max(1)) else {
+            return;
+        };
+        if self.inner.membership.is_down(peer) {
+            return;
+        }
+        for (target, watcher) in self.inner.host.watches_on(peer) {
+            let _ = self
+                .inner
+                .transport
+                .send(peer, Frame::Watch { target, watcher })
                 .await;
         }
     }

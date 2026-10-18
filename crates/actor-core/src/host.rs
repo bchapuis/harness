@@ -456,6 +456,20 @@ impl LocalHost {
         entry.push((watcher, deliver));
     }
 
+    /// Every `(target, watcher)` subscription this host holds on an actor of
+    /// `node`, in target order: the remote watches a cluster re-asserts so a lost
+    /// `Watch` or `Terminated` frame is repaired (spec §2.5).
+    pub fn watches_on(&self, node: NodeId) -> Vec<(ActorId, ActorId)> {
+        self.state
+            .watchers
+            .lock()
+            .expect("watchers mutex poisoned")
+            .iter()
+            .filter(|(target, _)| target.node() == node)
+            .flat_map(|(target, entry)| entry.iter().map(|(w, _)| (target.clone(), w.clone())))
+            .collect()
+    }
+
     /// Cancel a death-watch subscription (spec §2.5).
     pub fn remove_watch(&self, target: &ActorId, watcher: &ActorId) {
         if let Some(entry) = self

@@ -52,10 +52,11 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     // W6 for `Reexecute`, and W3's admission: across activations an effect MAY run
     // twice, and the settled record (not the launch) is the durable fact.
     //
-    // Seed 109 restarts node 3. Under seed 101 the leader is node 2, and after
-    // its restart the two survivors disagree about who leads the shard for the
-    // rest of the scenario (node 1's map names node 2, node 2 redirects to node
-    // 1), so no call routes. That is a question for the cluster's leader
+    // The restarted leader may win its shard back: either way the activation
+    // after the crash is a fresh process, so only launches after the crash
+    // count. Under seed 101 the leader is node 2, and after its restart the two
+    // survivors disagree about who leads the shard for the rest of the scenario
+    // (node 1's map names node 2, node 2 redirects to node 1), so no call routes. That is a question for the cluster's leader
     // re-discovery after a restart, not for the workflow; it wants a reproduction in
     // entity's clustered suite, where no test yet restarts a shard leader and
     // then routes to it.
@@ -88,11 +89,12 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
 
     // Process death on the leader: the effect's task dies with it, and the
     // journal holds `Requested { 0, 1 }` and `Answered { 1 }`.
-    let dead = cluster.crash_leader_of(key, &script);
+    let before = recorder.events().len();
+    cluster.crash_leader_of(key, &script);
     sim.run_for(Duration::from_secs(3)); // the shard re-elects
 
     // Resumption is caller-driven: the next contact activates the entity on the
-    // new leader, whose first tick is the orphan set.
+    // shard's leader, whose first tick is the orphan set.
     let (done, _, outstanding) = cluster.ask(&sim, key, Status);
     assert!(
         done.contains_key(&1),
@@ -110,9 +112,8 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
         "the orphaned Reexecute effect ran again; the settled one did not (W6, W3)"
     );
     let successor = cluster.leader_of(key);
-    assert_ne!(successor, dead);
     assert_eq!(
-        launched_on(&recorder.events(), successor),
+        launched_on(&recorder.events()[before..], successor),
         vec!["0".to_string()],
         "the successor's first tick launched exactly the orphaned member"
     );

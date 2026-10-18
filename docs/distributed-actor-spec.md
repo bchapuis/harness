@@ -100,6 +100,8 @@ Guarantees (MUST):
 
 Guarantee 2 follows the cluster's `down` decisions, not physical reality: where no authority declares the node `down` (static mode; registry-based mode until the registry removes it), watchers learn nothing from a crash. Between nodes, a `Watch` frame registers interest, and the target's node sends one `Terminated` frame per remote watcher; a node MUST deliver that frame only to the watcher it addresses.
 
+**Repair:** either frame can be lost, so guarantee 1 rests on repair. A node running the detector MUST re-send `Watch` for each remote watch it holds within bounded logical time (one anti-entropy interval per peer, the peers taken in turn), for as long as the watch is outstanding. The target's node MUST answer a repeated `Watch` idempotently: it registers the watcher once, and once the target is gone it answers with `Terminated` carrying the recorded reason. The watcher's node MUST drop a `Terminated` for a watch it no longer holds. Together these keep guarantee 1 exact under loss: a lost `Watch` registers late, a lost `Terminated` is answered again, and a duplicate is never delivered.
+
 ### 2.6 Discovery
 
 The receptionist gives a node the initial `ActorRef` of a service without a hard-coded `ActorId`. The system provides `Receptionist<S>` (`ActorSystem::receptionist`); application code calls `register(key, who)`, `lookup(key)` for a `Listing`, and `subscribe(key)` for a stream of listings. `lookup` is synchronous: it reads replicated local state.
@@ -112,7 +114,7 @@ Requirements:
 5. `subscribe` MUST deliver the current listing on subscription and a fresh listing on every change.
 6. `Key<A>` is typed by actor type, so `lookup` and `subscribe` return correctly typed refs.
 7. **Order:** a `Listing` MUST order its entries by a deterministic function of the registered set, so two nodes holding the same registrations and the same rotation view return the same sequence.
-8. **Convergence under loss:** once faults cease, every node's listing for a key MUST converge, within bounded logical time, on the registrations of live actors, even when individual replication messages were lost.
+8. **Convergence under loss:** once faults cease, every node's listing for a key MUST converge, within bounded logical time, on the registrations of live actors, even when individual replication messages were lost. Lost additions are repaired by anti-entropy (requirement 2), and lost prunes by the death-watch repair the pruning rides on (§2.5).
 
 ### 2.7 Observability
 
@@ -553,5 +555,4 @@ An implementation conforms iff the twenty-two invariants below hold under inject
 - **Certificate-bound node identity.** Mutual TLS authenticates the cluster, not the node, so a holder of the cluster certificate can claim any `NodeId` the allowlist admits (§9 item 1).
 - **Derives.** No derive generates a manifest or a `register` body (§2.10); actors write them by hand.
 - **A configurable default deadline.** The `ask` default is a framework constant (§2.2); a caller needing another bound uses `ask_timeout`.
-- **Death watch over a lossy association.** A dropped `Watch` or `Terminated` frame is not retried, so a remote watcher learns of the termination only if the target's node is later declared `down` (§2.5 guarantee 1).
-- **Receptionist repair in every mode.** Static mode without a detector runs no anti-entropy, so a lost registration frame is never repaired; and a registration whose watch frame was lost is pruned only when its node goes `down` (§2.6 requirement 8).
+- **Loss repair without a detector.** Static mode without a detector runs no anti-entropy, so there a lost registration, `Watch`, or `Terminated` frame is never repaired, and a remote watcher whose frame was lost learns nothing (§2.5, §2.6 requirement 8). Every other mode repairs within bounded logical time.

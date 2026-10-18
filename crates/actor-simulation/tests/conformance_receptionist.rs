@@ -199,6 +199,40 @@ fn anti_entropy_reconciles_a_registration_after_a_partition_heals() {
 }
 
 #[test]
+fn a_registration_whose_stop_was_lost_is_pruned_after_the_heal() {
+    // B learns A's registration and watches the greeter. The greeter stops
+    // while the nodes are partitioned, so the `Terminated` frame that would
+    // prune B's copy is lost. After the heal, B's watch repair asks again, A
+    // answers from the recorded stop, and B's listing converges on the live
+    // registrations: none (spec §2.6 requirement 8).
+    let (sim, net) = support::cluster(13, Some(brisk_swim()));
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+    let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
+    node_a.receptionist().register(GREETERS, &greeter);
+    sim.run_for(Duration::from_millis(500));
+    assert_eq!(node_b.receptionist().lookup(GREETERS).len(), 1);
+
+    net.partition(&[NodeId::new(1)], &[NodeId::new(2)]);
+    sim.block_on(async move { greeter.tell(Stop).await.unwrap() });
+    sim.run_for(Duration::from_secs(1));
+    assert!(node_a.receptionist().lookup(GREETERS).is_empty());
+    assert_eq!(
+        node_b.receptionist().lookup(GREETERS).len(),
+        1,
+        "the prune cannot cross the partition"
+    );
+
+    net.heal();
+    sim.run_for(Duration::from_secs(2));
+    assert!(
+        node_b.receptionist().lookup(GREETERS).is_empty(),
+        "after the heal, B prunes the stopped greeter"
+    );
+    assert!(node_a.receptionist().lookup(GREETERS).is_empty());
+}
+
+#[test]
 fn lookup_discovers_a_remote_service_and_calls_it() {
     let sim = Simulation::new(1);
     let net = SimNetwork::new(&sim);

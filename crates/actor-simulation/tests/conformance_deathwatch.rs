@@ -421,3 +421,65 @@ fn node_down_synthesizes_terminated_for_remote_watch() {
 
     assert_eq!(*got.lock().unwrap(), vec![TerminationReason::NodeDown]);
 }
+
+/// Two nodes in static mode with the observe-only detector: the anti-entropy
+/// loop runs, but no node is ever declared `down`, so only the watch repair can
+/// recover a frame a partition swallowed (spec §2.5).
+fn observed_pair(seed: u64) -> (Simulation, SimNetwork, SimNode, SimNode) {
+    let sim = Simulation::new(seed);
+    let net = SimNetwork::new(&sim).with_mode(actor_cluster::MembershipMode::Static {
+        detector: Some(fast_swim()),
+    });
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+    (sim, net, node_a, node_b)
+}
+
+#[test]
+fn a_watch_lost_to_a_partition_is_repaired_after_the_heal() {
+    // The `Watch` frame A sends while partitioned never reaches B, so B holds
+    // no interest when the target stops. After the heal, A re-asserts its
+    // watch; B registers it, and the later stop notifies A once.
+    let (sim, net, node_a, node_b) = observed_pair(11);
+    let target = node_b.spawn(Target);
+    net.partition(&[NodeId::new(1)], &[NodeId::new(2)]);
+    let got: Reasons = Arc::new(Mutex::new(Vec::new()));
+    let _watcher = node_a.spawn(WatchWatcher {
+        target: node_a.resolve::<Target>(target.id().clone()),
+        got: Arc::clone(&got),
+    });
+    sim.run_for(Duration::from_millis(500));
+    net.heal();
+    sim.run_for(Duration::from_secs(1));
+
+    sim.block_on(async move { target.tell(WatchStop).await.unwrap() });
+    sim.run_for(Duration::from_secs(1));
+    assert_eq!(*got.lock().unwrap(), vec![TerminationReason::Stopped]);
+}
+
+#[test]
+fn a_terminated_lost_to_a_partition_is_repaired_after_the_heal() {
+    // B registers A's watch, then the target fails while the nodes are
+    // partitioned: B's `Terminated` frame is lost. After the heal, A's repair
+    // re-sends `Watch`; B answers it from the target's recorded reason, and
+    // A's watcher hears of the failure exactly once.
+    let (sim, net, node_a, node_b) = observed_pair(12);
+    let target = node_b.spawn(Target);
+    let got: Reasons = Arc::new(Mutex::new(Vec::new()));
+    let _watcher = node_a.spawn(WatchWatcher {
+        target: node_a.resolve::<Target>(target.id().clone()),
+        got: Arc::clone(&got),
+    });
+    sim.run_for(Duration::from_millis(50));
+
+    net.partition(&[NodeId::new(1)], &[NodeId::new(2)]);
+    sim.block_on(async move {
+        let _ = target.tell(Boom).await;
+    });
+    sim.run_for(Duration::from_millis(500));
+    assert!(got.lock().unwrap().is_empty(), "the Terminated frame was lost");
+
+    net.heal();
+    sim.run_for(Duration::from_secs(2));
+    assert_eq!(*got.lock().unwrap(), vec![TerminationReason::Failed]);
+}
