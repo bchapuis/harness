@@ -13,14 +13,20 @@ use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
 use agent::Budget;
+use agent::Entry;
 use agent::HarnessConfig;
 use agent::Kind;
 use agent::Kinds;
 use agent::Model;
+use agent::ModelError;
+use agent::ModelResponse;
 use agent::Record;
 use agent::RecordBody;
 use agent::RunError;
 use agent::SessionId;
+use agent::Tier;
+use agent::ToolCall;
+use agent::ToolError;
 use agent::Turn;
 use agent::TurnId;
 use serde_json::json;
@@ -95,6 +101,117 @@ fn a_cancel_takes_effect_during_a_model_call() {
             ..
         }
     ));
+}
+
+/// Refuse a request the way a provider does when the transcript leaves a
+/// requested call unanswered before a later user turn (the Messages and Chat
+/// Completions APIs both reject it), and otherwise answer by step. `seen`
+/// keeps the latest request's transcript.
+fn provider_strict(responses: Vec<ModelResponse>, seen: Arc<Mutex<Vec<Entry>>>) -> ScriptedModel {
+    ScriptedModel::new(move |req| {
+        *seen.lock().unwrap() = req.transcript.to_vec();
+        let mut open: Vec<&agent::CallId> = Vec::new();
+        for entry in req.transcript.iter() {
+            match entry {
+                Entry::Assistant { calls, .. } => open.extend(calls.iter().map(|c| &c.id)),
+                Entry::ToolResult { call, .. } => open.retain(|id| *id != call),
+                Entry::User(_) if !open.is_empty() => {
+                    return Err(ModelError::InvalidRequest(format!(
+                        "tool calls without results: {open:?}"
+                    )));
+                }
+                Entry::User(_) | Entry::WorkspaceReset => {}
+            }
+        }
+        let step = req
+            .transcript
+            .iter()
+            .filter(|e| matches!(e, Entry::Assistant { .. }))
+            .count();
+        Ok(responses
+            .get(step)
+            .cloned()
+            .unwrap_or_else(|| final_message("done")))
+    })
+}
+
+#[test]
+fn a_session_cancelled_mid_tool_runs_its_next_turn() {
+    // Turn 1 asks for two calls; the sandbox holds each for 60s, and the run
+    // is cancelled at t=5 with both in flight. Its `RunEnded { Cancelled }`
+    // answers both `Interrupted` in the transcript (§7.2 item 2), in the order
+    // the model asked (the ids sort the other way), so turn 2's request
+    // carries no unanswered call and the provider accepts it (§2.1).
+    let mut first = tool_call("call-b", "shell", json!({"cmd": "sleep"}));
+    first.calls.push(ToolCall {
+        id: agent::CallId::new("call-a"),
+        name: "shell".to_string(),
+        input: json!({"cmd": "sleep"}),
+    });
+    let seen: Arc<Mutex<Vec<Entry>>> = Arc::default();
+    let model = Arc::new(provider_strict(
+        vec![first, final_message("second turn done")],
+        Arc::clone(&seen),
+    ));
+    let workload = Scenario::from_factories(
+        "cancel-mid-tool",
+        Kinds::new().register(
+            "echo",
+            Kind::new("agent").tool(
+                "shell",
+                "Run a command",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            ),
+        ),
+        Arc::new(move |_| Arc::clone(&model) as Arc<dyn Model>),
+        Arc::new(|system: &SimSystem| {
+            Arc::new(
+                ScriptedSandboxes::echo()
+                    .with_delay(system.clock().clone(), Duration::from_secs(60)),
+            )
+        }),
+        move |harness, system| {
+            Box::pin(async move {
+                let session = harness.session("echo", SessionId::new("s-1")).unwrap();
+                let prompting = session.prompt(Turn::new(TurnId::new("t-1"), "go"));
+                let canceller = {
+                    let session = session.clone();
+                    let clock = system.clock().clone();
+                    async move {
+                        clock.sleep(Duration::from_secs(5)).await;
+                        session.cancel(&TurnId::new("t-1")).await.expect("cancel")
+                    }
+                };
+                let (outcome, ()) = futures::join!(prompting, canceller);
+                assert_eq!(outcome.expect("call"), Err(RunError::Cancelled));
+
+                let second = session
+                    .prompt(Turn::new(TurnId::new("t-2"), "again"))
+                    .await
+                    .expect("call")
+                    .expect("the turn after a mid-tool cancel runs");
+                assert_eq!(second.text(), "second turn done");
+                flush(&system).await;
+            })
+        },
+    );
+    run_seed(&workload, 47).expect("invariants hold");
+
+    let seen = seen.lock().unwrap();
+    let interrupted = |id: &str| Entry::ToolResult {
+        call: agent::CallId::new(id),
+        outcome: Err(ToolError::Interrupted),
+    };
+    assert_eq!(
+        seen[seen.len() - 3..],
+        [
+            interrupted("call-b"),
+            interrupted("call-a"),
+            Entry::User("again".to_string()),
+        ],
+        "both cut-off calls answered, in the order the model asked, before turn 2",
+    );
 }
 
 #[test]

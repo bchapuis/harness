@@ -155,8 +155,10 @@ pub enum ToolError {
     /// The per-tool timeout elapsed (§4.3). The call's effects may
     /// still land; only its outcome is bounded.
     Timeout,
-    /// An orphaned call declared [`OnOrphan::Interrupt`] was resolved on
-    /// resume (§4.4); the model decides whether to retry the side effect.
+    /// The call was cut off before its outcome was recorded: an orphaned
+    /// call declared [`OnOrphan::Interrupt`] resolved on resume (§4.4), or a
+    /// call its run's cancellation left unanswered (§7.2). Its side effects
+    /// may or may not have happened; the model decides whether to retry.
     Interrupted,
     /// The model named a tool outside the registry: synthesized, nothing was
     /// executed (§4.2).
@@ -183,7 +185,9 @@ impl std::fmt::Display for ToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ToolError::Timeout => f.write_str("tool call timed out"),
-            ToolError::Interrupted => f.write_str("tool call interrupted by a resume"),
+            ToolError::Interrupted => {
+                f.write_str("tool call interrupted before its outcome was recorded")
+            }
             ToolError::UnknownTool { name } => write!(f, "unknown tool: {name}"),
             ToolError::InvalidArguments(e) => write!(f, "invalid arguments: {e}"),
             ToolError::Sandbox(e) => write!(f, "sandbox failure: {e}"),

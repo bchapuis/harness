@@ -614,9 +614,13 @@ impl SessionState {
                     let live = self.live.take().expect("checked live");
                     // A cancel is the one outcome that can end a run over
                     // unresolved calls (every other terminal commits at a step
-                    // boundary, §3.2), so its recorded children become owed
-                    // propagations (§7.2): the durable debt `advance` drains.
+                    // boundary, §3.2). Each such call is answered `Interrupted`
+                    // in the transcript, so the next turn presents no call the
+                    // model requested without its result (§2.1, §7.2), and its
+                    // recorded children become owed propagations: the durable
+                    // debt `advance` drains.
                     if outcome == &Err(RunError::Cancelled) {
+                        self.interrupt_unanswered(&live.pending);
                         let owed: BTreeMap<CallId, ChildRef> = live
                             .pending
                             .into_iter()
@@ -643,6 +647,36 @@ impl SessionState {
                     }
                 }
             }
+        }
+    }
+}
+
+impl SessionState {
+    /// Answer every call of the latest model response that `pending` still
+    /// holds with `ToolError::Interrupted`, in the order the model requested
+    /// them. A projection of the cancelling `RunEnded`, not a record: replaying
+    /// the journal answers the same calls the same way.
+    fn interrupt_unanswered(&mut self, pending: &BTreeMap<CallId, PendingCall>) {
+        if pending.is_empty() {
+            return;
+        }
+        let requested: Vec<CallId> = self
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::Assistant { calls, .. } => {
+                    Some(calls.iter().map(|c| c.id.clone()).collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let transcript = Arc::make_mut(&mut self.transcript);
+        for call in requested.into_iter().filter(|id| pending.contains_key(id)) {
+            transcript.push(Entry::ToolResult {
+                call,
+                outcome: Err(ToolError::Interrupted),
+            });
         }
     }
 }
@@ -785,6 +819,65 @@ mod tests {
             call,
         }));
         assert!(state.cancels_owed.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_run_answers_its_unresolved_calls_interrupted_in_request_order() {
+        // A step of three calls, one resolved before the cancel. The two the
+        // cancel cut off are answered `Interrupted`, in the order the model asked
+        // ("c" before "a", the reverse of their id order), so the next turn's
+        // request answers every call (§2.1, §7.2). The fold journals nothing.
+        let turn = TurnId::new("t1");
+        let call = |id: &str| ToolCall {
+            id: CallId::new(id),
+            name: "shell".into(),
+            input: Value::Null,
+        };
+        let mut base = SessionState::default();
+        start_turn(&mut base, "t1", "go", Budget::new(1_000, 5));
+        base.apply(&rec(RecordBody::ModelResponse {
+            turn: turn.clone(),
+            content: "three calls".into(),
+            calls: vec![call("c"), call("b"), call("a")],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }));
+        base.apply(&rec(RecordBody::ToolOutcome {
+            turn: turn.clone(),
+            call: CallId::new("b"),
+            outcome: Ok(Value::String("b: ok".into())),
+        }));
+
+        let mut cancelled = base.clone();
+        cancelled.apply(&rec(RecordBody::RunEnded {
+            turn: turn.clone(),
+            outcome: Err(RunError::Cancelled),
+        }));
+        let interrupted = |id: &str| Entry::ToolResult {
+            call: CallId::new(id),
+            outcome: Err(ToolError::Interrupted),
+        };
+        assert_eq!(
+            cancelled.transcript[cancelled.transcript.len() - 3..],
+            [
+                Entry::ToolResult {
+                    call: CallId::new("b"),
+                    outcome: Ok(Value::String("b: ok".into())),
+                },
+                interrupted("c"),
+                interrupted("a"),
+            ],
+        );
+
+        // Any other terminal ends at a step boundary and answers nothing.
+        let mut exhausted = base.clone();
+        exhausted.apply(&rec(RecordBody::RunEnded {
+            turn,
+            outcome: Err(RunError::BudgetExhausted),
+        }));
+        assert_eq!(exhausted.transcript, base.transcript);
     }
 
     #[test]
