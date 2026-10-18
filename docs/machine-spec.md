@@ -140,6 +140,6 @@ The workspace adds no invariant: its delta rides the disk's captures (§4), so M
 - **Within-connection migration:** a leadership change severs established connections.
 - **A cross-node front-door relay:** doors serve only their node's machines, so clients reconnect after a move; a relay also needs transport flow control.
 - **Ending live connections:** no command ends an attached connection; revocation acts on the next attach.
-- **Caller-scoped host-key reads:** the entity answers `DoorPolicy` to any cluster member, not only front doors.
+- **Host keys at rest:** the host-key seed is journaled and snapshotted in the clear on every replica, so its confidentiality is the cluster's, and a `DoorPolicy` answered only to front doors would not narrow it; encrypting the seed at rest would.
 - **Richer ingress:** port forwarding and non-SSH protocols (sandbox §7).
 - **Quotas:** per-owner counts, disk, CPU, egress budgets, and idle reaping (agent §1.1, §11).

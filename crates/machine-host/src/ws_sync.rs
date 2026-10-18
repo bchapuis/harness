@@ -103,24 +103,38 @@ fn append_dir(
 }
 
 /// Restore the workspace at `ws` from a guest-produced tar, **two-phase**:
-/// unpack into a sibling `<ws>.incoming` staging directory (the same
-/// filesystem as the workspace, so the swap's renames never fail with
-/// `EXDEV`) then swap whole trees. A corrupt or truncated tar leaves the
-/// workspace untouched; that matters because both consumers durably capture
-/// the workspace (the sandbox after every tool call, the machine at every
-/// quiescent point), and a partial directory would be captured as deletions.
+/// unpack into a sibling `<ws>.incoming` staging directory, then swap the
+/// trees by rename through a sibling `<ws>.outgoing` (both on the same
+/// filesystem as the workspace, so no rename fails with `EXDEV`). Any failure
+/// leaves the workspace as it was (machine spec §2.2): a corrupt or truncated
+/// tar never reaches it, and a swap that fails part-way is undone. That
+/// matters because both consumers durably capture the workspace (the sandbox
+/// after every tool call, the machine at every quiescent point), and a partial
+/// directory would be captured as deletions.
 pub fn restore_workspace(ws: &Path, tar: &[u8]) -> Result<(), std::io::Error> {
-    let mut name = ws.as_os_str().to_owned();
-    name.push(".incoming");
-    let incoming = std::path::PathBuf::from(name);
-    let _ = std::fs::remove_dir_all(&incoming);
-    std::fs::create_dir_all(&incoming)?;
+    let incoming = sibling(ws, ".incoming");
+    let outgoing = sibling(ws, ".outgoing");
+    for scratch in [&incoming, &outgoing] {
+        let _ = std::fs::remove_dir_all(scratch);
+        std::fs::create_dir_all(scratch)?;
+    }
     let staged = Dir::open_ambient_dir(&incoming, cap_std::ambient_authority())?;
     untar_workspace(&staged, tar)?;
+    let aside = Dir::open_ambient_dir(&outgoing, cap_std::ambient_authority())?;
     let ws_dir = Dir::open_ambient_dir(ws, cap_std::ambient_authority())?;
-    replace_workspace(&ws_dir, &staged)?;
+    replace_workspace(&ws_dir, &staged, &aside, &mut |from, name, to| {
+        from.rename(name, to, name)
+    })?;
     let _ = std::fs::remove_dir_all(&incoming);
+    let _ = std::fs::remove_dir_all(&outgoing);
     Ok(())
+}
+
+/// `ws` with `suffix` appended to its last component: a sibling directory.
+fn sibling(ws: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = ws.as_os_str().to_owned();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
 }
 
 /// Remove every child of the workspace, leaving the directory itself in
@@ -138,13 +152,44 @@ fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Replace `ws`'s contents with `staged`'s, by rename: the commit half of
-/// [`restore_workspace`]'s two-phase unpack.
-fn replace_workspace(ws: &Dir, staged: &Dir) -> Result<(), std::io::Error> {
-    clear_workspace(ws)?;
-    for entry in staged.entries()? {
-        let entry = entry?;
-        staged.rename(entry.file_name(), ws, entry.file_name())?;
+/// Move one entry `name` from one directory to another, keeping its name.
+type Rename<'a> = dyn FnMut(&Dir, &std::ffi::OsStr, &Dir) -> Result<(), std::io::Error> + 'a;
+
+/// Replace `ws`'s contents with `staged`'s, or leave `ws` as it was: the
+/// commit half of [`restore_workspace`]'s two-phase unpack. The workspace
+/// directory itself stays in place (a sandbox bind-mounts it), so the swap
+/// moves entries rather than the tree: the old ones into `aside`, then the new
+/// ones in. A rename that fails sends every moved entry back where it came
+/// from. Undoing is renames too and could fail in turn; that double fault
+/// reports the first error, and the facet's rehydration is the backstop, the
+/// directory being working state rather than the durable copy.
+fn replace_workspace(
+    ws: &Dir,
+    staged: &Dir,
+    aside: &Dir,
+    rename: &mut Rename<'_>,
+) -> Result<(), std::io::Error> {
+    if let Err(e) = move_all(ws, aside, rename) {
+        let _ = move_all(aside, ws, rename);
+        return Err(e);
+    }
+    if let Err(e) = move_all(staged, ws, rename) {
+        let _ = move_all(ws, staged, rename);
+        let _ = move_all(aside, ws, rename);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Move every entry of `from` into `to`. The names are read before the first
+/// rename, so the directory is not mutated while it is being listed.
+fn move_all(from: &Dir, to: &Dir, rename: &mut Rename<'_>) -> Result<(), std::io::Error> {
+    let names = from
+        .entries()?
+        .map(|entry| entry.map(|e| e.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for name in names {
+        rename(from, &name, to)?;
     }
     Ok(())
 }
@@ -282,10 +327,57 @@ mod tests {
         ws.write("stale.txt", b"old").expect("write");
         staged.create_dir("d").expect("mkdir");
         staged.write("d/new.txt", b"new").expect("write");
-        replace_workspace(&ws, &staged).expect("replace");
+        let aside_tmp = tempfile::tempdir().expect("tempdir");
+        replace_workspace(&ws, &staged, &open(&aside_tmp), &mut |from, name, to| {
+            from.rename(name, to, name)
+        })
+        .expect("replace");
         assert!(!ws.exists("stale.txt"));
         assert_eq!(ws.read("d/new.txt").expect("read"), b"new");
         assert!(ws_tmp.path().is_dir(), "the workspace directory survives");
+    }
+
+    /// A swap that fails at any one of its renames leaves the workspace as it
+    /// was (machine spec §2.2): every moved entry goes back, old and new alike.
+    #[test]
+    fn a_swap_failing_at_any_rename_leaves_the_workspace_as_it_was() {
+        let build = |old: &Dir, new: &Dir| {
+            old.write("a.txt", b"old a").expect("write");
+            old.create_dir("d").expect("mkdir");
+            old.write("d/b.txt", b"old b").expect("write");
+            new.write("a.txt", b"new a").expect("write");
+            new.write("c.txt", b"new c").expect("write");
+        };
+        // Two old entries move aside and two new ones move in.
+        for fail_at in 0..4 {
+            let (ws_tmp, staged_tmp, aside_tmp) = (
+                tempfile::tempdir().expect("tempdir"),
+                tempfile::tempdir().expect("tempdir"),
+                tempfile::tempdir().expect("tempdir"),
+            );
+            let (ws, staged, aside) = (open(&ws_tmp), open(&staged_tmp), open(&aside_tmp));
+            build(&ws, &staged);
+            let before = tar_workspace(&ws).expect("pack");
+            let mut calls = 0;
+            let result = replace_workspace(&ws, &staged, &aside, &mut |from, name, to| {
+                calls += 1;
+                if calls == fail_at + 1 {
+                    return Err(std::io::Error::other("injected"));
+                }
+                from.rename(name, to, name)
+            });
+            assert!(result.is_err(), "rename {fail_at} was made to fail");
+            assert_eq!(
+                tar_workspace(&ws).expect("pack"),
+                before,
+                "a swap failing at rename {fail_at} left the workspace changed"
+            );
+            assert_eq!(
+                aside.entries().expect("list").count(),
+                0,
+                "nothing left aside"
+            );
+        }
     }
 
     /// Escape-shaped entries are dropped at the boundary: absolute paths,
