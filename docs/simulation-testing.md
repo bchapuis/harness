@@ -17,7 +17,7 @@ From its seed, each run samples a random subset of faults at random intensities,
 - **Time** is logical and advances only when nothing is ready (§2.12.2), so timeouts cost no wall-clock time.
 - **Randomness** is one seeded stream; fault gates draw from it but exist only in the simulator.
 - **Scheduling** picks among ready tasks at random, so interleaving is a fault dimension, and a single-node run draws its mailbox capacity, so backpressure is one too.
-- **The network** drops, duplicates, delays, and reorders frames, and a nemesis adds symmetric and one-way partitions, isolation crashes, bounded freezes, and heals.
+- **The network** drops, duplicates, delays, and reorders frames, and a nemesis adds symmetric and one-way partitions, isolation crashes, bounded freezes, and heals. The nemesis heals after its last round, so a run's liveness is judged once its partitions and crashes have ceased, the precondition every liveness claim states; the seeded loss, duplication, and delay stay on for the whole run.
 - **The registry**, in registry-based mode, answers late, stale, or not at all.
 - **A restart** (process death, durable state reloaded) happens only to a workload that consents through `ClusterWorkload::rehost`.
 

@@ -300,11 +300,17 @@ fn two_groups(entropy: &SimEntropy, nodes: &[NodeId]) -> Option<(Vec<NodeId>, Ve
 }
 
 /// A seeded fault injector (docs/simulation-testing.md): over several rounds it draws from the
-/// run's [`vocabulary`] at random.
+/// run's [`vocabulary`] at random, then heals.
 ///
 /// Every action is either instantaneous or bounded within its own round: a pause
 /// that outlived the nemesis would stall the run rather than fault it, so the
-/// freeze and its thaw are one action, as the registry outage is.
+/// freeze and its thaw are one action, as the registry outage is. A partition or
+/// a crash lasts until a later round draws [`Fault::Heal`], so the last round is
+/// followed by one: the specs promise liveness once faults cease (actor §2.6
+/// requirement 8, storage §5), and a run whose final draw leaves no quorum
+/// anywhere would otherwise fail its liveness verdict on a precondition the
+/// system never claimed to survive. The seeded transport faults (loss,
+/// duplication, latency) stay on for the whole run.
 async fn nemesis(
     net: SimNetwork,
     entropy: SimEntropy,
@@ -371,6 +377,7 @@ async fn nemesis(
             }
         }
     }
+    net.heal();
 }
 
 /// The outcome of driving one cluster run: whether the workload's traffic

@@ -344,10 +344,10 @@ fn the_machine_survives_the_attach_crash_partition_failover_reconnect_story() {
     // machine §6: one seed drives the whole narrative; M1, M3, M5, and E6 hold
     // throughout, and the machine is reachable and provisioned at the end. The
     // swarm runner's nemesis faults the cluster underneath the story's own
-    // partition, and a partition or crash it draws lasts until a later round
-    // happens to heal, so most seeds strand the story (no quorum, no session,
-    // no capture) without breaking any invariant: the seed is chosen to let the
-    // story reach its end.
+    // partition, and its heals (one follows its last round) can clear that
+    // partition early, so many seeds strand the story (no session, no capture,
+    // no deactivation while cut off) without breaking any invariant: the seed
+    // is chosen to let the story reach its end.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = Narrative {
         dir: dir.path().to_path_buf(),
