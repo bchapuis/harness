@@ -64,6 +64,48 @@
 //! the outcome, not the effect (a dropped call future kills the host-side
 //! client; the guest process runs on until release), and native calls need a
 //! tokio runtime.
+//!
+//! # Known gap: a concurrent workspace write is erased
+//!
+//! This grade breaks sandbox spec §2.1 ("calls may overlap"), recorded in its
+//! §7. The bracket replaces the host workspace with the guest's copy, and the
+//! guest's copy was packed when the call began:
+//!
+//! 1. [`FirecrackerTier::run`] takes the VM slot and `exec_bracket` packs the
+//!    host workspace (`tar_workspace`) and pushes it into the guest.
+//! 2. The command runs in the guest, for as long as the tool's timeout allows.
+//! 3. The pull restores the guest's `/workspace` over the host directory
+//!    (`restore_workspace`), whole tree, replace-never-merge.
+//!
+//! The slot serializes microVM calls against each other, but nothing orders
+//! them against the provider's other tiers: `TieredSandbox::call` runs a
+//! `Workspace` file tool and a `Compute` `run_js` straight against the host
+//! directory, taking no lock. The runtime launches every call of a step at once
+//! (agent spec §2.3), so one model response asking for `shell` and
+//! `write_file` is enough: `write_file` lands on the host during step 2,
+//! returns `Ok`, and is journaled; step 3 erases it, and the next capture
+//! records the erasure as durable. The Docker grade bind-mounts the directory
+//! and has no push or pull, so it is unaffected.
+//!
+//! Two fixes, not yet chosen:
+//!
+//! - **Serialize writers against the bracket.** A per-session async `RwLock`
+//!   in `TieredSandbox`: `Workspace` and `Compute` calls take it shared, a
+//!   microVM bracket takes it exclusive. Small and obviously correct; a file
+//!   tool then waits behind a long shell command, up to that tool's timeout.
+//! - **Pull a delta, not a tree.** Diff the pulled tar against the pushed one
+//!   and apply only the paths the guest changed, so a host write to any other
+//!   path survives. Keeps the overlap; needs a rule for a path both sides
+//!   changed (the guest's, as the later finisher, is the natural one).
+//!
+//! Testing either needs no KVM at the bracket level: the fake guest in this
+//! module's tests serves the vsock protocol over a Unix socket. Give it an
+//! `exec` that blocks until released, write a host file while it blocks,
+//! release, and assert the file survives the pull; that assertion fails
+//! today. The lock's wiring through `TieredSandbox` needs a provisioned VM,
+//! so its end-to-end check (a `shell` and a `write_file` in one step, both
+//! effects present after) belongs in `tests/firecracker.rs`, which runs where
+//! `/dev/kvm` and the assets exist and skips elsewhere.
 
 use std::path::Path;
 use std::path::PathBuf;

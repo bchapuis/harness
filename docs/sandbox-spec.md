@@ -124,6 +124,7 @@ The Rust copy of this table, with the suites that verify each row, is `agent-san
 
 ## 7. Deferred
 
+- **Overlapping writers on the microVM grade (breaks §2.1):** a `Native` call on the Firecracker grade copies the workspace into the guest and, when the command ends, copies the guest's back over it, so a `Workspace` or `Compute` call that writes the workspace meanwhile is erased after its success was journaled. The runtime overlaps a step's calls (agent §2.3), so one response asking for `shell` and `write_file` triggers it; the Docker grade shares the directory and is unaffected. The fix either serializes workspace writers against the microVM call or copies back only what the guest changed; `agent-sandbox` documents both and how to test them, the race reproducing without KVM.
 - **Warm pools and snapshots:** every activation provisions its tiers cold (a microVM boots per activation); memory snapshots would also warm-resume a persistent machine (facets §4.4).
 - **A network dataplane:** no provider offers `Network`, so S3 is unexercised and the reference provider refuses a profile that names egress.
 - **Ingress:** a sandboxed server is unreachable from outside; journaled grants could fold in a seam like the machine's (machine §2).
