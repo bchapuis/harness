@@ -39,8 +39,11 @@ use axum::response::sse::Event;
 use axum::response::sse::KeepAlive;
 use axum::routing::get;
 use axum::routing::post;
+use entity::EntityError;
+use futures::future::Either;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 use agent::Followed;
@@ -286,13 +289,14 @@ async fn stream<S: HarnessSystem>(
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
     let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
-    let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
-    Ok(sse_response(follower, q.turn, Tail::End))
+    let from = resume_from(&headers, q.from);
+    let follower = session_ref.follow(Seq::new(from));
+    Ok(sse_response(session_ref, follower, from, q.turn, Tail::End))
 }
 
 /// The streaming `prompt`: submit the turn as a background task, stream the run's
 /// records off a [`Follower`], and emit the terminal outcome once the watched
-/// turn ends.
+/// turn ends, or the task's error once its submit is refused or its wait ends.
 fn prompt_stream<S: HarnessSystem>(
     session_ref: agent::SessionRef<S>,
     body: PromptBody,
@@ -307,18 +311,26 @@ fn prompt_stream<S: HarnessSystem>(
             .prompt_within(turn, Duration::from_secs(body.within_secs))
             .await
     });
-    sse_response(follower, turn, Tail::Outcome(prompt))
+    sse_response(session_ref, follower, from, turn, Tail::Outcome(prompt))
 }
 
 /// The SSE response both streaming endpoints serve: forward record batches off
 /// `follower` until `turn`'s run ends, then run the [`Tail`].
-fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tail) -> Response {
+fn sse_response<S: HarnessSystem>(
+    session: SessionRef<S>,
+    follower: Follower<S>,
+    from: u64,
+    turn: String,
+    tail: Tail,
+) -> Response {
     let body = futures::stream::unfold(
-        SessionStream::Streaming {
+        SessionStream::Streaming(Box::new(Live {
+            session,
             follower,
+            cursor: Seq::new(from),
             turn,
             tail,
-        },
+        })),
         next_event,
     );
     Sse::new(body)
@@ -327,38 +339,76 @@ fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tai
 }
 
 /// The terminal step after a [`SessionStream`]'s watched turn ends: the observe-only
-/// `stream` emits a payload-less `end`; the streaming `prompt` awaits its background
-/// task and emits the run's `outcome`.
+/// `stream` emits a payload-less `end`; the streaming `prompt` emits the run's
+/// `outcome`, or the error that ended the caller's wait.
 enum Tail {
     End,
+    /// The prompt's background submit-and-await, still running.
     Outcome(JoinHandle<Result<RunOutcome, PromptError>>),
+    /// The prompt's terminal event, settled while the turn's `RunEnded` was
+    /// still ahead of the stream's cursor.
+    Settled(Event),
 }
 
 /// The SSE stream's state: forwarding records, then the [`Tail`], then done.
 enum SessionStream<S: HarnessSystem> {
-    Streaming {
-        follower: Follower<S>,
-        turn: String,
-        tail: Tail,
-    },
+    Streaming(Box<Live<S>>),
     Terminal(Tail),
     Done,
+}
+
+/// A stream still forwarding records for its watched turn.
+struct Live<S: HarnessSystem> {
+    session: SessionRef<S>,
+    follower: Follower<S>,
+    /// The last seq the stream delivered, or the cursor it started from.
+    cursor: Seq,
+    turn: String,
+    tail: Tail,
+}
+
+/// What woke a streaming prompt: the follower, or its own background task.
+enum Woke {
+    Followed(Result<Followed, EntityError>),
+    Prompt(Result<Result<RunOutcome, PromptError>, JoinError>),
 }
 
 async fn next_event<S: HarnessSystem>(
     state: SessionStream<S>,
 ) -> Option<(Result<Event, Infallible>, SessionStream<S>)> {
     match state {
-        SessionStream::Streaming {
-            mut follower,
-            turn,
-            tail,
-        } => {
-            let event = match follower.next().await {
-                Ok(Followed::Batch(records)) => {
+        SessionStream::Streaming(mut live) => loop {
+            // A streaming prompt races the follower against its own task: the
+            // turn's records may never arrive (a rejected submit runs nothing;
+            // a turn that ended before the cursor is not replayed), and the
+            // caller's wait is bounded either way (edge §2.1). The follower is
+            // polled first, so a batch that is ready wins a tie.
+            let Live {
+                session,
+                follower,
+                cursor,
+                turn,
+                tail,
+            } = &mut *live;
+            let woke = match tail {
+                Tail::Outcome(prompt) => {
+                    let followed = follower.next();
+                    futures::pin_mut!(followed);
+                    match futures::future::select(followed, prompt).await {
+                        Either::Left((followed, _)) => Woke::Followed(followed),
+                        Either::Right((joined, _)) => Woke::Prompt(joined),
+                    }
+                }
+                Tail::End | Tail::Settled(_) => Woke::Followed(follower.next().await),
+            };
+            let event = match woke {
+                Woke::Followed(Ok(Followed::Batch(records))) => {
+                    if let Some((seq, _)) = records.last() {
+                        *cursor = *seq;
+                    }
                     let event = records_event(&records);
-                    if ends_turn(&records, &turn) {
-                        return Some((Ok(event), SessionStream::Terminal(tail)));
+                    if ends_turn(&records, turn) {
+                        return Some((Ok(event), SessionStream::Terminal(live.tail)));
                     }
                     event
                 }
@@ -367,42 +417,87 @@ async fn next_event<S: HarnessSystem>(
                 // replayed. Tell the client rather than silently resuming past
                 // the gap; the event id is the base, so a `Last-Event-ID`
                 // reconnect also resumes after it.
-                Ok(Followed::Truncated { base }) => Event::default()
-                    .event("truncated")
-                    .data(json!({ "base": base }).to_string())
-                    .id(base.value().to_string()),
-                Err(e) => return Some((Ok(error_event(e)), SessionStream::Done)),
+                Woke::Followed(Ok(Followed::Truncated { base })) => {
+                    *cursor = base;
+                    Event::default()
+                        .event("truncated")
+                        .data(json!({ "base": base }).to_string())
+                        .id(base.value().to_string())
+                }
+                Woke::Followed(Err(e)) => return Some((Ok(error_event(e)), SessionStream::Done)),
+                // The run ended before the stream saw it end. If its `RunEnded`
+                // is still ahead of the cursor, keep streaming up to it, so the
+                // outcome follows the run's records; if it lies behind (a
+                // re-prompt of a turn that ended before `from`), nothing more
+                // of this run will arrive, so the outcome is the last word.
+                Woke::Prompt(Ok(Ok(outcome))) => {
+                    let event = outcome_event(&outcome);
+                    if ends_ahead(session, *cursor, turn).await {
+                        *tail = Tail::Settled(event);
+                        continue;
+                    }
+                    return Some((Ok(event), SessionStream::Done));
+                }
+                // A rejected submit runs nothing, and an ended wait is the
+                // caller's bound: either way the stream ends with the error.
+                Woke::Prompt(joined) => {
+                    return Some((Ok(prompt_event(joined)), SessionStream::Done));
+                }
             };
-            Some((
-                Ok(event),
-                SessionStream::Streaming {
-                    follower,
-                    turn,
-                    tail,
-                },
-            ))
-        }
+            return Some((Ok(event), SessionStream::Streaming(live)));
+        },
         SessionStream::Terminal(Tail::End) => Some((
             Ok(Event::default().event("end").data("")),
             SessionStream::Done,
         )),
+        SessionStream::Terminal(Tail::Settled(event)) => Some((Ok(event), SessionStream::Done)),
         SessionStream::Terminal(Tail::Outcome(prompt)) => {
-            let event = match prompt.await {
-                Ok(Ok(outcome)) => Event::default()
-                    .event("outcome")
-                    .data(serde_json::to_string(&outcome).unwrap_or_default()),
-                // A transport failure or a rejected turn: the structured error
-                // envelope, same code taxonomy as the HTTP body.
-                Ok(Err(e)) => error_event(e),
-                Err(e) => error_event(GatewayError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    format!("prompt task failed: {e}"),
-                )),
-            };
-            Some((Ok(event), SessionStream::Done))
+            Some((Ok(prompt_event(prompt.await)), SessionStream::Done))
         }
         SessionStream::Done => None,
+    }
+}
+
+/// The streaming prompt's terminal event, from its background task's result.
+fn prompt_event(joined: Result<Result<RunOutcome, PromptError>, JoinError>) -> Event {
+    match joined {
+        Ok(Ok(outcome)) => outcome_event(&outcome),
+        // A transport failure or a rejected turn: the structured error
+        // envelope, same code taxonomy as the HTTP body.
+        Ok(Err(e)) => error_event(e),
+        Err(e) => error_event(GatewayError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("prompt task failed: {e}"),
+        )),
+    }
+}
+
+fn outcome_event(outcome: &RunOutcome) -> Event {
+    Event::default()
+        .event("outcome")
+        .data(serde_json::to_string(outcome).unwrap_or_default())
+}
+
+/// Whether `turn`'s `RunEnded` is committed after `cursor`, read from the
+/// journal page by page. A read that fails answers `false`: the outcome is
+/// already in hand, and the client can page the records it missed.
+async fn ends_ahead<S: HarnessSystem>(
+    session: &SessionRef<S>,
+    mut cursor: Seq,
+    turn: &str,
+) -> bool {
+    loop {
+        let Ok(page) = session.tail(cursor, agent::TAIL_PAGE).await else {
+            return false;
+        };
+        let Some((last, _)) = page.events.last() else {
+            return false;
+        };
+        if ends_turn(&page.events, turn) {
+            return true;
+        }
+        cursor = *last;
     }
 }
 

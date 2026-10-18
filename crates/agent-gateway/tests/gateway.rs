@@ -393,3 +393,70 @@ async fn streaming_prompt_carries_seq_ids_and_a_terminal_outcome() {
     assert!(stream.contains("\nid: "), "{stream}");
     assert!(stream.contains("event: outcome"), "{stream}");
 }
+
+/// A streaming prompt for `t-1` with `content`, resuming at cursor `from`.
+fn sse_prompt_from(session: &str, content: &str, from: u64) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/v1/assistant/{session}/prompt?from={from}"))
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .header("authorization", "Bearer alice")
+        .body(Body::from(format!(
+            r#"{{"turn":"t-1","content":"{content}","within_secs":30}}"#
+        )))
+        .unwrap()
+}
+
+/// Drain an SSE body, failing instead of hanging if the stream never ends.
+async fn drained(resp: axum::response::Response) -> String {
+    tokio::time::timeout(Duration::from_secs(10), body_text(resp))
+        .await
+        .expect("the stream ends")
+}
+
+/// A streamed prompt whose turn id was used for other content (a `409`) ends
+/// with the conflict even when the original run's `RunEnded` lies behind the
+/// stream's cursor, where the follower will never deliver it (edge §2.1).
+#[tokio::test]
+async fn a_streamed_conflict_past_the_old_run_ends_with_the_conflict() {
+    let gw = gateway().await;
+    let resp = agent_gateway::http::router(gw.clone())
+        .oneshot(prompt_req(Some("alice"), "conflicted"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = agent_gateway::http::router(gw)
+        .oneshot(sse_prompt_from("conflicted", "something else", 1_000))
+        .await
+        .unwrap();
+    let stream = drained(resp).await;
+    assert!(stream.contains("event: error"), "{stream}");
+    assert!(stream.contains("turn_conflict"), "{stream}");
+    assert!(!stream.contains("event: outcome"), "{stream}");
+}
+
+/// An idempotent re-prompt of a turn that already ended returns its recorded
+/// outcome on the stream, even when its `RunEnded` lies behind the cursor.
+#[tokio::test]
+async fn a_streamed_reprompt_of_an_ended_turn_returns_its_outcome() {
+    let gw = gateway().await;
+    let resp = agent_gateway::http::router(gw.clone())
+        .oneshot(prompt_req(Some("alice"), "replayed"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = agent_gateway::http::router(gw)
+        .oneshot(sse_prompt_from("replayed", "hi", 1_000))
+        .await
+        .unwrap();
+    let stream = drained(resp).await;
+    assert!(stream.contains("event: outcome"), "{stream}");
+    assert!(stream.contains("done"), "{stream}");
+    assert!(
+        !stream.contains("event: records"),
+        "nothing after the cursor: {stream}"
+    );
+}

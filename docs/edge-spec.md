@@ -36,13 +36,14 @@ A stream is Server-Sent Events of these types:
 |---|---|---|
 | `records` | a batch of `(Seq, Record)` pairs | the batch's last `Seq` |
 | `truncated` | `{"base": …}`: compaction outran the cursor, and the records up to `base` cannot be replayed | `base` |
-| `outcome` | the run's `RunOutcome` (a streamed `prompt` only, after the `RunEnded` batch) | none |
+| `outcome` | the run's `RunOutcome` (a streamed `prompt` only: after the `RunEnded` batch, or alone when that record lies behind the cursor) | none |
 | `end` | empty (a `stream` only, after the `RunEnded` batch) | none |
 | `error` | `{"code", "message"}` (§3.5) | none |
 
 - A stream MUST resume strictly after the cursor a reconnect presents (`Last-Event-ID`, else `from`), so no record is delivered twice.
 - A stream MUST emit `truncated` before resuming past a compaction gap, never skip it silently.
 - A `prompt` MUST bound the caller's wait by a configured ceiling, clamping a larger `within_secs`; the run itself continues past any wait (agent §5.3).
+- A streamed `prompt` MUST end: with `outcome` once its run has ended, and with `error` once its submit is refused (a `409`) or the caller's wait ends. It MUST NOT wait for a `RunEnded` behind the cursor, which the stream never replays: a re-prompt of a turn that ended before `from` answers with the recorded outcome alone.
 - The edge MUST bound the request body.
 
 ### 2.2 Token verification (`TokenVerifier`)
