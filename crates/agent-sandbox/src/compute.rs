@@ -1,4 +1,4 @@
-//! The `Compute` tier (sandbox spec §4.2): hermetic wasmtime guests over the
+//! The `Compute` tier (sandbox spec §5.2): hermetic wasmtime guests over the
 //! workspace.
 //!
 //! **Hermeticity by construction.** The linker defines the `harness` host
@@ -6,17 +6,17 @@
 //! frozen clock, discarded stdio, what wasi-libc needs to exist at all),
 //! and nothing else: instantiating a module that imports beyond that set
 //! fails as a `ToolError` outcome. The filesystem a guest can touch is the
-//! workspace capability handle of §4.1 and nothing else, and its outputs are
+//! workspace capability handle of §5.1 and nothing else, and its outputs are
 //! a function of the call, the workspace, and the injected seed (S2). The
-//! WASI stubs conform because §4.2 bans *ambient* capabilities, not
+//! WASI stubs conform because §5.2 bans *ambient* capabilities, not
 //! host-injected ones: a wasi-libc-linked interpreter such as the QuickJS
 //! runner gets a seeded clock and entropy, never the OS's.
 //!
-//! **Determinism config.** Fuel metering is the REQUIRED CPU bound (§4.2):
+//! **Determinism config.** Fuel metering is the REQUIRED CPU bound (§5.2):
 //! it is deterministic, so a fuel-exhausted guest traps at the same
 //! instruction on every run. Epoch interruption is deliberately absent: its
 //! ticking needs an ambient timer thread, which the simulation determinism
-//! contract forbids (core spec §2.12.2). NaN canonicalization and
+//! contract forbids (core spec §11). NaN canonicalization and
 //! deterministic relaxed-SIMD close the value-level holes; parallel
 //! compilation is off so no thread pool exists. One `Store` per call: no
 //! guest state survives between calls except through the workspace.
@@ -48,7 +48,7 @@
 //! Filesystem failures return -1 to the guest rather than trapping: a guest
 //! probing for an absent file is normal control flow. Out-of-bounds memory
 //! and non-UTF-8 paths trap: those are ABI violations, and the trap surfaces
-//! as the call's `ToolError` outcome (agent spec §4.2).
+//! as the call's `ToolError` outcome (agent spec §5.2).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -81,7 +81,7 @@ pub(crate) const QJS_MODULE: &str = "qjs.wasm";
 
 /// The JavaScript tool declaration (the QuickJS runner's model-facing face):
 /// scripts are arbitrary code, so an orphaned call interrupts rather than
-/// blindly re-executing (agent spec §4.4).
+/// blindly re-executing (agent spec §5.4).
 pub fn run_js_tool() -> ToolDecl {
     ToolDecl {
         name: "run_js".to_string(),
@@ -118,7 +118,7 @@ pub fn run_js_tool() -> ToolDecl {
     }
 }
 
-/// Caps on guest-induced **host-side** costs (sandbox spec §4.2: the
+/// Caps on guest-induced **host-side** costs (sandbox spec §5.2: the
 /// REQUIRED limits cover what a guest can make the host pay, not only guest
 /// memory and CPU). Fuel meters execution and `StoreLimits` meters guest
 /// memory; these bound everything else a hostile module could size: the
@@ -177,7 +177,7 @@ impl ComputeTier {
         stats: TierStats,
     ) -> Result<ComputeTier, ToolError> {
         let mut config = Config::new();
-        // The deterministic CPU bound (§4.2).
+        // The deterministic CPU bound (§5.2).
         config.consume_fuel(true);
         config.cranelift_nan_canonicalization(true);
         config.relaxed_simd_deterministic(true);
@@ -248,7 +248,7 @@ impl ComputeTier {
 
     /// Compile through the per-sandbox cache. Compilation runs before fuel
     /// exists to meter it, so its input is bounded instead (sandbox spec
-    /// §4.2): an unbounded module is an unbounded compile.
+    /// §5.2): an unbounded module is an unbounded compile.
     fn compile_cached(&self, bytes: &[u8]) -> Result<Module, ToolError> {
         if bytes.len() > MAX_MODULE_BYTES {
             return Err(ToolError::Sandbox(format!(
@@ -308,7 +308,7 @@ impl ComputeTier {
             .map_err(|e| ToolError::Sandbox(format!("compute: fuel: {e}")))?;
 
         // An import outside the defined surface fails here: hermeticity is
-        // the absence of the capability, not a filter (§4.2).
+        // the absence of the capability, not a filter (§5.2).
         let instance = self
             .linker
             .instantiate(&mut store, &module)
@@ -385,7 +385,7 @@ fn js_source(dir: &Arc<Dir>, input: &Value) -> Result<String, ToolError> {
     }
 }
 
-/// The host surface a guest may import (§4.2): the `harness` capabilities
+/// The host surface a guest may import (§5.2): the `harness` capabilities
 /// over the workspace handle and the seed, plus deterministic WASI stubs for
 /// wasi-libc-linked guests. Nothing below reaches the OS.
 fn host_linker(engine: &Engine) -> Result<Linker<HostState>, ToolError> {

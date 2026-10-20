@@ -1,5 +1,5 @@
-//! Split-brain safety: entities under a *heal-able* network partition (storage §10,
-//! §5, entity §6), under deterministic simulation (entity §11).
+//! Split-brain safety: entities under a *heal-able* network partition (storage §11,
+//! §6, entity §7), under deterministic simulation (entity §10).
 //!
 //! Every other cluster test fences the single writer with `crash()`, which kills
 //! the followers outright, so they fall silent and can never form a competing
@@ -15,7 +15,7 @@
 //!   reconciled balance is *exactly* the sum of acknowledged writes: the minority
 //!   attempts left no trace (`split_brain_partition_neither_forks_nor_loses`).
 //! - **E14 (no loss).** Every write the majority acknowledged survives the heal.
-//! - **§6 (relaxed reads).** The minority leader MAY serve a stale read but MUST
+//! - **§7 (relaxed reads).** The minority leader MAY serve a stale read but MUST
 //!   NOT commit: the documented read/write asymmetry, pinned as an executable
 //!   contract (`minority_leader_serves_stale_reads_but_never_commits`).
 //! - **Linearizability across partition+heal.** Concurrent clients on both sides,
@@ -284,15 +284,15 @@ fn split_brain_partition_neither_forks_nor_loses() {
     });
 }
 
-// --- §6: the minority leader's read/write asymmetry, pinned ------------------
+// --- §7: the minority leader's read/write asymmetry, pinned ------------------
 
 #[test]
 fn minority_leader_serves_stale_reads_but_never_commits() {
-    // §6 is explicit that reads are read-your-leader (relaxed), not linearizable:
+    // §7 is explicit that reads are read-your-leader (relaxed), not linearizable:
     // an isolated minority leader, lacking a check-quorum lease today, MAY serve a
     // stale read until its activation stops, but it can commit NOTHING. This test
     // pins both halves as an executable contract, so the day a leader lease lands
-    // (§13) the read assertion is the regression that must flip.
+    // (status §5) the read assertion is the regression that must flip.
     //
     //   * minority WRITE  -> Unavailable (the firm safety guarantee, always);
     //   * minority READ   -> the *stale* pre-partition value, never the new
@@ -347,7 +347,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
 
     // A READ on the deposed leader, served from its in-memory activation, returns
     // the STALE pre-partition value (100), not the new committed 150. Reads can be
-    // stale on the minority side (the documented §6 gap), but they are NEVER the
+    // stale on the minority side (the documented §7 gap), but they are NEVER the
     // linearized-current value while partitioned.
     let minority_read = {
         let g = hosts[leader_idx].clone();
@@ -361,7 +361,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
         minority_read,
         Ok(150),
         "a minority-side read must NOT observe the new committed value (reads are not \
-         linearizable on the minority side: §6); a leader lease (§13) would make this error",
+         linearizable on the minority side: §7); a leader lease (status §5) would make this error",
     );
     assert!(
         matches!(minority_read, Ok(100) | Err(_)),
@@ -454,11 +454,11 @@ fn cluster_reconverges_after_a_partition_heals() {
     }
 }
 
-// --- `tell` is fire-and-forget even when the commit cannot happen (§5) --------
+// --- `tell` is fire-and-forget even when the commit cannot happen (§6) --------
 
 #[test]
 fn tell_under_quorum_loss_never_surfaces_unavailable() {
-    // §5: `tell` returns once the host *accepts* the command, not after the commit,
+    // §6: `tell` returns once the host *accepts* the command, not after the commit,
     // so it reports only enqueue-time failures (`Call`/`NotLeader`/`Unhandled`),
     // NEVER `Unavailable`. Under quorum loss the host still accepts and proposes,
     // but the commit can never land; the caller is not notified (at-most-once,
@@ -471,7 +471,7 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     let (leader_idx, majority) = leader_and_majority(&systems, &hosts, key);
 
     // Activate the entity while healthy so its host is live and cached on the leader.
-    // The §5 property is about an *accepted enqueue*; a fresh entity would instead
+    // The §6 property is about an *accepted enqueue*; a fresh entity would instead
     // spin in activation (the map group has no quorum either, so leadership cannot
     // be confirmed): that is the resolve path, not the tell contract.
     let warmup = {
@@ -508,7 +508,7 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     assert_eq!(
         told,
         Ok(()),
-        "tell must report only enqueue acceptance, never the durability outcome (§5); got {told:?}",
+        "tell must report only enqueue acceptance, never the durability outcome (§6); got {told:?}",
     );
 
     // Contrast: the equivalent `ask` in the same state DOES surface the durability
@@ -618,7 +618,7 @@ fn counter_entity_is_linearizable_across_a_partition_and_heal() {
     // The minority-side client only ADDS (writes), deliberately: a minority WRITE
     // that committed would fork the log and surface as a value with no valid serial
     // placement. (A minority *read* would return a stale value the checker would
-    // flag as a non-linearizable `ok`, but that is the documented §6 read gap, not
+    // flag as a non-linearizable `ok`, but that is the documented §7 read gap, not
     // a fork, and the dedicated test above pins it.) A fenced write returns an error
     // -> recorded `info` (pending), which the checker may place or drop, so it is
     // sound. The majority client reads and writes against the live leader.

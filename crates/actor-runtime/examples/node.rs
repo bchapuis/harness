@@ -1,6 +1,6 @@
 //! A single cluster node as its own OS process, talking over mutual-TLS TCP
-//! (spec §2.12.1, §2.13, §9). Run several copies to form a real multi-process
-//! cluster; they discover each other's actors through the receptionist (§2.6).
+//! (spec §11.1, cluster §4, §11). Run several copies to form a real multi-process
+//! cluster; they discover each other's actors through the receptionist (§3.7).
 //!
 //! All nodes share one TLS identity (CA + cert), so generate it once and point
 //! every process at the same directory:
@@ -25,13 +25,13 @@
 //! ```
 //!
 //! The joiner prints `joining`, then `admitted … as Up` (node 1, the leader,
-//! admits it on convergence, spec §6.3), then `Hello, world!` from the greeter
+//! admits it on convergence, spec cluster §5.3), then `Hello, world!` from the greeter
 //! in the other process, over a TLS-encrypted TCP association. Drop `--join` to
 //! start as a founding member.
 
 // A production-runtime demo, outside the deterministic simulation build: it
 // reads the wall clock for its own run deadline, so the workspace determinism
-// lint (§2.12.2) is allowed here.
+// lint (§11) is allowed here.
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
@@ -80,7 +80,7 @@ const CLUSTER_DNS: &str = "cluster.local";
 const SECRET: &str = "demo-cluster-secret";
 
 /// The well-known receptionist key the greeter registers under, so any node can
-/// discover it without knowing its `ActorId` up front (spec §2.6).
+/// discover it without knowing its `ActorId` up front (spec §3.7).
 const GREETERS: Key<Greeter<TcpCluster>> = Key::new("greeters");
 
 #[derive(Serialize, Deserialize)]
@@ -181,7 +181,7 @@ async fn run(args: &[String]) {
                 downing: DowningPolicy::Conservative,
             }),
             // A joiner enters Joining and is admitted to Up by the coordinator once it
-            // gossips itself in via its seeds (spec §6.3).
+            // gossips itself in via its seeds (spec cluster §5.3).
             joining: opts.join,
             authorizer: None,
             // A single long-lived process per node here; see `ClusterConfig`.
@@ -231,7 +231,7 @@ async fn run(args: &[String]) {
 
 /// Host a greeter, register it once, and stay alive serving requests until
 /// killed. One registration is enough: the receptionist's anti-entropy (spec
-/// §2.6) pushes it to peers that join later or missed the initial broadcast.
+/// §3.7) pushes it to peers that join later or missed the initial broadcast.
 async fn serve(system: TcpCluster, greeting: String) -> ! {
     let greeter = system.spawn(Greeter::<TcpCluster>::new(greeting));
     system.receptionist().register(GREETERS, &greeter);
@@ -283,7 +283,7 @@ struct Options {
     certs: PathBuf,
     peers: BTreeMap<NodeId, SocketAddr>,
     mode: Mode,
-    /// Start as a joiner (Joining → admitted to Up by the leader, spec §6.3)
+    /// Start as a joiner (Joining → admitted to Up by the leader, spec cluster §5.3)
     /// rather than a founding Up member.
     join: bool,
 }

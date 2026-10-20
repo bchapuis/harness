@@ -1,5 +1,5 @@
 //! The composed production node bring-up: [`join`], the counterpart of the
-//! simulator's `SimNetwork::join` (spec §2.12.2). One call takes a deployment's
+//! simulator's `SimNetwork::join` (spec §11). One call takes a deployment's
 //! genuine choices and absorbs the assembly the simulator absorbs on its side:
 //! the dial map, the allowlist, the bind, the transport, the system, and the
 //! membership seeding.
@@ -56,13 +56,13 @@ pub struct JoinOptions {
     pub advertise_host: Option<String>,
     /// Base of the port plan.
     pub port_base: u16,
-    /// The cluster secret guarding the transport handshake (spec §9).
+    /// The cluster secret guarding the transport handshake (spec cluster §11).
     pub secret: String,
     /// The **one** codec value for the three places that must agree: the
     /// transport's framing, the message layer, and any store stamp derived
-    /// from it (storage §2.2).
+    /// from it (storage §3.2).
     pub codec: Arc<dyn Codec>,
-    /// The observability sink (spec §2.7).
+    /// The observability sink (spec §3.6).
     pub events: Arc<dyn EventSink>,
     /// Transport encryption. Stated rather than defaulted, because the choice
     /// carries a threat model: `PlaintextTrusted` is valid only on a network
@@ -139,7 +139,7 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
     peers.insert(node, advertised);
 
     // The allowlist admits the voters, the clients, and self; only these ids
-    // may complete the transport handshake (spec §9).
+    // may complete the transport handshake (spec cluster §11).
     let admitted: BTreeSet<NodeId> = peers
         .keys()
         .copied()
@@ -198,7 +198,7 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 /// `expected - 1` (a client joining only raises the count). Counted polls,
 /// each slept on the system's clock, rather than a wall-clock deadline:
 /// reading the host clock directly is what the `Clock` seam exists to prevent
-/// (spec §2.12.1), and the elapsed figure is derived from the count. Size
+/// (spec §11.1), and the elapsed figure is derived from the count. Size
 /// `budget` to cover peer discovery plus the first election; exhausting it
 /// then means a peer never appeared or a group cannot elect, which is reported
 /// with the member and leader state, and the node serves anyway.

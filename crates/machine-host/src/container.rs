@@ -1,5 +1,5 @@
-//! The container mechanism (sandbox spec §4.4's SHOULD grade, sandbox §4's
-//! development fallback; machine spec §2.3): OCI containers driven through the
+//! The container mechanism (sandbox spec §5.4's SHOULD grade, sandbox §5's
+//! development fallback; machine spec §3.2): OCI containers driven through the
 //! `docker` CLI.
 //!
 //! Confinement here is **shared-kernel**: the guest speaks to the host kernel,
@@ -14,7 +14,7 @@
 //!   `Native` tier needs, whose virtue is requiring *nothing* inside the image.
 //! - [`MachineHost::start`] holds a **block image** guest: the runner image
 //!   loop-mounts `spec.disk` and chroots into it, so the guest is the disk's own
-//!   rootfs and its writes land in that very file (facets §4.4). The container
+//!   rootfs and its writes land in that very file (facets §5.4). The container
 //!   half is `guest/machine-docker/init.sh`; `--privileged` is what `losetup`
 //!   and `mount` cost, and the reason this mechanism is a development one.
 //!
@@ -175,7 +175,7 @@ impl MachineHost for ContainerHost {
             if !matches!(spec.network, Network::None) {
                 // Refused rather than ignored: a guest that silently lost the
                 // NIC its consumer's policy asked for would be a policy
-                // failure disguised as a working boot (machine §2.6).
+                // failure disguised as a working boot (machine §5.2).
                 return Err(GuestError::Host(
                     "a container cannot take a host tap; only the microvm grade realizes egress"
                         .to_string(),
@@ -251,7 +251,7 @@ pub struct ContainerSpec {
 impl ContainerSpec {
     /// A container with no network, no mounts, and the image's own entrypoint.
     /// Egress is absent by construction in both consumers (sandbox §1.1;
-    /// machine §2.6's degradation), so there is no knob to grant it.
+    /// machine §5.2's degradation), so there is no knob to grant it.
     pub fn image(key: GuestKey, image: impl Into<String>) -> ContainerSpec {
         ContainerSpec {
             key,
@@ -481,7 +481,7 @@ impl MachineGuest for ContainerGuest {
             // gracefully, and this path is reached from a forced step-down
             // too. The runner's own unmount is a nicety for `docker stop`, not
             // something durability rests on: the consumer's capture cadence
-            // bounds exactly this loss (machine §4, M3).
+            // bounds exactly this loss (machine §6, M3).
             self.stopped.store(true, Ordering::SeqCst);
             let _ = run(&self.cli, &["rm", "-f", &self.name]).await;
         })

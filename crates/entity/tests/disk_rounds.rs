@@ -9,7 +9,7 @@
 //!
 //! Sequencing is measurable here, with no cluster and no hardware. The simulation's
 //! clock is virtual and its transport applies a fixed minimum delivery latency to
-//! every frame (actor §2.12.2), so **elapsed virtual time counts round trips**. On a
+//! every frame (actor §11), so **elapsed virtual time counts round trips**. On a
 //! loopback the rounds are nearly free, so wall-clock time cannot tell five hundred
 //! serialized quorum rounds from the same rounds issued sixteen at a time. Virtual
 //! time can, and the same seed gives the same count on any machine.
@@ -87,7 +87,7 @@ use entity::facet::DiskError;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The facet's fixed block size (spec facets §4.4). One block is one `put_blob`, the
+/// The facet's fixed block size (spec facets §5.4). One block is one `put_blob`, the
 /// unit these tests count in.
 const BLOCK: usize = 1 << 20;
 
@@ -170,7 +170,7 @@ impl EntityHandler<TinyPuts> for DiskBox {
 
 /// R = 3 over the 3-node cluster, so every blob put is a real quorum round to a
 /// majority. Snapshotting is off: a checkpoint in the middle of a measured import
-/// would add rounds that belong to storage §8 rather than to the capture path.
+/// would add rounds that belong to storage §9 rather than to the capture path.
 fn config(scratch: &std::path::Path) -> EntityConfig {
     EntityConfig {
         shards: 1,
@@ -354,7 +354,7 @@ fn a_wave_of_blocks_costs_one_quorum_round_between_them() {
     );
 
     // A quorum put is a frame out and an acknowledgement back, and the simulated
-    // transport applies its base latency to each (actor §2.12.2). The facet issues
+    // transport applies its base latency to each (actor §11). The facet issues
     // `IN_FLIGHT` of them at once, so a wave costs one round trip: the slope is a
     // round trip *divided by* the width, not a round trip each.
     assert!(

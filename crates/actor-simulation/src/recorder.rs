@@ -1,7 +1,7 @@
-//! A recording [`EventSink`] for observing a run's event stream (spec §2.7).
+//! A recording [`EventSink`] for observing a run's event stream (spec §3.6).
 //!
 //! The simulator checks invariants and seed-reproducibility against this stream
-//! (spec §2.12.2, §10). Cloning shares one log.
+//! (spec §11, §13). Cloning shares one log.
 
 use std::sync::Arc;
 use std::sync::Mutex;

@@ -1,4 +1,4 @@
-//! The `Ledger` entity: the shared SQL-facet fixture (spec facets §4.3).
+//! The `Ledger` entity: the shared SQL-facet fixture (spec facets §5.3).
 //!
 //! An entity whose durable state is entirely its SQLite database, plus the three
 //! messages both SQL suites drive it with. Shared by `sql.rs` (scenarios) and
@@ -33,7 +33,7 @@ impl Entity for Ledger {
     }
 }
 
-/// Idempotent DDL at the top of the writing command (spec facets §4.3: schema setup
+/// Idempotent DDL at the top of the writing command (spec facets §5.3: schema setup
 /// is a journaled write like any other; `IF NOT EXISTS` makes it a no-op after
 /// the first commit and on every replayed materialization).
 pub fn ensure_schema(ctx: &EntityCtx<Ledger>) {
@@ -76,7 +76,7 @@ impl EntityHandler<Add> for Ledger {
 }
 
 /// Insert a row whose value SQLite itself draws with `random()`, and reply with
-/// it: nondeterministic SQL, fine under physical replication (facets §4.3, F1 holds
+/// it: nondeterministic SQL, fine under physical replication (facets §5.3, F1 holds
 /// on the frames, not the SQL).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AddRandom;
@@ -111,7 +111,7 @@ impl EntityHandler<AddRandom> for Ledger {
     }
 }
 
-/// The sum of all entries, a pure read: no frames, no record, no commit (§6).
+/// The sum of all entries, a pure read: no frames, no record, no commit (§7).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Total;
 impl Message for Total {

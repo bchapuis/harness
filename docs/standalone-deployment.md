@@ -22,13 +22,13 @@ Install `agent-standalone`, the runnable agent runtime, and run a three-node clu
  └────────────────────┘
 ```
 
-Each `node` process is a full cluster member: a TCP transport on loopback, a voter in the fixed three-node roster of the leader-based control plane (Raft, with SWIM as its failure sensor and conservative downing; actor spec §6.4.3), and one node's agent runtime, its host actor, its session actors, the two seams (model, sandbox; agent §2.2), and the entity's journal:
+Each `node` process is a full cluster member: a TCP transport on loopback, a voter in the fixed three-node roster of the leader-based control plane (Raft, with SWIM as its failure sensor and conservative downing; cluster spec §5.4.3), and one node's agent runtime, its host actor, its session actors, the two seams (model, sandbox; agent §3.2), and the entity's journal:
 
 - **Model**: the Anthropic Messages API (`agent-anthropic`) over a small tokio/rustls HTTP client.
-- **EntityJournal**: a file-backed store in the node's own `--data` directory. The journal is one logical store for the cluster (spec §2.7) but *replicated*, not shared: a session's record is appended to a quorum of the shard's replicas over the transport, fenced by the shard's term (storage §4, §5). A new owner recovers an entity's head from a quorum on activation (storage §8, E14).
+- **EntityJournal**: a file-backed store in the node's own `--data` directory. The journal is one logical store for the cluster (spec §11.2) but *replicated*, not shared: a session's record is appended to a quorum of the shard's replicas over the transport, fenced by the shard's term (storage §5, §6). A new owner recovers an entity's head from a quorum on activation (storage §9, E14).
 - **Sandbox**: one private workspace directory per session under `--data/workspaces/<node-id>/`, keyed by the entity, where the `shell` tool runs.
 
-A session's name hashes to a shard; the consensus-agreed shard map names the shard's replicas, and the session activates on the shard's current leader (agent §5.2). The gateway holds an `EntityRef` per session, and the transport routes each `ask` to the current owner.
+A session's name hashes to a shard; the consensus-agreed shard map names the shard's replicas, and the session activates on the shard's current leader (agent §7.1). The gateway holds an `EntityRef` per session, and the transport routes each `ask` to the current owner.
 
 Two agent kinds are registered on every node:
 
@@ -37,7 +37,7 @@ Two agent kinds are registered on every node:
 | `assistant` | the file tools, `shell`, `run_js`, `delegate` | `worker` | 200k tokens, 50 steps |
 | `worker`    | the file tools, `shell`, `run_js`        | none            | 100k tokens, 25 steps |
 
-Every `--sandbox` mode carries the typed file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) over the session entity's workspace facet (facets §4.1), so its files survive hibernation, migration, and node loss. The shell-capable modes add `shell`, the Native tier (the container or microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier (sandbox spec §4.2), which runs JavaScript with no language runtime in the shell image. `--sandbox durable` has the file tools alone: the rows above lose `shell` and `run_js`.
+Every `--sandbox` mode carries the typed file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) over the session entity's workspace facet (facets §5.1), so its files survive hibernation, migration, and node loss. The shell-capable modes add `shell`, the Native tier (the container or microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier (sandbox spec §5.2), which runs JavaScript with no language runtime in the shell image. `--sandbox durable` has the file tools alone: the rows above lose `shell` and `run_js`.
 
 ## Prerequisites
 
@@ -141,7 +141,7 @@ Drop the `Accept: text/event-stream` header to block and get the final outcome a
 
 Re-issuing the **same** `turn` id is the resume primitive: a completed run returns its recorded outcome, a live run re-attaches, and nothing runs twice (A6).
 
-The records *are* the session: each is one `postcard`-encoded, length-framed, checksummed entry in the session's own segment under `./agent-data/entities/<entity_type>/<node>/segments/` (an append-only binary log, not text lines). Any node reconstructs the session by folding them; there is no other session state. The entity type comes first because each hosted type has its own store: the fence is keyed by shard index, and the same index is a different leader-election group per type (storage §3.2).
+The records *are* the session: each is one `postcard`-encoded, length-framed, checksummed entry in the session's own segment under `./agent-data/entities/<entity_type>/<node>/segments/` (an append-only binary log, not text lines). Any node reconstructs the session by folding them; there is no other session state. The entity type comes first because each hosted type has its own store: the fence is keyed by shard index, and the same index is a different leader-election group per type (storage §4.2).
 
 Prompt `demo` again days later, through any gateway replica and node, and it resumes the same transcript.
 
@@ -216,7 +216,7 @@ let config = EntityConfig {
 
 `agent-standalone node --help` and `agent-gateway --help` list every flag with its default; the binaries are the reference. Beyond the flags the walkthrough uses, four matter:
 
-- `--model`, `--sandbox`, `--sandbox-image`, and `--fc-rootfs` shape the kind digest every session pins. Every node flag but `--id` and `--data` is deployment configuration in the spec's sense (§5.1): start all nodes with the same values.
+- `--model`, `--sandbox`, `--sandbox-image`, and `--fc-rootfs` shape the kind digest every session pins. Every node flag but `--id` and `--data` is deployment configuration in the spec's sense (§6.2): start all nodes with the same values.
 - `--secret` is the cluster association secret; the gateway's must match the nodes'.
 - `--api-url` points the nodes at a fake Messages API for offline testing.
 - `--auth-tokens` gives the gateway a tenants file (`<principal> <token>` per line, reloaded on SIGHUP), required unless `--bind` is loopback.
@@ -229,15 +229,15 @@ let config = EntityConfig {
 
 | this deployment | agent runtime spec |
 |---|---|
-| `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§2.7, §3.1, §5.2); the journal **is** the session (§3.1) |
-| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§5.4), idempotent turns (A6) |
-| the gateway's `EntityRef` reaches any session | placement is routing, not a lease (utilities spec §2.1); exclusivity lives in the fence |
-| `--data/workspaces/<node-id>/…`, one directory per session entity | the sandbox seam (§2.3); working state, not session state (§4.4) |
-| `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§6, §7.1) |
-| stderr `RunStarted`/`ModelCompleted`/`RunEnded`/… plus membership transitions | the observability stream (§2.8) |
+| `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§11.2, §4.1, §7.1); the journal **is** the session (§4.1) |
+| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.3), idempotent turns (A6) |
+| the gateway's `EntityRef` reaches any session | placement is routing, not a lease (utilities spec §4.1); exclusivity lives in the fence |
+| `--data/workspaces/<node-id>/…`, one directory per session entity | the sandbox seam (§3.3); working state, not session state (§5.4) |
+| `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
+| stderr `RunStarted`/`ModelCompleted`/`RunEnded`/… plus membership transitions | the observability stream (§10.1) |
 
 ## Limitations
 
 - **The transport is plaintext.** Fine on loopback. The transport supports mutual TLS (`Encryption::MutualTls`, the `encryption` field of `TcpConfig`), but this deployment names `Encryption::PlaintextTrusted`, exposes no flag for the other, and provisions no certificates. Do not point the roster across untrusted networks.
-- **`--sandbox` must be chosen explicitly; there is no unconfined mode.** `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) runs `shell` in a per-session OCI container via `agent-sandbox`'s `Native` tier: the workspace bind-mounted, no network, shared-kernel confinement (sandbox spec §4.4's SHOULD grade), not the microVM grade. Pre-pull the image, or the first call pulls it inside the 120s tool timeout. On Linux with `/dev/kvm`, `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs <ext4>` (both built by `guest/fc-rootfs/build.sh`) gives the microVM grade: one Firecracker VM per activation, the workspace synced over vsock, no network device (sandbox spec §4's reference choice).
+- **`--sandbox` must be chosen explicitly; there is no unconfined mode.** `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) runs `shell` in a per-session OCI container via `agent-sandbox`'s `Native` tier: the workspace bind-mounted, no network, shared-kernel confinement (sandbox spec §5.4's SHOULD grade), not the microVM grade. Pre-pull the image, or the first call pulls it inside the 120s tool timeout. On Linux with `/dev/kvm`, `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs <ext4>` (both built by `guest/fc-rootfs/build.sh`) gives the microVM grade: one Firecracker VM per activation, the workspace synced over vsock, no network device (sandbox spec §5's reference choice).
 - **The fake-friendly `--api-url`** speaks HTTP/1.1 without retry-relevant streaming; long completions are bounded by a 300s per-request timeout under the model client's retry policy.

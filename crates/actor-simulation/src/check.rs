@@ -1,4 +1,4 @@
-//! The checking event sink (spec §10).
+//! The checking event sink (spec §13).
 //!
 //! A [`Checker`] wraps a set of [`Invariant`]s and acts as the system's
 //! [`EventSink`]: every emitted event is fed to each invariant, and any

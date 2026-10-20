@@ -1,7 +1,7 @@
-//! Budget and delegation conformance (agent spec §6, §7.1; invariant A3):
+//! Budget and delegation conformance (agent spec §8, §9.1; invariant A3):
 //! pre-call enforcement, carve-outs, the compositional tree bound, and child
 //! failure surfacing as a tool outcome; audited against the journals, where
-//! spend is defined (§7.1 item 4).
+//! spend is defined (§9.1 item 4).
 
 mod support;
 
@@ -41,7 +41,7 @@ async fn flush(system: &SimSystem) {
 }
 
 /// Sum journaled spend from a session's records: own model usage plus `ChildRun`
-/// carve-outs (§7.1).
+/// carve-outs (§9.1).
 fn spend_of(records: &[Record]) -> (u64, u32) {
     let mut tokens = 0;
     let mut steps = 0;
@@ -145,7 +145,7 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
 #[test]
 fn token_exhaustion_is_enforced_before_the_call() {
     // Each step reports 130 tokens against a 250-token budget: the third call is
-    // never issued (§7.1 item 2).
+    // never issued (§9.1 item 2).
     let kinds = Kinds::new().register(
         "looper",
         Kind::new("loop forever")
@@ -169,8 +169,8 @@ fn token_exhaustion_is_enforced_before_the_call() {
     let records = run_single("token-exhaustion", kinds, model, "s-tok", 29);
 
     let (tokens, steps) = spend_of(&records);
-    assert_eq!(steps, 2, "the third call was never issued (§7.1 item 2)");
-    // Overshoot is bounded by one call (§7.1 item 2): 130 over at worst.
+    assert_eq!(steps, 2, "the third call was never issued (§9.1 item 2)");
+    // Overshoot is bounded by one call (§9.1 item 2): 130 over at worst.
     assert!(
         tokens <= 250 + 130,
         "journaled spend {tokens} within the bound"
@@ -242,7 +242,7 @@ fn run_tree(
                     .prompt(Turn::new(TurnId::new("t-1"), "do the task"))
                     .await
                     .expect("call")
-                    .expect("the parent's run never fails because a child did (§6.2)");
+                    .expect("the parent's run never fails because a child did (§8.2)");
                 assert_eq!(outcome.text(), "parent-answer");
                 let parent = tail_records(&session).await;
                 let child = match parent.iter().find_map(|r| match &r.body {
@@ -279,7 +279,7 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
     let (parent, child) = run_tree("delegation-tree", tree_model(false), "root-1", 31);
     let root = SessionId::new("root-1");
 
-    // The parent journaled the delegation's intent with the carved budget (§6.1
+    // The parent journaled the delegation's intent with the carved budget (§8.1
     // step 1), then the child's completion as the tool outcome.
     let (child_session, carved) = parent
         .iter()
@@ -292,7 +292,7 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
             _ => None,
         })
         .expect("a journaled ChildRun");
-    assert_eq!(carved, Budget::new(500, 3), "the requested slice (§7.1)");
+    assert_eq!(carved, Budget::new(500, 3), "the requested slice (§9.1)");
     let child_outcome = parent.iter().find_map(|r| match &r.body {
         RecordBody::ToolOutcome { outcome: Ok(v), .. } => Some(v.clone()),
         _ => None,
@@ -302,7 +302,7 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
         Some(serde_json::Value::String("child-answer".to_string()))
     );
 
-    // The child is a full session (§6.1): its lineage and root are recorded (§8.3).
+    // The child is a full session (§8.1): its lineage and root are recorded (§10.3).
     let (parent_lineage, child_root) = child
         .iter()
         .find_map(|r| match &r.body {
@@ -311,7 +311,7 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
         })
         .expect("child SessionCreated");
     assert_eq!(parent_lineage.expect("lineage").session, root);
-    assert_eq!(child_root, root, "the root names the tree (§8.3)");
+    assert_eq!(child_root, root, "the root names the tree (§10.3)");
     assert!(
         !child.is_empty(),
         "the child {child_session} has a journal of its own"
@@ -323,14 +323,14 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
     let (child_tokens, child_steps) = spend_of(&child);
     assert!(
         child_tokens <= 500 && child_steps <= 3,
-        "the child enforces its slice locally (§7.1 item 3)"
+        "the child enforces its slice locally (§9.1 item 3)"
     );
 }
 
 #[test]
 fn a_failing_child_is_a_tool_outcome_not_a_parent_failure() {
     let (parent, _child) = run_tree("delegation-failure", tree_model(true), "root-2", 37);
-    // The child's failure reached the parent's transcript as a tool value (§4.2).
+    // The child's failure reached the parent's transcript as a tool value (§5.2).
     let failed = parent.iter().any(|r| {
         matches!(
             &r.body,
@@ -356,7 +356,7 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
             .count();
         if step == 0 {
             // "parent" is not in its own allowlist: a locked-down kind cannot
-            // escalate (§6.1).
+            // escalate (§8.1).
             Ok(tool_call(
                 "d1",
                 "delegate",
@@ -397,7 +397,7 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
             .all(|r| !matches!(r.body, RecordBody::ChildRun { .. })),
         "no child run was journaled"
     );
-    // The disallowed delegation is a synthesized tool failure, never executed (§4.2).
+    // The disallowed delegation is a synthesized tool failure, never executed (§5.2).
     assert!(
         records.iter().any(|r| matches!(
             &r.body,

@@ -2,12 +2,12 @@
 //! to the machine entity (machine spec).
 //!
 //! A node hosts machine entities, votes in Raft, and runs an **in-process SSH
-//! front door** (machine §2.5). The front door is in-process rather than a
+//! front door** (machine §5.1). The front door is in-process rather than a
 //! separate tier (the shape `agent-gateway` takes for sessions) for one
 //! reason: a bridged channel ends at a node-local vsock socket, and the
 //! cross-node relay that would let a detached door reach another node's guest
-//! is machine §7's deferred work. So each node's door serves the machines that
-//! node currently leads, and a client reconnects (machine §5) when leadership
+//! is status §11's deferred work. So each node's door serves the machines that
+//! node currently leads, and a client reconnects (machine §7) when leadership
 //! moves.
 //!
 //! Every node is identical: same entity type, same seams, same runtime binding. A
@@ -80,7 +80,7 @@ pub struct NodeOptions {
     pub admin: Option<String>,
     /// Node `i`'s transport port is `port_base + i - 1`.
     pub port_base: u16,
-    /// The cluster secret peers must present (core §9).
+    /// The cluster secret peers must present (core §14).
     pub secret: String,
     /// Shards the machine entity type is spread over; every node must agree, and
     /// so must any cluster client (a name must hash to the same shard).
@@ -102,7 +102,7 @@ pub struct NodeOptions {
     /// <port>=<machine>`. One machine per port, because SSH fixes the host key
     /// at KEX: before a username exists to name a machine with.
     pub doors: BTreeMap<u16, String>,
-    /// This node's egress (machine §2.6, M6), from `--egress-uplink`,
+    /// This node's egress (machine §5.2, M6), from `--egress-uplink`,
     /// `--egress-pool`, and `--cluster-cidr`. `None` boots every machine with
     /// no NIC.
     pub egress: Option<EgressConfig>,
@@ -140,7 +140,7 @@ const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// A spurious election deposes the activation owning the guest and kills a live
 /// SSH session, so this may only be as short as the node's own stalls allow. The
 /// disk facet's capture and import scans run on the blocking-I/O pool (storage
-/// §2.2, `disk.rs`) rather than the async worker, so a capture no longer costs
+/// §3.2, `disk.rs`) rather than the async worker, so a capture no longer costs
 /// the node its heartbeats. What remains to cover is ordinary scheduling jitter
 /// on a laptop running three debug nodes, which is what the library's own
 /// defaults are sized for.
@@ -159,13 +159,13 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 /// Readiness waits on two things, so the budget has to cover both: SWIM has to
 /// discover the peers (`probe_interval` below), and the control group has to
 /// elect (a pristine group campaigns a fraction of [`RAFT_ELECTION_TIMEOUT`]
-/// after it is built, actor §6.4.3). Several times the larger of the two, so a
+/// after it is built, cluster §5.4.3). Several times the larger of the two, so a
 /// slow start is absorbed rather than reported as a fault.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Boot the node, open its doors, and host machines until SIGTERM or SIGINT,
 /// then stop gracefully: hand off every shard this node leads (storage spec
-/// §5.3), announce the departure, and release the transport.
+/// §6.3), announce the departure, and release the transport.
 pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
         return Err(format!(
@@ -178,12 +178,12 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let machine_kind = opts.machine.ok_or(
         "--machine is required: `firecracker` (a real microVM per machine; Linux + /dev/kvm), \
          `docker` (the rootfs in a privileged container; any host with docker, shared-kernel \
-         isolation), or `fake` (no guest: durability only, machine §6)",
+         isolation), or `fake` (no guest: durability only, machine §1.2)",
     )?;
     let node = NodeId::new(opts.id);
     // One codec value for the three places that must agree: the transport's
     // framing, the message layer entity encodes records and snapshots with, and
-    // the entity store's stamp naming that codec (storage §2.2). Binary, not the
+    // the entity store's stamp naming that codec (storage §3.2). Binary, not the
     // library's JSON default: a machine's disk moves as 1 MiB blocks through the
     // blob path, and a payload is encoded twice; once as the message, again as
     // the frame field carrying it. Under JSON that pair costs ~10.7 MiB and over
@@ -248,7 +248,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let host = machine_host(&opts, machine_kind)?;
     let provider = runtime_provider(&host, node, &system, opts.egress.clone());
     // This node's durable store, I/O pool and metrics, shared by every type below
-    // (storage §2.2, entity §10). The pool matters most in this deployment: a machine's disk
+    // (storage §3.2, entity §3.4). The pool matters most in this deployment: a machine's disk
     // facet writes whole 1 MiB image blocks, so an inline fsync would stall the
     // executor hardest here, and the node is also running Raft heartbeats on it.
     let (entity_node, entity_store) =
@@ -257,14 +257,14 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         shards: opts.shards,
         entity_store: Some(entity_store.clone()),
         // Where the disk facet materializes each machine's image and the
-        // workspace facet its files (facets §4.1, §4.4), under --data, so a
+        // workspace facet its files (facets §5.1, §5.4), under --data, so a
         // restarted node finds its own.
         data_dir: Some(opts.data.join("facets")),
         ..EntityConfig::default()
     };
-    // The node's alarm index (facets §4.5), which every type hosted after it
+    // The node's alarm index (facets §5.5), which every type hosted after it
     // that declares the `Alarm` facet fires through. The machine's checkpoint
-    // alarm is also its session lease (machine §4, M5), and a lease that only
+    // alarm is also its session lease (machine §6, M5), and a lease that only
     // fired while the entity happened to be awake would not bound anything: the
     // index is what re-activates a due machine after hibernation or failover.
     let alarms: Entities<AlarmIndex<TcpCluster>> = entity_node.entities(EntityConfig {
@@ -281,7 +281,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
 
     // The grade, not just the flag: what confinement a machine actually gets is
     // the one thing about the mechanism an operator should read at startup
-    // (sandbox §4.4; the two grades are not interchangeable).
+    // (sandbox §5.4; the two grades are not interchangeable).
     let grade = match &host {
         None => " (no guest: durability only)".to_string(),
         Some(mechanism) => format!(" ({} grade)", mechanism.isolation()),
@@ -318,7 +318,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
 
     // One front-door actor for this node: every attachment it takes names it,
     // so a machine death-watches it and reaps the attachment if this process
-    // dies without detaching (machine §2.5).
+    // dies without detaching (machine §5.1).
     let door = system.spawn(FrontDoor).id().clone();
     let authority = Arc::new(EntityAuthority::new(machines.clone(), door, node, DOOR_TIMEOUT));
     for (port, name) in &opts.doors {
@@ -350,7 +350,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
 
 /// Accept SSH connections for one machine until the process ends. Each
 /// connection is independent: `serve_connection` terminates SSH, authenticates
-/// against the machine's journaled keys, attaches, and bridges (machine §2.5).
+/// against the machine's journaled keys, attaches, and bridges (machine §5.1).
 async fn serve_door(
     listener: tokio::net::TcpListener,
     machine: EntityName,
@@ -372,7 +372,7 @@ async fn serve_door(
         let backend = Arc::clone(&backend);
         tokio::spawn(async move {
             if let Err(e) = serve_connection(stream, machine.clone(), authority, backend).await {
-                // Reported, never masked (machine §5): a refused key, a
+                // Reported, never masked (machine §7): a refused key, a
                 // machine led by another node, a severed session.
                 eprintln!("[{node}] door {machine} from {peer}: {e}");
             }
@@ -381,7 +381,7 @@ async fn serve_door(
 }
 
 /// Bind the entity factory's provider to what this node holds guests with: the
-/// simulation's guest (machine §6) when no mechanism was named, else the real
+/// simulation's guest (machine §1.2) when no mechanism was named, else the real
 /// guest over whichever mechanism `--machine` selected (a Firecracker microVM or
 /// a container holding the same rootfs are one binding over
 /// `machine_host::MachineHost`; see [`machine_host()`]), with this node's egress.

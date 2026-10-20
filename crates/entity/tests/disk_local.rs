@@ -1,6 +1,6 @@
-//! End-to-end disk facet tests on the `Local` tier (spec facets §4.4, §3): import
+//! End-to-end disk facet tests on the `Local` tier (spec facets §5.4, §4): import
 //! stages a full-coverage manifest, capture diffs block hashes and stages the
-//! dirty subset, a clean capture stages nothing (§6), the checkpoint restores
+//! dirty subset, a clean capture stages nothing (§7), the checkpoint restores
 //! byte-identically across hibernation (F2/F4/E12), and the fixed-size bound
 //! refuses an oversized import. The replay path after a *crash* (capture
 //! records past the snapshot, `fold` + `rehydrate`) is `tests/disk_swarm.rs`'s
@@ -30,7 +30,7 @@ use entity::facet::MAX_IMAGE_BYTES;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// 1 MiB: the facet's fixed block size (spec facets §4.4), mirrored here so the
+/// 1 MiB: the facet's fixed block size (spec facets §5.4), mirrored here so the
 /// tests place writes on and across block boundaries.
 const BLOCK: u64 = 1 << 20;
 
@@ -51,7 +51,7 @@ impl Entity for DiskBox {
     }
 }
 
-/// Import the image at `src`, the provisioning path (facets §4.4: the base image
+/// Import the image at `src`, the provisioning path (facets §5.4: the base image
 /// *is* a capture).
 #[derive(Clone, Serialize, Deserialize)]
 struct ImportFrom(String);
@@ -74,7 +74,7 @@ impl EntityHandler<ImportFrom> for DiskBox {
 }
 
 /// Write `bytes` into the live image at `offset`: a stand-in for the guest's
-/// out-of-band block writes (facets §4.4's one departure), without capturing.
+/// out-of-band block writes (facets §5.4's one departure), without capturing.
 #[derive(Clone, Serialize, Deserialize)]
 struct Scribble {
     offset: u64,
@@ -105,7 +105,7 @@ impl EntityHandler<Scribble> for DiskBox {
     }
 }
 
-/// Run the capture command (facets §4.4): scan, diff, put dirty blocks, stage one
+/// Run the capture command (facets §5.4): scan, diff, put dirty blocks, stage one
 /// manifest.
 #[derive(Clone, Serialize, Deserialize)]
 struct CaptureNow;
@@ -124,7 +124,7 @@ impl EntityHandler<CaptureNow> for DiskBox {
     }
 }
 
-/// Capture twice in one command, the second MUST be refused (facets §4.4: one
+/// Capture twice in one command, the second MUST be refused (facets §5.4: one
 /// capture, one record).
 #[derive(Clone, Serialize, Deserialize)]
 struct DoubleCapture;
@@ -144,7 +144,7 @@ impl EntityHandler<DoubleCapture> for DiskBox {
     }
 }
 
-/// Read `len` bytes at `offset` from the live image: a pure read (§6).
+/// Read `len` bytes at `offset` from the live image: a pure read (§7).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadBack {
     offset: u64,
@@ -198,7 +198,7 @@ fn sim_system(sim: &Simulation, recorder: &Recorder) -> SimSystem {
         .build()
 }
 
-/// A deterministic base image: three blocks, the last partial (spec facets §4.4:
+/// A deterministic base image: three blocks, the last partial (spec facets §5.4:
 /// `image_bytes` need not be block-aligned), each byte derived from its offset.
 fn write_base_image(path: &std::path::Path) -> u64 {
     let len = 2 * BLOCK + BLOCK / 2;
@@ -236,7 +236,7 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
         assert_eq!(stats.bytes, image_len);
         assert_eq!(entity.ask(ImageBytes).await.expect("size"), image_len);
 
-        // A capture of the untouched image stages nothing (§6).
+        // A capture of the untouched image stages nothing (§7).
         let clean = entity.ask(CaptureNow).await.expect("ask").expect("capture");
         assert_eq!(
             clean,

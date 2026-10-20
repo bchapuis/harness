@@ -4,25 +4,48 @@ The key words **MUST**, **MUST NOT**, and **MAY** carry the meanings defined in 
 
 ## 1. Scope
 
-A **workflow** is an entity that drives itself: its activation re-derives the work its committed state calls for, launches what is not yet in flight, folds each outcome back into records, and stops when nothing is left, never awaiting I/O inside a handler. The `workflow` crate is that cycle with no model, tool, or prompt in it, so the properties that keep autonomy safe under crash and failover (W1 to W7) are stated once.
+A **workflow** is an entity that drives itself. Its activation derives the work its committed state calls for, launches what is not yet in flight, folds each outcome back into records, and stops when nothing is left, without awaiting I/O inside a handler. This specification defines that cycle and the properties that keep it safe under crash and failover (W1 to W7). The work outstanding is a pure function of committed state, never a journaled queue: one desired set is at once the launch list (§4.2), the orphan set (§5.3), and the straggler test (§5.4).
 
-It builds on the entity runtime (entity §3, §5, §7) for identity, the journal, the fold, the single-writer fence, activation, and hibernation, and adds no journal, fence, or resume protocol: every record a workflow entity writes is the consumer's own `Entity::Event`. Effects launch through the actor runtime's seams (actor §2.12.1). The agent runtime builds on it: `Agent` implements `Workflow` (agent §3).
-
-The design rests on one decision: **the work outstanding is a pure function of committed state**, never a journaled queue. Recovery computes the same function over the same records, so resume is not a special case, and one set is at once the dispatch list (§3.2), the recovery set (§4.3), and the straggler filter (§4.4).
+It builds on the entity runtime (entity §4, §6, §8) for identity, the journal, the fold, the single-writer fence, activation, and hibernation, and adds no journal, fence, or resume protocol of its own. Effects run on the actor system's host environment (actor §11.1). The agent runtime builds on this specification: a session implements the workflow plug point (agent §4.5).
 
 ### 1.1 Non-goals
 
-- **A model, a tool, or a transcript**, the agent runtime's.
-- **Memoization.** The consumer's records are the durable fact; an entity that also wants step memoization declares the steps facet beside the workflow (facets §4.6).
-- **Idempotent submission and cancellation**, folds over the consumer's records. A cancel journals a terminal record from which `pending` derives the propagating sends as ordinary effects.
-- **Exactly-once effects.** Impossible above an at-most-once transport (actor §4) and a fence that guards records, not the world: a re-activation MAY relaunch an effect whose outcome has not committed.
-- **Scheduling.** The only timer is the per-key backoff inside an activation (§3.4).
+- **No model, tool, or transcript.** Those are the agent runtime's (agent §1).
+- **No memoization.** The consumer's records are the durable fact; an entity that also wants step memoization declares the steps facet beside the workflow (facets §5.6).
+- **No submission or cancellation protocol.** Idempotent submission and cancellation are folds over the consumer's records: a cancel journals a terminal record, from which the desired set derives the propagating sends as ordinary effects.
+- **No exactly-once effects.** A re-activation MAY relaunch an effect whose outcome has not committed (§4.3).
+- **No scheduling.** The only timer is the per-key backoff inside an activation (§4.4).
 
-## 2. Seams
+### 1.2 Conformance
 
-### 2.1 `Workflow`: what the consumer supplies
+- A **workflow engine** conforms by meeting the engine's side of §3.2, §4 to §7, §10, and §11.
+- A **workflow entity** conforms by meeting §3.1, the consumer's side of §3.2, §3.3, and §4.1; and §8 if it holds an activation-scoped resource, §9 if callers await its outcomes.
 
-A plug point: the consumer implements `Workflow` beside its `Entity`, and the engine (§2.2) calls it. `Agent` is the production implementor; the crate's conformance suites drive a fan-out fixture.
+## 2. Model
+
+- **Consumer:** the implementor of the workflow plug point (§3.1) for one entity type. A **workflow entity** is an entity of that type.
+- **Engine:** the role that runs the cycle inside each activation of a workflow entity, on the consumer's behalf (§3.2). Everything it holds (claims, backoff counts, the orphan classification, events awaiting a commit) is activation state: never journaled, and discarded at deactivation.
+- **Effect:** one unit of work performed outside the entity, described by the consumer. The engine treats it as opaque, and it never crosses a wire.
+- **Key:** an effect's identity within its entity, derived from committed state (§4.1).
+- **Pending effect:** a key, its effect, and the effect's orphan policy.
+- **Desired set:** the pending effects the entity's committed state calls for, as the consumer computes them (§4.1).
+- **Outcome:** what an effect returns: a value of the consumer's outcome type, or an effect error (§3.1).
+- **Settle:** the consumer's decision that folds one outcome into records. The records it decides are the **settled record**, the durable fact that the effect ran. A settle that decides no records is an **empty settle**.
+- **Tick:** one pass of the cycle (§4.2).
+- **Claim:** an activation's note that it launched a key, or resolved it as an orphan without a launch. A claimed key is **in flight** until its outcome is settled or discarded.
+- **Backoff:** the delay a key earns from consecutive empty settles (§4.4). A key is **at rest** when its backoff has reached the cap.
+- **Quiescent:** an activation is quiescent when nothing is in flight and every member of the desired set is at rest (§7).
+- **Orphan:** an effect whose intent has committed and whose outcome has not, when an activation begins. The **orphan set** is defined in §5.3.
+- **Orphan policy:** what the engine does with an orphan, declared per pending effect (§3.1).
+- **Straggler:** an outcome whose key is absent from the desired set over the committed state when the outcome is handled (§5.4).
+- **Activation-scoped resource:** an external resource a consumer holds for the life of one activation (§8). It is **closed** (nothing held), **opening** (an open in flight), **open** (held), or **failed** (the last open failed, until the consumer settles the effects that needed it, which closes it again).
+- **Subscriber:** a caller's notification address, registered against a unit of work to be told when its outcome commits (§9).
+
+## 3. Seams
+
+### 3.1 `Workflow`: what the consumer supplies
+
+A plug point. The consumer implements `Workflow` for its entity type, beside the entity plug point (entity §3.1), and the engine calls it.
 
 ```rust
 pub trait Workflow: Entity + EntityHandler<Tick> + EntityHandler<Settled<Self>> {
@@ -33,198 +56,204 @@ pub trait Workflow: Entity + EntityHandler<Tick> + EntityHandler<Settled<Self>> 
     fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
     fn perform(&self, effect: Self::Effect, cx: Perform<Self::System>)
         -> impl Future<Output = Result<Self::Outcome, EffectError>> + Send + 'static;
-    fn settle(&self, state: &Self::State, key: &Self::Key,
-              outcome: Result<Self::Outcome, EffectError>, ctx: &EntityCtx<Self>)
-        -> impl Future<Output = Vec<Self::Event>> + Send;
+    async fn settle(&self, state: &Self::State, key: &Self::Key,
+                    outcome: Result<Self::Outcome, EffectError>, ctx: &EntityCtx<Self>)
+        -> Vec<Self::Event>;
 }
 ```
 
-`perform` is the one place a workflow entity performs I/O, and `settle` an ordinary entity decision (entity §3.2). A `Pending` carries a key, the consumer's opaque effect, and an `OnOrphan` policy. The key and the outcome ride the `Settled` command, so they carry the command bounds; the effect never crosses a wire. The consumer:
+- `pending` computes the desired set from committed state. Each `Pending` carries a `key`, the consumer's `effect`, and an `on_orphan` policy.
+- `perform` runs one effect, outside the activation, and is the only place a workflow entity performs I/O. Its `Perform` argument carries the entity's name and the actor system, whose clock, entropy, and spawner (actor §11.1) are the effect's only route to time, randomness, and task launching. It reaches nothing of the entity's state, journal, or facets.
+- `settle` folds one outcome into records. It is an ordinary entity decision (entity §4.2).
+- `Tick` and `Settled` are the commands the engine sends its own entity (§11.1). A `Settled` carries a key and an outcome.
 
-- MUST make `pending` a pure function of the committed state it is given, reading no activation state (§3.1). The layer cannot enforce this, since `pending` takes `&self`.
-- MUST keep every key unique over the entity's whole journal (§3.1), and declare every `Pending`'s `OnOrphan`, which has no default (§4.3).
-- MUST NOT touch the entity's state, journal, or facets from `perform`, and cannot: `perform` receives only a `Perform` (§2.4), and clones the consumer's own seams out of `&self` before returning a `'static` future.
-- MUST NOT mutate state, perform durable I/O, or await anything in `settle`. Returning no records is legal and commits nothing (§3.4).
+Every pending effect declares one of two orphan policies (`OnOrphan`). Neither is a default.
 
-The supertraits guarantee only that a `Tick` and a `Settled<Self>` handler exist: an entity lacking either does not compile. That they forward to the engine is the consumer's obligation (§2.2), since the orphan rule forbids a blanket impl.
-
-### 2.2 `Engine`: what the consumer forwards
-
-An internal boundary. The crate implements `Engine<D>`, and the consumer holds one in its behavior and MUST:
-
-- call `Engine::on_activate` from `Entity::on_activate` (§3.2 item 2);
-- answer `Entity::can_hibernate` with `Engine::quiescent`, conjoined with any condition of its own: it MAY narrow the answer and MUST NOT widen it (§6);
-- call `Engine::advance` from its `Tick` handler, after its pre-tick gate (§2.3), and return what `Engine::settled` returns from its `Settled` handler;
-- call `Engine::tick`, with the state it was given, from every handler of its own whose records call for work (§3.2 item 1), which on an activation's first handler also classifies the orphan set (§4.3);
-- never admit `Tick` or `Settled` from the network: both are local-only self-tells, absent from its `EntityRegistry` (entity §4.5), so nothing outside the entity can inject an outcome or drive its activation.
-
-The engine's state (claims, backoff counts, the orphan classification, staged events) is ephemeral and never journaled, and it decides no records of its own: every outcome reaches the journal through `Settled`.
-
-### 2.3 The pre-tick gate
-
-A tick launches the whole unclaimed desired set, yet some launches depend on activation state no fold expresses: an environment to open or reacquire, a loss to surface first. The gate has no type. Such a consumer's `Tick` handler MUST resolve that state before calling `Engine::advance`, never inside a launch. While the gate journals records of its own, the handler MUST return them without calling `advance` and re-enter through `Engine::tick`, so nothing launches against a fold about to change; while it waits on an open in flight, it MUST NOT call `advance`, and the open's completion re-enters the cycle. The agent runtime's environment pre-pass is this gate (agent §4.2, §4.4, §4.5).
-
-### 2.4 `Perform`: what an effect may reach
-
-The engine builds a `Perform<S>` for each launch. It carries the entity's `EntityName` and the system `S`, whose `Clock`, `Entropy`, and `Spawner` (actor §2.12.1) are an effect's only route to time, randomness, and task launching, and nothing that reaches the entity's state, journal, or facets. Time and randomness inside an effect MUST come from it, or a simulated run stops reproducing; a per-effect timeout is the consumer's to take from that `Clock`.
-
-### 2.5 The entity beneath
-
-The workflow relies on four properties of the entity runtime:
-
-- `Tick` and `Settled` are ordinary commands, ordered against every other by the input gate (entity §5).
-- A self-tell sent from a handler is handled only after that handler's records commit (entity §5), which W4 rests on (§5).
-- `Entity::on_activate` sees no state and cannot commit (entity §3.1), so the first tick can launch but never journal (§4.3).
-- A forced step-down ignores `can_hibernate` (entity §7), and the host refuses an outcome arriving after a non-contiguous commit has ended the activation (entity §5).
-
-### 2.6 `Binding`: an activation-scoped resource
-
-`Binding<T>` is the passive state machine (`BindingState`: closed, opening, open, failed) for an external resource a consumer holds for the life of an activation, such as the agent runtime's sandbox (agent §2.3). It is a component rather than a trait method because the resource's type and open path are the consumer's, and the engine never sees it, so a consumer holding one:
-
-- MUST veto hibernation while the open is in flight, conjoining `Binding::is_opening` into its `can_hibernate`;
-- MUST settle, not relaunch, the effects that needed a resource whose open failed, taking the reason with `Binding::take_failure` in the same round;
-- MUST release the resource on every deactivation path, taking it with `Binding::take` from `Entity::on_deactivate`;
-- MUST NOT read it from `pending` (W1).
-
-### 2.7 `Subscribers`: awaiting a durable outcome
-
-Autonomous work outlives the request that started it, and a reply resolves within one message's delivery (actor §2.10), so a caller gets an ack, a registered reply-to, and a later notification. `Subscribers<K, V>` holds the registrations in activation state. A consumer that uses it MUST:
-
-1. not journal the set: a reply-to is a routing address, not a fact about the work, and callers re-contact after a resume;
-2. notify only after the record carrying the outcome commits, taking the addresses with `Subscribers::take` from its post-commit pass;
-3. treat a notification as a `tell` (actor §2.2), at-most-once delivery rather than the source of truth, which a caller recovers by re-contacting the entity, never by a transparent retry;
-4. answer a caller arriving after the outcome committed at once from the fold, not register it.
-
-### 2.8 `WorkflowEvent`: the checker-facing stream
-
-The engine emits each `WorkflowEvent` on the actor event stream as an application event (actor §2.7), beside the entity's own (entity §10), for the checker in `workflow::testing`. Events describe the machinery around effects, never their content. Each carries the `node` hosting the activation, because under failover a deposed leader and its successor differ only by node; `key` is the key's `Debug` rendering.
-
-| Event | Fields | Meaning |
+| Policy | The consumer declares | On resume (§5.3) |
 |---|---|---|
-| `Launched` | `entity`, `key`, `node` | A key was claimed and its effect handed to the spawner (§3.2). |
-| `Interrupted` | `entity`, `key`, `node` | An orphaned `Interrupt` member was resolved without a launch (§4.3), opening the claim its `Settled` closes. |
-| `Settled` | `entity`, `key`, `node`, `ok`, `committed` | An outcome reached `settle`; `ok` tells `Ok` from `Err`, and `committed` says whether the settle decided records. |
-| `Discarded` | `entity`, `key`, `node` | A straggling outcome was dropped (§4.4). |
-| `Quiescent` | `entity`, `node` | The activation became quiescent (§6). |
+| `Reexecute` | that a second run of the effect is acceptable: it is idempotent, deduplicates itself, or is cheap enough that a second run beats an unknown one | launched as an ordinary launch |
+| `Interrupt` | that running the effect twice is unsafe | settled as `Interrupted` without a launch |
 
-The engine MUST emit `Settled` on every settle that runs, since one that commits nothing is the one whose key backs off, and its `Launched` would otherwise have no terminator. When the settle decided records, the event MUST wait for their commit, so a failed append leaves no event claiming records that never became durable. The vocabulary holds only what the entity's own events do not show; `Discarded` exists because a discarded outcome leaves no record anywhere.
+An effect that produces no value returns an effect error (`EffectError`):
 
-## 3. The desired set
+| Error | Minted by | Meaning |
+|---|---|---|
+| `Timeout` | the consumer | A bound the consumer's `perform` set on itself elapsed. The effect's actions MAY still land; only the outcome is bounded. |
+| `Interrupted` | the engine | An orphan declaring `Interrupt` was resolved on resume (§5.3). Nothing is known about whether it ran. |
+| `Lost` | the consumer | The environment the effect needed is gone. Carries a reason. |
+| `Failed` | the consumer, or the engine for a panic (§5.2) | The effect ran and failed. Carries a reason. |
 
-The **desired set** is `pending(state)` over committed state: the keyed effects that state calls for. A **claim** is an activation's ephemeral note that it launched a key, which is **in flight** until settled. A key is **at rest** when backed off to the cap (§3.4), and an activation is **quiescent** when nothing is in flight and every member of the set is at rest (§6).
+The consumer:
 
-### 3.1 A pure function of committed state
+- MUST make `pending` a pure function of the committed state it is given (§4.1).
+- MUST keep every key unique over the entity's whole journal (§4.1), and MUST declare an orphan policy for every pending effect.
+- MUST NOT touch the entity's state, journal, or facets from `perform`.
+- MUST take time and randomness inside an effect only from the system its `Perform` carries (actor §11). A per-effect timeout is the consumer's, measured on that system's clock.
+- MUST NOT mutate state, perform durable I/O, or await anything in `settle`. A settle MAY decide no records; it then commits nothing (§4.4).
+- MUST handle `Tick` and `Settled` by forwarding them to the engine (§3.2).
 
-`pending` MUST be pure and deterministic: no I/O, no clock, no entropy, and no read of activation state (claims, backoff, bindings). It runs after every commit and on every activation's first tick, and the two MUST agree, as `Entity::apply` must (entity §3.1, E2), or a resumed activation would abandon or duplicate work. A set re-derived from committed state recovers by recomputing, where a queue of dispatches would have to be journaled and reconciled.
+### 3.2 The engine: what the consumer forwards
 
-A key is never journaled, so it needs only determinism within one fold: it is derived from state (a call id the consumer journals), never from a counter in memory. **A key MUST be unique over the entity's whole journal.** The straggler filter tests only presence in the set (§4.4), so a key that left and re-entered (a retried call at the same site, a second run reusing an ordinal) would let the first occurrence's outcome settle as the second's. Only the consumer knows what distinguishes two visits to a call site, so a consumer whose call ids repeat across runs qualifies them with the run.
+A boundary inside one workflow entity, with one implementation. The engine offers five operations, which the consumer's entity hooks and handlers invoke.
 
-### 3.2 The cycle
+| Operation | Invoked from | Takes | Does |
+|---|---|---|---|
+| Activate | the activation hook (entity §3.1) | the entity's context | starts the activation's engine state empty and queues the first tick (§4.2) |
+| Quiescence | the hibernation check (entity §8) | nothing | answers whether the activation is quiescent (§7) |
+| Advance | the `workflow.Tick` handler, after the pre-tick gate (§3.3) | the committed state | runs one tick (§4.2); decides no records |
+| Accept an outcome | the `workflow.Settled` handler | the committed state and the command | discards a straggler (§5.4), or yields the records the consumer's settle decided (§5.1) |
+| Request a tick | every handler of the consumer's own whose records call for work | the state the handler was given | queues a tick, handled after the handler's records commit (entity §6), and wakes every at-rest key (§4.2); on the activation's first handler, classifies the orphan set (§5.3) |
+
+The consumer MUST invoke each operation from every place the table names, subject to its pre-tick gate (§3.3), and MUST return what Accept an outcome yields from its `workflow.Settled` handler. Its hibernation check answers Quiescence conjoined with any condition of its own: it MAY narrow the answer and MUST NOT widen it (§7). It MUST NOT admit `workflow.Tick` or `workflow.Settled` from the network: both are absent from its dispatch allowlist (entity §5.5), so only the entity itself sends them.
+
+The engine journals nothing of its own: every record a workflow entity writes is one its consumer decided, and every outcome reaches the journal through the consumer's settle. The engine meets the deterministic profile (actor §11), backoff delays and their jitter included.
+
+### 3.3 The pre-tick gate
+
+Some launches depend on activation state no fold expresses: an environment to open or reacquire, a loss to report first. A consumer with such state MUST resolve it in its `workflow.Tick` handler before invoking Advance, never inside a launch. While the gate journals records of its own, the handler MUST return them without invoking Advance and request a tick. While the gate waits on an open in flight, the handler MUST NOT invoke Advance, and the open's completion re-enters the cycle. The agent runtime's environment pre-pass is this gate (agent §5.2, §5.4, §5.5).
+
+## 4. The desired set
+
+### 4.1 A pure function of committed state
+
+The desired set MUST be a pure, deterministic function of committed state: computing it performs no I/O, reads no clock or entropy, and reads no activation state (claims, backoff, activation-scoped resources). The engine computes it after every commit and at every activation's first tick, and the two MUST agree, like the fold (entity §4.1, E2).
+
+A key is derived from committed state (for example, a call identifier the consumer journals), never from a counter in memory, and the engine never journals it. **A key MUST be unique over the entity's whole journal**, not only within one desired set: a key that leaves the set and later re-enters it (a retried call at the same site, a second run reusing an ordinal) breaks this rule, and with it the exactness of straggler rejection (§5.4).
+
+### 4.2 The cycle
 
 A tick MUST run:
 
 1. after **every** commit of records, a command's or a settled outcome's;
-2. once after **rehydration**, armed from `Engine::on_activate`;
-3. when a key's **backoff elapses** (§3.4), and once more, without delay, when a key **reaches the cap**, because only a tick can conclude quiescence after a settle that committed nothing;
-4. on an explicit `Tick` command, how a consumer re-enters the cycle after an event that commits nothing.
-
-Entry point 3 is required: a settle that commits nothing leaves its key in the set without re-entering through entry point 1, and without the timer W2 does not hold.
+2. once after **rehydration**, queued by Activate;
+3. when a key's **backoff elapses** (§4.4), and once more, without delay, when a key **reaches the cap**;
+4. when the consumer **requests** one (§3.2), which is how it re-enters the cycle after an event that commits nothing.
 
 Each tick:
 
-1. computes `desired = pending(state)` over the **committed** state;
-2. releases every claim and backoff count whose key is absent from `desired`, since the journal considers that effect finished;
-3. for each member this activation has not claimed and whose backoff has elapsed, takes the claim and launches `perform` through the `Spawner`;
-4. if nothing is in flight and every member is at rest, marks the activation quiescent (§6).
+1. computes the desired set over the **committed** state;
+2. releases every claim and backoff count whose key is absent from the desired set;
+3. claims and launches every member this activation has not claimed and whose backoff has elapsed;
+4. if nothing is in flight and every member is at rest, marks the activation quiescent (§7).
 
-The workflow MUST NOT await a launch: step 3 hands the future to the spawner, and the outcome returns later as a `Settled` command (§4.1). An entity with a hundred outstanding effects holds no thread.
+The engine MUST NOT await a launch: the tick returns while its effects run, and each outcome returns later as a `workflow.Settled` command (§5.1).
 
-A tick that a consumer's handler drives through `Engine::tick` also **wakes every at-rest key**, dropping its delay and count so the tick launches it afresh. The engine's own re-entries (the rehydration tick, the tick after its own settle, the backoff timer) leave at-rest keys alone: that is the line between the engine driving itself and someone asking, and it lets an entity hibernate on a capped-out key without abandoning it (§6).
+A tick the consumer requests also **wakes every at-rest key**, clearing its backoff so the tick launches it afresh. The engine's own ticks (the rehydration tick, the tick after a settle, the backoff timer) leave at-rest keys at rest.
 
-### 3.3 Launch-once per activation
+### 4.3 Launch-once per activation
 
-A claim is never journaled: journaling it would make the *launch* the durable fact, and the launch is what a crash loses track of. The **settled record** is the durable fact, and every launch is speculative:
+A claim is never journaled. The settled record is the durable fact, and every launch is speculative:
 
 - **Within one activation, an effect is launched at most once per claim** (W3): a tick triggered by an unrelated commit does not relaunch an effect in flight.
-- **Across activations, an effect MAY be launched more than once.** A crash between a launch and its settled record leaves the set unchanged, so the next activation launches it again, and a deposed leader MAY overlap its successor. An effect unsafe to repeat declares `Interrupt` (§4.3).
+- **Across activations, an effect MAY be launched more than once.** A crash between a launch and its settled record leaves the desired set unchanged, so the next activation launches the effect again. Two nodes transiently leading the entity's shard produce one journal (storage §6, E1) but MAY both launch the same effect.
 
-### 3.4 Backoff
+### 4.4 Backoff
 
-A settle that commits nothing leaves its key in the desired set, where the next tick would relaunch it at the rate the cycle turns. **A key whose settle committed nothing MUST NOT be relaunched before a positive delay that does not shrink across consecutive empty settles, and after a bounded number of them the key is at rest** until a consumer-driven tick wakes it (§3.2). The delay MUST be timed by `Clock`, with any jitter from `Entropy`, so it is seed-reproducible. A settle whose records commit clears the count, and a re-activation starts every count at zero.
+An empty settle leaves its key in the desired set. **A key whose settle was empty MUST NOT be relaunched before a positive delay that does not shrink across consecutive empty settles, and after a bounded number of consecutive empty settles the key is at rest** until a tick the consumer requests wakes it (§4.2). A settle whose records commit clears its key's count, and every count starts at zero in a new activation.
 
-The trigger is the empty commit, not the failure: an `Err` the consumer journals commits and clears the count, and an `Ok` it journals nothing for backs off like a failure. The workflow imposes **no attempt bound**, since only the consumer knows what the work is worth; it bounds the delay, and a key at rest does not hold the activation resident (§6).
+The trigger is the empty settle, not the failure: an effect error the consumer journals commits and clears the count, and a value it journals nothing for backs off like a failure. The engine imposes no attempt bound. It bounds the delay, and a key at rest does not hold the activation resident (§7).
 
-## 4. Outcomes
+## 5. Outcomes
 
-### 4.1 Settling
+### 5.1 Settling
 
-An effect's outcome returns as an ordinary command, `Settled { key, outcome }`, delivered by `tell` through the mailbox (§2.5). It has no reply: anything waiting on the result waits on the record (§2.7). The engine applies the straggler test (§4.4), then hands the outcome to `Workflow::settle`; the outcome is durable once the settle's records commit, and that commit re-enters the cycle (§3.2 item 1).
+An effect's outcome returns to the activation as a `workflow.Settled` command carrying the key and the outcome, sent as a tell (actor §3.2) from the entity to itself and ordered like any other command (entity §6). It has no reply: anything waiting on the result waits on the record (§9). The engine applies the straggler test (§5.4), then hands the outcome to the consumer's settle. The outcome is durable once the settle's records commit, and that commit re-enters the cycle (§4.2).
 
-### 4.2 Effect failure is a value
+### 5.2 Effect failure is a value
 
-An effect that fails does not fail the entity: it settles as `Err(EffectError)`, and the consumer's fold decides what it means. The workflow has no failure mode that ends an entity.
+An effect that fails does not fail the entity: it settles as an effect error (§3.1), and the consumer's fold decides what it means. No effect failure ends an entity. The engine mints `Interrupted` for an orphan it resolves (§5.3), and `Failed` for an effect that panics after its launch; a panic in the call to the consumer's perform itself, before the launch, is a panic of the handler that launched it.
 
-| `EffectError` | Meaning |
-|---|---|
-| `Timeout` | A bound the consumer's `perform` set on itself elapsed. Its effects MAY still land; only the outcome is bounded. |
-| `Interrupted` | An orphaned effect declaring `OnOrphan::Interrupt` was resolved on resume (§4.3). Nothing is known about whether it ran. |
-| `Lost` | The environment the effect needed is gone. |
-| `Failed` | The effect ran and failed. |
+### 5.3 Orphans and resume
 
-The workflow mints `Interrupted`, and `Failed` for a panic inside the future `perform` returned, caught at the task boundary so a claimed key never goes without an outcome; the other two are the consumer's. A panic in the synchronous call to `perform` is the handler's, like any other on the command path.
+An effect's intent is journaled before it launches and its outcome after (§6), so a crash or migration between the two leaves it orphaned. Hibernation never orphans an effect: a claim vetoes it (§7).
 
-### 4.3 Orphans and resume
+**The orphan set is the desired set over the committed state an activation first sees**: at its first tick, or at an earlier handler that requests a tick or accepts an outcome (§3.2). Such a handler classifies from the state it was given, which precedes its own records, so work its own records create is not orphaned. Work committed before the first tick by a handler that requests no tick is classified as orphaned. The engine MUST resolve every member of the orphan set exactly once, by its declared policy (§3.1):
 
-An effect's intent is journaled before it launches and its outcome after (§5), so a crash or migration between the two leaves it **orphaned**: wanted, with nothing to say whether it ran. Hibernation never orphans an effect, because an open claim vetoes it (W7).
+- `Reexecute`: launch it as an ordinary launch.
+- `Interrupt`: settle it as `Interrupted` without a launch. The resolution reaches the consumer's settle as an ordinary `workflow.Settled` command, and the key is claimed until then.
 
-**The orphan set is the desired set over the committed state an activation first sees**: at the first tick, or at a command handled ahead of it that calls `Engine::tick` or delivers a `Settled`. Such a handler classifies from the state it was given, which precedes its own records, so the work it creates is fresh; work committed by a handler that skips `Engine::tick` is read as orphaned, conservative for `Interrupt` and exact for `Reexecute`. The workflow MUST resolve each member by its declared policy:
+### 5.4 Stragglers
 
-- `OnOrphan::Reexecute`: launch it as an ordinary launch. The consumer has declared the effect idempotent, self-deduplicating, or cheap enough that a second run beats an unknown one.
-- `OnOrphan::Interrupt`: settle it as `Err(EffectError::Interrupted)` without a launch. The first tick cannot journal (§2.5), so the resolution rides the mailbox as a synthesized `Settled`, under a claim.
+An outcome MAY arrive after its key has left the desired set: a timeout racing the real result, a cancelled effect completing anyway, a previous activation's launch reaching its successor. The engine MUST discard a straggler without handing it to the consumer's settle and without writing a record (W5). The test is the desired set itself: a key is in the set exactly while its outcome is not journaled, and the input gate admits no second outcome while the first's append is in flight (entity §6), so with unique keys (§4.1) the test is exact.
 
-Neither policy is a default, because an unstated one would silently decide whether to repeat a side effect. No member may be dropped in silence (W6): one neither launched nor settled would leave work outstanding that nothing is doing, and quiescence would never arrive.
+## 6. Durability is the entity's
 
-### 4.4 Stragglers
+The workflow's write-ahead barrier is the entity's output gate (entity §6, E5). **An effect is launched only after the records that placed it in the desired set have committed** (W4).
 
-An outcome MAY arrive after its key has left the desired set: a timeout racing the real result, a cancelled effect completing anyway, a previous activation's launch reaching its successor. The workflow MUST discard such a `Settled` without calling `settle` and without writing a record (W5). The test is the desired set itself: a key is in the set exactly while its outcome is not journaled, so a second outcome finds it absent, and the input gate admits no second outcome while the first's append is in flight. Exactness rests on key uniqueness (§3.1).
+**Durability failure pauses; it does not fail.** An append that cannot reach a quorum steps the activation down (storage §11), and the work stays in the desired set for the next activation to drive. The engine invents no outcome it could not record.
 
-## 5. Durability is the entity's
+## 7. Quiescence and hibernation
 
-The workflow's write-ahead barrier is the entity's output gate (entity §5, E5). **An effect is launched only after the records that placed it in the desired set have committed** (W4). No check enforces this; it follows from the cycle: every entry point reads committed state, and the tick that follows a handler's records is handled after they commit (§2.5).
+**An activation is quiescent when nothing is in flight and every member of its desired set is at rest**: the set is empty, or every remaining member is backed off to the cap. The engine's Quiescence operation (§3.2) MUST answer yes exactly when the activation is quiescent, so the hibernation check (entity §8) permits hibernation exactly then; an activation whose first tick has not run is not quiescent. A consumer MAY narrow this with what the desired set cannot see, such as a request accepted but not yet started, or an activation-scoped resource that is opening (§8).
 
-- **Durability failure pauses; it does not fail.** An append that cannot reach a quorum steps the activation down (storage §10), and the work stays in the desired set for the next activation to re-drive. The workflow invents no outcome it could not record.
-- **The fence guards the record, not the world.** Two nodes transiently leading a shard produce one journal (storage §5, E1) but MAY launch the same effect twice (§3.3), so a consumer with externally visible effects chooses its orphan policy deliberately.
+A key at rest stays in the fold: the entity hibernates until a message next requests a tick, and the next activation derives the same set and drives it (W1).
 
-## 6. Quiescence and hibernation
+A forced step-down ignores the hibernation check (entity §8). At every deactivation the engine drops its claims and counts and abandons its in-flight launches; nothing is owed at deactivation. An abandoned launch's outcome that reaches a later activation is handled like any other: settled while its key is still in the desired set, and discarded as a straggler once it is not (§5.4).
 
-**An activation is quiescent when nothing is in flight and every member of its desired set is at rest**: the set is empty, or its remaining members are backed off to the cap. The workflow MUST report quiescence to `Entity::can_hibernate` (entity §7), permitting hibernation exactly when quiescent; an activation whose first tick has not run is not quiescent. A consumer MAY narrow this with what the set cannot see, such as a request accepted but not yet started or a `Binding` mid-open (§2.6).
+## 8. Activation-scoped resources
 
-The at-rest clause exists because there is no attempt bound: under "the set is empty" alone, one permanently failing effect (an owed send to a node that is not coming back) would veto eviction forever. At the cap the debt stays in the fold and the entity hibernates until a message next ticks it, which is safe because the next activation re-derives the same set and drives it (W1).
+A consumer holding an activation-scoped resource (such as the agent runtime's sandbox, agent §3.3):
 
-A forced step-down ignores `can_hibernate` (§2.5), so the workflow MUST treat deactivation as unremarkable: claims and counts are dropped, in-flight launches are abandoned, and their outcomes become stragglers at the next activation (§4.4). Nothing is owed at deactivation.
+- MUST veto hibernation while the resource is opening (§7);
+- MUST settle, not relaunch, the effects that needed a resource whose open failed, with the failure's reason, in the same pass that closes the failed resource;
+- MUST release the resource on every deactivation path, from its deactivation hook (entity §3.1);
+- MUST NOT read it while computing the desired set (§4.1).
 
-## 7. Determinism
+The engine never sees the resource.
 
-The `workflow` crate MUST satisfy the actor runtime's determinism contract (actor §2.12.2): no wall clock, no OS threads, and no unseeded randomness. Every launch goes through `Spawner`, every delay through `Clock`, and backoff jitter comes from `Entropy`, so a simulated workflow entity, its events included, reproduces from its seed.
+## 9. Awaiting a durable outcome
 
-## 8. Invariants
+A consumer whose callers await work that outlives their request acknowledges the request, registers the caller as a subscriber, and notifies it when the outcome commits; no reply carries the outcome (actor §7). Such a consumer MUST:
 
-The Rust copy of this table, with the suites that verify each row, is the `workflow` crate's conformance catalogue.
+1. keep its subscribers in activation state, never journaled; callers re-contact after a resume;
+2. notify a subscriber only after the record carrying the outcome commits;
+3. send each notification as a tell (actor §3.2): at-most-once delivery, not the source of truth, which a caller recovers by re-contacting the entity, never by a transparent retry;
+4. answer a caller that arrives after the outcome committed at once from the fold, without registering it.
+
+## 10. Events
+
+The engine emits the workflow events of §11.2 on the actor event stream as application events (actor §3.6), beside the entity's own (entity §11). They describe the machinery around effects, never an effect's or an outcome's content. Each carries the entity's name and the node hosting the activation.
+
+- The engine MUST emit `Settled` for every outcome it hands to the consumer's settle, whether or not the settle decided records.
+- When the settle decided records, the engine MUST NOT emit its `Settled` before those records commit; a settle whose append fails emits none.
+
+## 11. Registries
+
+### 11.1 Manifests
+
+| Manifest | Carries | Sent by |
+|---|---|---|
+| `workflow.Tick` | nothing: re-enters the cycle (§4.2) | the entity to itself only (§3.2) |
+| `workflow.Settled` | an effect's key and outcome (§5.1) | the entity to itself only (§3.2) |
+
+### 11.2 Event kinds
+
+In every kind, `entity` is the entity's name, `node` the node hosting the activation, and `key` the key's debug rendering.
+
+| Event | Fields | Emitted when |
+|---|---|---|
+| `Launched` | `entity`, `key`, `node` | A key was claimed and its effect launched (§4.2). |
+| `Interrupted` | `entity`, `key`, `node` | An orphan declaring `Interrupt` was resolved without a launch (§5.3), opening the claim its `Settled` closes. |
+| `Settled` | `entity`, `key`, `node`, `ok`, `committed` | An outcome reached the consumer's settle (§10); `ok` tells a value from an effect error, and `committed` says whether the settle decided records. |
+| `Discarded` | `entity`, `key`, `node` | A straggler was dropped (§5.4). |
+| `Quiescent` | `entity`, `node` | The activation became quiescent (§7). |
+
+## 12. Invariants
 
 | # | Invariant | Defined in | Entity basis |
 |---|---|---|---|
-| W1 | **Desired-set purity.** Two activations that fold the same journal prefix compute the same desired set, and no ephemeral state (claims, backoff, bindings) is reachable from it. | §3.1 | E2, E3 |
-| W2 | **Launch coverage.** Once faults cease and an activation is live, every member of the desired set is in flight, settled, or waiting out its backoff; a member at the cap is at rest, and is re-driven when a caller next reaches the entity. | §3.2, §3.4, §6 | (none) |
-| W3 | **Launch-once per claim.** An activation launches each key at most once per claim; a later tick never relaunches an effect in flight. Across activations re-launch is permitted, and the settled record is the durable fact. | §3.3 | E6 |
-| W4 | **Intent before effect.** An effect is launched only after the records that placed it in the desired set have committed. | §5 | E5 (output gate) |
-| W5 | **Straggler rejection.** An outcome whose key is absent from the current desired set is discarded, never settled, and writes no record; exact because keys are unique over the journal. | §4.4, §3.1 | E1 |
-| W6 | **Orphan resolution.** After rehydration, every member of the orphan set is relaunched or settled `Interrupted` per its declared policy; none is dropped, and none is resolved twice. | §4.3 | E14 |
-| W7 | **Quiescence.** An activation permits hibernation exactly when nothing is in flight and every member of its desired set is at rest; an entity hibernated while quiescent re-derives the same set on activation and drives it. | §6, §3.4 | E6, entity §7 |
+| W1 | **Desired-set purity.** Two activations that fold the same journal prefix compute the same desired set, and no activation state (claims, backoff, activation-scoped resources) is reachable from it. | §4.1 | E2, E3 |
+| W2 | **Launch coverage.** Once faults cease and an activation is live, every member of the desired set is in flight, settled, or waiting out its backoff; a member at the cap is at rest, and is re-driven when a caller next reaches the entity. | §4.2, §4.4, §7 | (none) |
+| W3 | **Launch-once per claim.** An activation launches each key at most once per claim; a later tick never relaunches an effect in flight. Across activations re-launch is permitted, and the settled record is the durable fact. | §4.3 | E6 |
+| W4 | **Intent before effect.** An effect is launched only after the records that placed it in the desired set have committed. | §6 | E5 (output gate) |
+| W5 | **Straggler rejection.** An outcome whose key is absent from the current desired set is discarded, never settled, and writes no record; exact because keys are unique over the journal. | §5.4, §4.1 | E1 |
+| W6 | **Orphan resolution.** After rehydration, every member of the orphan set is relaunched or settled `Interrupted` per its declared policy; none is dropped, and none is resolved twice. | §5.3 | E14 |
+| W7 | **Quiescence.** An activation permits hibernation exactly when nothing is in flight and every member of its desired set is at rest; an entity hibernated while quiescent re-derives the same set on activation and drives it. | §7, §4.4 | E6, entity §8 |
 
-## 9. Deferred
+## 13. Security considerations
 
-- **Alarm-driven ticks.** A tick fired by the alarm facet (facets §4.5), so an entity can hold work for later without an activation; until then a key at rest waits for a caller.
-- **A step DSL.** The linear `async` `step`/`sleep`/`retry` surface (entity §13), written over this cycle; until then a consumer writes the re-entrant form.
-- **Effect priority and concurrency bounds.** The desired set launches in full; a consumer with one scarce resource bounds its effects itself until a second consumer shapes the rule.
-- **Cross-entity effects.** An effect aimed at another entity is ordinary; whether to deduplicate by entity name or ride entity's deferred sagas (entity §13) is open.
-- **Post-commit emission for consumers.** A consumer stages its own post-commit events; one staging could serve it and the engine.
+A workflow entity inherits the entity runtime's trust model (entity §11) and adds three properties:
+
+- No peer can inject an outcome or drive an activation: `workflow.Tick` and `workflow.Settled` are sent only by the entity to itself (§3.2).
+- An effect reaches nothing of its entity's state, journal, or facets (§3.1), and workflow events carry no effect or outcome content (§10).
+- The fence guards records, not the world: an effect with externally visible actions MAY run more than once across activations (§4.3), and its orphan policy (§3.1, §5.3) is the consumer's only control over that.

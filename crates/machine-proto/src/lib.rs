@@ -30,12 +30,12 @@ use serde::Serialize;
 pub const AGENT_PORT: u32 = 62;
 
 /// Cap on any single frame payload, mirroring the sandbox transport's 1 MiB
-/// (sandbox §4.2): a frame header's claim never becomes an unbounded
+/// (sandbox §5.2): a frame header's claim never becomes an unbounded
 /// allocation on either end.
 pub const MAX_FRAME: usize = 1024 * 1024;
 
 /// Cap on one workspace tar stream, either direction, accumulated across its
-/// [`Frame::Data`] chunks (machine §4). Pinned to the workspace codec's
+/// [`Frame::Data`] chunks (machine §6). Pinned to the workspace codec's
 /// budget (`machine_host::ws_sync::MAX_TAR`) and the ws facet's durable-tree cap
 /// (`entity::facet::MAX_TREE_BYTES`) by a test in the `machine-entity` crate, the one
 /// consumer that sees all three.
@@ -62,10 +62,10 @@ pub enum ChannelKind {
     Sftp,
     /// Flush the guest's page cache to its block device (`sync(2)`). The host
     /// issues it before a capture's `pause` so the quiescent image is
-    /// filesystem-clean, not merely crash-consistent (machine §2.4, M3). No
+    /// filesystem-clean, not merely crash-consistent (machine §3.3, M3). No
     /// data follows; the agent replies with one [`Frame::ExitStatus`] `0`.
     Sync,
-    /// Replace the guest's `/workspace` (a tmpfs, machine §3) with a tar
+    /// Replace the guest's `/workspace` (a tmpfs, machine §4) with a tar
     /// stream the host sends: [`Frame::Data`] chunks then [`Frame::Eof`],
     /// accumulated under [`MAX_TAR`]. The agent clears the directory's
     /// children (the mount survives), unpacks, and replies

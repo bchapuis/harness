@@ -6,7 +6,7 @@
 fn invalid_entity_calls_do_not_compile() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/unhandled_entity_ask.rs");
-    // facets §3: a facet accessor on an entity that does not declare the facet must
+    // facets §4: a facet accessor on an entity that does not declare the facet must
     // not compile (the E10 discipline applied to storage).
     t.compile_fail("tests/compile_fail/kv_without_facet.rs");
     #[cfg(feature = "sql")]

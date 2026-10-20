@@ -1,24 +1,29 @@
-//! The machine entity (machine spec §1, §3, §4, §5).
+//! The machine entity (machine spec §2, §4, §6, §7).
 //!
-//! `Facets = (Disk, Alarm, Ws)`: the disk facet (facets §4.4) owns the rootfs
+//! `Facets = (Disk, Alarm, Ws)`: the disk facet (facets §5.4) owns the rootfs
 //! image's capture, checkpoint, and rehydration; the alarm facet (facets
-//! §4.5) supplies the one timer machine §4 needs; the workspace facet (facets
-//! §4.1) is the machine's `/workspace` volume; a host-side directory the
+//! §5.5) supplies the one timer machine §6 needs; the workspace facet (facets
+//! §5.1) is the machine's `/workspace` volume; a host-side directory the
 //! guest sees as a tmpfs, pushed at boot and pulled at every capture
 //! quiescent point, so the ws delta and the disk manifest commit in **one
-//! atomic batch** (E19). Facet-0 state is metadata only (machine §3): keys,
+//! atomic batch** (E19). Facet-0 state is metadata only (machine §4): keys,
 //! host key, egress policy, sizing, intervals, and the live attachment set,
 //! never image or workspace bytes.
 //!
-//! **File commands without a guest (machine §3).** [`WsWrite`], [`WsRead`],
+//! **File commands without a guest (machine §4).** [`WsWrite`], [`WsRead`],
 //! [`WsList`], and [`WsRemove`] operate on the workspace facet directly, and
 //! activating the entity activates *no* guest (boot is attach-driven). While
 //! a guest is live it owns `/workspace`, and all four refuse with
 //! [`MachineError::Running`]; the next boot's push delivers host-side writes.
 //!
-//! **The session is the command (machine §4).** Between captures the guest
-//! writes the image out of band; durability is capture-grained. The
-//! **checkpoint alarm** is the whole cadence: it fires every
+//! **The session is the command (machine §6).** Between captures the guest
+//! writes the image out of band; durability is capture-grained. The output
+//! gate holds a reply until its records are durable (entity §6), and a
+//! terminal cannot wait on a quorum per keystroke, so the unit a machine makes
+//! durable is the session, not the keystroke. A session needs a lease because
+//! a deposed activation that appends nothing never learns it is deposed (reads
+//! are read-your-leader, entity §7.1), and here it would keep serving a live
+//! terminal. The **checkpoint alarm** is the whole cadence: it fires every
 //! `min(checkpoint, lease)` while anything needs it, and captures when a full
 //! checkpoint interval has elapsed. Because a fired alarm always stages its
 //! consume/re-arm record, every fire is a **fenced append**, which makes the
@@ -27,11 +32,11 @@
 //! guest, bounding the doomed-session window to one alarm interval plus the
 //! append timeout.
 //!
-//! **Quiescent points (machine §4).** Mid-session the alarm pauses the guest,
+//! **Quiescent points (machine §6).** Mid-session the alarm pauses the guest,
 //! captures, resumes (M3's window is the checkpoint interval). When the last
 //! attachment detaches the alarm re-arms to fire immediately: the final fire
 //! stops the guest, runs the last capture, and leaves the entity clean, so
-//! `can_hibernate` (which refuses while attached or dirty) lets the entity §7 idle
+//! `can_hibernate` (which refuses while attached or dirty) lets the entity §8 idle
 //! path hibernate a machine whose disk is fully durable (M2).
 
 use std::collections::BTreeMap;
@@ -61,12 +66,12 @@ use crate::runtime::BootSpec;
 use crate::runtime::MachineRuntime;
 use crate::runtime::MachineRuntimeProvider;
 
-/// The machine's stable entity type (machine §1: `MachineId` is an `EntityName`
+/// The machine's stable entity type (machine §2: `MachineId` is an `EntityName`
 /// with this type and the machine's name as the key).
 pub const MACHINE_TYPE: &str = "machine";
 
 /// A machine operation failed: an application-level outcome carried in the
-/// reply, distinct from a durability failure (entity §9).
+/// reply, distinct from a durability failure (entity §3.2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachineError {
     AlreadyProvisioned,
@@ -74,7 +79,7 @@ pub enum MachineError {
     Disk(String),
     Runtime(String),
     /// A workspace file command arrived while the machine is running: the
-    /// guest owns `/workspace` while live (machine §3), and a host write
+    /// guest owns `/workspace` while live (machine §4), and a host write
     /// would be clobbered by the next pull. Detach (or wait for hibernation)
     /// and retry.
     Running,
@@ -102,7 +107,7 @@ impl std::fmt::Display for MachineError {
 
 impl std::error::Error for MachineError {}
 
-/// The journaled egress policy (machine §2.6, M6). `Open` is the fresh
+/// The journaled egress policy (machine §5.2, M6). `Open` is the fresh
 /// machine's default: the development-machine posture; an owner MAY narrow
 /// it, and the provider realizes exactly what it grants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,49 +118,49 @@ pub enum EgressPolicy {
     None,
 }
 
-/// Why an attachment ended (machine §2.5, §5).
+/// Why an attachment ended (machine §5.1, §7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DetachReason {
     /// The connection closed and the front door detached it.
     Closed,
     /// The front-door member holding it died; the death watch folded the
-    /// detach (machine §2.5's attachment liveness).
+    /// detach (machine §5.1's attachment liveness).
     FrontDoorLost,
 }
 
-/// One live attachment (machine §2.5): who reached the machine, through which
+/// One live attachment (machine §5.1): who reached the machine, through which
 /// front-door member, when; the journaled, attributable half of M4.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     /// Who attached: the front door's attribution, derived from the
     /// authenticating key (its fingerprint, with the client-asserted user
-    /// name beside it), never the client's word alone (machine §2.5, M4).
+    /// name beside it), never the client's word alone (machine §5.1, M4).
     pub principal: String,
     /// The front-door actor holding the connection: the death-watch target.
     pub front_door: ActorId,
     pub at_nanos: u64,
 }
 
-/// Facet-0 state (machine §3): the machine's shape and policy, nothing bulk.
+/// Facet-0 state (machine §4): the machine's shape and policy, nothing bulk.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MachineState {
     pub provisioned: bool,
     pub owner: String,
-    /// `fingerprint → public key` (machine §3): the front door authenticates
+    /// `fingerprint → public key` (machine §4): the front door authenticates
     /// against the current folded set (M4).
     pub authorized_keys: BTreeMap<String, String>,
-    /// The machine's SSH host-key material (machine §3): the raw 32-byte
+    /// The machine's SSH host-key material (machine §4): the raw 32-byte
     /// ed25519 seed drawn from system entropy at provisioning, which the
-    /// front door expands into the host key it presents at KEX (machine §2.5);
+    /// front door expands into the host key it presents at KEX (machine §5.1);
     /// one identity across hibernation, migration, and failover.
     pub host_key: Vec<u8>,
     pub egress: EgressPolicy,
     pub vcpus: u8,
     pub mem_mib: u32,
     pub base_image: String,
-    /// The capture cadence while attached (machine §4, M3).
+    /// The capture cadence while attached (machine §6, M3).
     pub checkpoint_nanos: u64,
-    /// The self-fence bound (machine §4, M5): the alarm (the activation's
+    /// The self-fence bound (machine §6, M5): the alarm (the activation's
     /// fenced append) fires at least once per `min(checkpoint, lease)`.
     pub lease_nanos: u64,
     pub attachments: BTreeMap<u64, Attachment>,
@@ -178,7 +183,7 @@ impl MachineState {
     }
 }
 
-/// The journal record (machine §3, §2.5): provisioning, policy, attachment,
+/// The journal record (machine §4, §5.1): provisioning, policy, attachment,
 /// and capture history; an operator answers "who reached this machine, and
 /// when" from the journal alone (M4).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,7 +225,7 @@ pub enum MachineEvent {
         bytes: u64,
     },
     /// A workspace pull staged a delta into the same batch as its disk
-    /// capture (machine §4): the two commit together or not at all (E19).
+    /// capture (machine §6): the two commit together or not at all (E19).
     WsCaptured {
         at_nanos: u64,
         written: u32,
@@ -228,7 +233,7 @@ pub enum MachineEvent {
         tree_bytes: u64,
     },
     /// A workspace pull (or its staging) failed at a quiescent point, so the
-    /// disk capture proceeded without a ws delta: machine §2.5's blessed
+    /// disk capture proceeded without a ws delta: machine §6's blessed
     /// degrade, journaled so "who lost workspace cadence, and since when" is
     /// answerable from the journal alone (M4).
     WsCaptureSkipped {
@@ -237,13 +242,13 @@ pub enum MachineEvent {
     },
 }
 
-/// Ephemeral activation state (machine §1: the live guest is one of the two
+/// Ephemeral activation state (machine §2: the live guest is one of the two
 /// disposable things). Reset on every activation (**E3**).
 #[derive(Default)]
 struct Activation {
     runtime: Option<Arc<dyn MachineRuntime>>,
     /// The guest has run since the last committed capture, the conservative
-    /// dirty flag of facets §4.4: the host cannot observe guest block writes,
+    /// dirty flag of facets §5.4: the host cannot observe guest block writes,
     /// so "has run" over-approximates "has written", which is safe (an extra
     /// capture, never a stranded dirty image).
     dirty: bool,
@@ -252,7 +257,7 @@ struct Activation {
     last_capture: Option<Instant>,
 }
 
-/// The machine entity (machine §1). The provider is the node's runtime binding,
+/// The machine entity (machine §2). The provider is the node's runtime binding,
 /// injected per activation through the `entities_named` factory; `S` is the
 /// hosting system.
 pub struct Machine<S: EntitySystem> {
@@ -274,9 +279,9 @@ impl<S: EntitySystem> Machine<S> {
         self.act.lock().expect("machine activation lock")
     }
 
-    /// Boot the guest if it is not running (machine §5: activation on
+    /// Boot the guest if it is not running (machine §7: activation on
     /// attach; boot touches no consensus), then push the workspace facet's
-    /// directory into the guest's `/workspace` (machine §4). A failed push is
+    /// directory into the guest's `/workspace` (machine §6). A failed push is
     /// hard: the guest must never serve against a silently stale workspace,
     /// so the guest is killed and the command fails.
     async fn ensure_vm(
@@ -316,7 +321,7 @@ impl<S: EntitySystem> Machine<S> {
         Ok(())
     }
 
-    /// Stop the guest (idempotent; machine §1: stopping it loses no
+    /// Stop the guest (idempotent; machine §2: stopping it loses no
     /// committed block).
     async fn kill_vm(&self) {
         let runtime = self.lock().runtime.take();
@@ -326,7 +331,7 @@ impl<S: EntitySystem> Machine<S> {
     }
 
     /// Death-watch the front-door member of every folded attachment (machine
-    /// §2.5). `on_activate` cannot see state, so a rehydrated machine
+    /// §5.1). `on_activate` cannot see state, so a rehydrated machine
     /// re-watches on its first state-bearing entry point: the pending alarm's
     /// fire, or any command; watch-after-death then folds
     /// `Detached { FrontDoorLost }` for holders that died while the entity was
@@ -339,7 +344,7 @@ impl<S: EntitySystem> Machine<S> {
     }
 
     /// Record a committed capture (advance the capture clock) and map its
-    /// stats to the journal event: `None` for a clean image (entity §6).
+    /// stats to the journal event: `None` for a clean image (entity §7).
     fn capture_event(
         &self,
         stats: entity::facet::DiskCaptureStats,
@@ -360,9 +365,9 @@ impl<S: EntitySystem> Machine<S> {
     /// Pull the guest's `/workspace` into the facet's directory and stage the
     /// delta into the *current* command's batch, so it commits atomically
     /// with the disk manifest that follows (E19). Must run while the guest
-    /// can still answer: before pause or kill (machine §4).
+    /// can still answer: before pause or kill (machine §6).
     ///
-    /// Degrades gracefully (machine §2.5): a failed pull, or a
+    /// Degrades gracefully (machine §6): a failed pull, or a
     /// [`entity::facet::WsError::TooLarge`], skips ws staging this cadence;
     /// journaled as [`MachineEvent::WsCaptureSkipped`], and the disk capture
     /// proceeds; the ws delta waits for the next quiescent point.
@@ -407,7 +412,7 @@ impl<S: EntitySystem> Machine<S> {
     }
 
     /// The capture spine shared by the final and mid-session paths (machine
-    /// §4): pull the workspace while the guest can still answer, quiesce,
+    /// §6): pull the workspace while the guest can still answer, quiesce,
     /// capture the disk facet in the same command's batch (E19), un-quiesce.
     /// Returns the batch and whether the disk capture committed.
     async fn run_capture(
@@ -424,7 +429,7 @@ impl<S: EntitySystem> Machine<S> {
                 if let Some(runtime) = &runtime
                     && runtime.pause().await.is_err()
                 {
-                    // Never capture a running guest's image (facets §4.4).
+                    // Never capture a running guest's image (facets §5.4).
                     // Treat the guest as lost; the image keeps its writes and
                     // stays dirty until the next capture, the M3 window. The
                     // staged ws delta still commits: it is real pulled bytes.
@@ -454,7 +459,7 @@ impl<S: EntitySystem> Machine<S> {
     }
 }
 
-/// How [`Machine::run_capture`] quiesces the guest (machine §4): the final
+/// How [`Machine::run_capture`] quiesces the guest (machine §6): the final
 /// capture stops it for good; a mid-session checkpoint pauses and resumes
 /// around the disk scan.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -557,10 +562,10 @@ impl<S: EntitySystem> Entity for Machine<S> {
     }
 
     fn can_hibernate(&self, state: &MachineState) -> bool {
-        // A live attachment pins the activation (machine §2.5), and an image
+        // A live attachment pins the activation (machine §5.1), and an image
         // holding uncaptured writes must not be stranded by the idle path
-        // (facets §4.4): the final capture command clears the flag first
-        // (machine §4, quiescent point 1).
+        // (facets §5.4): the final capture command clears the flag first
+        // (machine §6, quiescent point 1).
         let act = self.lock();
         state.attachments.is_empty() && !act.dirty
     }
@@ -574,11 +579,11 @@ impl<S: EntitySystem> Entity for Machine<S> {
 
     async fn on_alarm(&self, state: &MachineState, ctx: &EntityCtx<Self>) -> Vec<MachineEvent> {
         // A rehydrated machine's first alarm re-watches its folded
-        // attachments' holders (machine §2.5); a no-op otherwise.
+        // attachments' holders (machine §5.1); a no-op otherwise.
         self.watch_attachments(state, ctx);
         let now = ctx.system().now();
         if state.attachments.is_empty() {
-            // Quiescent point 1 (machine §4): the final capture. Stop the
+            // Quiescent point 1 (machine §6): the final capture. Stop the
             // guest, capture the settled image, and leave the entity clean so
             // idle hibernation can proceed (M2). No re-arm on success: the
             // alarm is consumed and `can_hibernate` now permits eviction.
@@ -593,7 +598,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
             return events;
         }
 
-        // Quiescent point 2 (machine §4): the mid-session checkpoint. Every
+        // Quiescent point 2 (machine §6): the mid-session checkpoint. Every
         // fire re-arms, which is the session lease's fenced append (M5), even
         // when no capture is due.
         ctx.alarm().set_after(state.alarm_cadence());
@@ -616,7 +621,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
         }
         // Pause-and-resume around the capture; the ws delta is as-of-pull,
         // the disk as-of-pause, the skew bounded by the pull duration
-        // (machine §4). The guest stays dirty: it keeps running.
+        // (machine §6). The guest stays dirty: it keeps running.
         let (events, _committed) = self.run_capture(ctx, now, Quiesce::Pause).await;
         events
     }
@@ -628,7 +633,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
         peer: &ActorId,
         _reason: TerminationReason,
     ) -> Vec<MachineEvent> {
-        // A front-door member died without detaching (machine §2.5): fold
+        // A front-door member died without detaching (machine §5.1): fold
         // `Detached { FrontDoorLost }` for its attachments, releasing their
         // pin; the idle window then runs from this release.
         let now_nanos = ctx.system().now().as_nanos();
@@ -643,7 +648,7 @@ impl<S: EntitySystem> Entity for Machine<S> {
         }
         if dropped.len() == state.attachments.len() {
             // The last attachments are going: schedule the final capture
-            // (machine §4, quiescent point 1) immediately.
+            // (machine §6, quiescent point 1) immediately.
             ctx.alarm().set_after(Duration::ZERO);
         }
         dropped
@@ -659,9 +664,9 @@ impl<S: EntitySystem> Entity for Machine<S> {
 
 // --- Commands -----------------------------------------------------------------
 
-/// Provision the machine (machine §3): a journaled `Provisioned` event whose
-/// disk begins as the base image's full-coverage manifest (facets §4.4) and
-/// which carries the machine's freshly generated host key (machine §2.5).
+/// Provision the machine (machine §4): a journaled `Provisioned` event whose
+/// disk begins as the base image's full-coverage manifest (facets §5.4) and
+/// which carries the machine's freshly generated host key (machine §5.1).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Provision {
     pub owner: String,
@@ -698,10 +703,10 @@ impl<S: EntitySystem> EntityHandler<Provision> for Machine<S> {
         }
         // The host key is born here and nowhere else: 32 bytes journaled as a
         // raw ed25519 seed; any 32 bytes are a valid seed (RFC 8032). Drawing
-        // from the Entropy seam (actor §2.12.1) keeps both worlds right:
+        // from the Entropy seam (actor §11.1) keeps both worlds right:
         // production entropy is OS-seeded, so the key is fresh and secret; the
         // simulator's is run-seeded, so a replayed seed reproduces the same
-        // key (actor §2.12.2).
+        // key (actor §11).
         let host_key: Vec<u8> = (0..4)
             .flat_map(|_| ctx.system().next_random().to_le_bytes())
             .collect();
@@ -721,7 +726,7 @@ impl<S: EntitySystem> EntityHandler<Provision> for Machine<S> {
     }
 }
 
-/// What a successful [`Attach`] returns to the front door (machine §2.5). The
+/// What a successful [`Attach`] returns to the front door (machine §5.1). The
 /// host key is not here: the door already read it; SSH presents it at KEX,
 /// before any principal exists to attach ([`DoorPolicy`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,9 +734,9 @@ pub struct AttachReply {
     pub attachment: u64,
 }
 
-/// Attach a connection (machine §2.5): journaled with its principal (M4),
+/// Attach a connection (machine §5.1): journaled with its principal (M4),
 /// boots the guest lazily, death-watches the holding front-door member, and
-/// starts the checkpoint/lease cadence (machine §4).
+/// starts the checkpoint/lease cadence (machine §6).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attach {
     pub principal: String,
@@ -774,8 +779,8 @@ impl<S: EntitySystem> EntityHandler<Attach> for Machine<S> {
     }
 }
 
-/// Detach a connection (machine §2.5): journaled; when the last attachment
-/// goes, the final capture is scheduled immediately (machine §4, quiescent
+/// Detach a connection (machine §5.1): journaled; when the last attachment
+/// goes, the final capture is scheduled immediately (machine §6, quiescent
 /// point 1) so the idle path finds a clean disk. Idempotent, detaching an
 /// unknown or already-detached id is a no-op, so there is no failure to
 /// report and the reply is `()`.
@@ -813,8 +818,8 @@ impl<S: EntitySystem> EntityHandler<Detach> for Machine<S> {
     }
 }
 
-/// Authorize a key (machine §3): an ordinary journaled event; the next attach
-/// sees the folded set (M4). Refused before `Provision` (machine §3): the
+/// Authorize a key (machine §4): an ordinary journaled event; the next attach
+/// sees the folded set (M4). Refused before `Provision` (machine §4): the
 /// `Provisioned` fold sets the key set whole, so an earlier `KeyAdded` would
 /// be journaled and then silently discarded.
 #[derive(Clone, Serialize, Deserialize)]
@@ -848,9 +853,9 @@ impl<S: EntitySystem> EntityHandler<AddKey> for Machine<S> {
     }
 }
 
-/// Revoke a key (machine §3): stops authorizing the next attach. It does not
-/// end a live connection, and no command does (machine §7). Refused before
-/// `Provision`, like every policy command (machine §3).
+/// Revoke a key (machine §4): stops authorizing the next attach. It does not
+/// end a live connection, and no command does (status §11). Refused before
+/// `Provision`, like every policy command (machine §4).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RevokeKey {
     pub fingerprint: String,
@@ -880,11 +885,11 @@ impl<S: EntitySystem> EntityHandler<RevokeKey> for Machine<S> {
     }
 }
 
-/// Change the egress policy (machine §2.6): a journaled event, applied no
+/// Change the egress policy (machine §5.2): a journaled event, applied no
 /// later than the machine's next boot, because a provider realizes the policy
 /// from the [`BootSpec`] it boots with and a running guest keeps the policy it
 /// booted under. Refused before `Provision`, like every policy command
-/// (machine §3).
+/// (machine §4).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetEgress {
     pub policy: EgressPolicy,
@@ -913,12 +918,12 @@ impl<S: EntitySystem> EntityHandler<SetEgress> for Machine<S> {
 }
 
 /// What the front door must know *before* it can serve a connection (machine
-/// §2.5), read in one command because SSH needs both at the same moment: the
+/// §5.1), read in one command because SSH needs both at the same moment: the
 /// host key is presented at KEX, and the authorized-key set decides the
 /// publickey method that immediately follows; both before any `Attach`.
 ///
 /// The reply carries the machine's private host-key material: a front door is
-/// a cluster member inside the trust boundary (machine §2.5), and no key
+/// a cluster member inside the trust boundary (machine §5.1), and no key
 /// material ever crosses into the guest. Reading the set per connection is
 /// what makes revocation take effect on the *next* attach (M4).
 #[derive(Clone, Serialize, Deserialize)]
@@ -928,7 +933,7 @@ pub struct DoorPolicy;
 pub struct DoorPolicyReply {
     /// See [`MachineState::host_key`]: the raw 32-byte ed25519 seed.
     pub host_key: Vec<u8>,
-    /// `fingerprint → public key`, the current folded set (machine §3).
+    /// `fingerprint → public key`, the current folded set (machine §4).
     pub authorized_keys: BTreeMap<String, String>,
 }
 
@@ -957,7 +962,7 @@ impl<S: EntitySystem> EntityHandler<DoorPolicy> for Machine<S> {
     }
 }
 
-/// A read of the machine's shape (entity §6: commits nothing).
+/// A read of the machine's shape (entity §7: commits nothing).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Status;
 
@@ -994,7 +999,7 @@ impl<S: EntitySystem> EntityHandler<Status> for Machine<S> {
     ) -> (Vec<MachineEvent>, StatusReply) {
         let image_bytes = ctx.disk().image_bytes().unwrap_or(0);
         // The committed-image digest, derived from the block index, no
-        // multi-MiB read on this read command (facets §4.4).
+        // multi-MiB read on this read command (facets §5.4).
         let image_digest = ctx.disk().content_digest().ok().flatten();
         (
             vec![],

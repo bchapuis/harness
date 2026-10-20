@@ -1,12 +1,12 @@
-//! Conformance: the §10 invariant catalogue is the single source of truth and
-//! stays consistent with the live checker set (spec §10, §10, §2.12.2).
+//! Conformance: the §13 invariant catalogue is the single source of truth and
+//! stays consistent with the live checker set (spec §13, §13, §11).
 //!
 //! This is the spec↔code drift gate. It fails the build if an invariant number
 //! is missing or duplicated, if a catalogue `Checker(name)` is not actually
 //! present in `default_invariants()`, if a live checker is not recorded in the
 //! catalogue, or if a `SimTest`/`Differential`/`CompileFail` file pointer names
 //! a test file that no longer exists. Keeping it green is what makes the
-//! verification method §10 assigns each invariant (the §10 conformance
+//! verification method §13 assigns each invariant (the §13 conformance
 //! criterion) mechanically true rather than just documented.
 
 use std::collections::BTreeSet;
@@ -48,7 +48,7 @@ fn every_entry_has_spec_property_and_a_verification_method() {
     }
 }
 
-/// The utilities catalogue (utilities spec §4) is held to the same drift
+/// The utilities catalogue (utilities spec §6) is held to the same drift
 /// discipline as the core table: U-numbers contiguous from U1, every entry
 /// fully described and verified somehow.
 #[test]
@@ -112,7 +112,7 @@ fn every_checker_covers_exactly_the_invariants_the_catalogues_give_it() {
         declared,
         catalogued_coverage(),
         "a checker's declared coverage (actor_simulation::checker_coverage) and the \
-         catalogues' Verify::Checker rows name different (checker, invariant) pairs (§10)"
+         catalogues' Verify::Checker rows name different (checker, invariant) pairs (§13)"
     );
 }
 
@@ -124,13 +124,13 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
     assert_eq!(
         live_checker_names(),
         declared,
-        "default_invariants() and the declared checker coverage drifted apart (§10)"
+        "default_invariants() and the declared checker coverage drifted apart (§13)"
     );
 }
 
 /// Every `SimTest`/`Differential`/`CompileFail` file pointer must name a file
 /// that actually exists: otherwise a renamed or deleted conformance test drifts
-/// out from under the catalogue unnoticed, and the method §10 assigns that
+/// out from under the catalogue unnoticed, and the method §13 assigns that
 /// invariant stops being mechanically true. `SimTest`/`Differential` pointers are comma-separated
 /// `*.rs` files under this crate's `tests/` directory; a `CompileFail` pointer is
 /// a path relative to the `crates/` directory (e.g. `actor-core/tests/compile_fail`).
@@ -191,7 +191,7 @@ fn invariant_20_is_verified_by_a_compile_fail_test() {
     );
 }
 
-/// The table above and the actor spec's §10 copy of it are the same
+/// The table above and the actor spec's §13 copy of it are the same
 /// table.
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds it
@@ -203,7 +203,7 @@ fn invariant_20_is_verified_by_a_compile_fail_test() {
 fn the_specification_and_the_core_catalogue_agree() {
     let site = catalogue::site("core");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("actor spec §10 parses");
+    let documented = catalogue::documented(&root, site).expect("actor spec §13 parses");
     let implemented: Vec<catalogue::Row> = core_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -212,7 +212,7 @@ fn the_specification_and_the_core_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "actor spec §10 and core_catalogue() disagree:\n  {}\n",
+        "actor spec §13 and core_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)
@@ -221,14 +221,14 @@ fn the_specification_and_the_core_catalogue_agree() {
     );
 }
 
-/// The table above and the cluster-utilities spec's §3.3 copy of it are the same
+/// The table above and the cluster-utilities spec's §6 copy of it are the same
 /// table: the utilities twin of `the_specification_and_the_core_catalogue_agree`,
 /// on the same terms.
 #[test]
 fn the_specification_and_the_utilities_catalogue_agree() {
     let site = catalogue::site("utilities");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("cluster-utilities spec §4 parses");
+    let documented = catalogue::documented(&root, site).expect("cluster-utilities spec §6 parses");
     let implemented: Vec<catalogue::Row> = utilities_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -237,7 +237,7 @@ fn the_specification_and_the_utilities_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "cluster-utilities spec §4 and utilities_catalogue() disagree:\n  {}\n",
+        "cluster-utilities spec §6 and utilities_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

@@ -1,7 +1,7 @@
 # Durable SQLite databases and durable workspaces on the entity substrate
 
 **Status:** Research note (no implementation)
-**Purpose:** Decide whether entity's per-entity replication substrate can host a **durable SQLite database** and a **durable filesystem / workspace** that survive hibernation, migration, and node loss, the deferred "alternative record interpretations (SQLite, File)" of [`entity-spec.md`](../docs/entity-spec.md) §13. This note researches the mechanism and the model changes it forces; it builds nothing.
+**Purpose:** Decide whether entity's per-entity replication substrate can host a **durable SQLite database** and a **durable filesystem / workspace** that survive hibernation, migration, and node loss, the "alternative record interpretations (SQLite, File)" the entity spec once deferred, which the SQL and workspace facets now realize ([`entity-facets-spec.md`](../docs/entity-facets-spec.md) §5.3, §5.1). This note researches the mechanism and the model changes it forces; it builds nothing.
 
 References: `entity §N` → [`entity-spec.md`](../docs/entity-spec.md); `agent §N` → [`agent-spec.md`](../docs/agent-spec.md); `DO §N` → [`durable-objects.md`](durable-objects.md). Claims inferred rather than sourced are marked **(inferred)**.
 
@@ -9,11 +9,11 @@ References: `entity §N` → [`entity-spec.md`](../docs/entity-spec.md); `agent 
 
 ## 1. The question, and where we start from
 
-entity already gives an entity **durable, quorum-replicated, term-fenced, single-writer storage** with rehydrate-on-activation (entity §5–storage §8). What it stores today is an **event log folded by a pure `apply` into a small in-memory `State`** (entity §3.1). The two artifacts the user wants (a SQLite database and a working-directory filesystem that survive hibernation) are explicitly *not* that:
+entity already gives an entity **durable, quorum-replicated, term-fenced, single-writer storage** with rehydrate-on-activation (entity §6–storage §9). What it stores today is an **event log folded by a pure `apply` into a small in-memory `State`** (entity §4.1). The two artifacts the user wants (a SQLite database and a working-directory filesystem that survive hibernation) are explicitly *not* that:
 
 - They are **large on-disk artifacts** (megabytes to gigabytes), not a small foldable value.
 - Their natural "record" is not a user `Event` but a **physical byte mutation** (a SQLite WAL frame, a file byte-range write).
-- For the agent runtime workspace specifically, durability is today **deliberately given up**: the sandbox is one-per-activation, released on every hibernation and migration, and the loss is put on the record as a `WorkspaceReset` so the model re-derives rather than trusting vanished state (agent §4.1, §4.4, §5.2, invariant H8). Making the workspace survive hibernation is a reversal of that stance, and the note must say what that costs.
+- For the agent runtime workspace specifically, durability is today **deliberately given up**: the sandbox is one-per-activation, released on every hibernation and migration, and the loss is put on the record as a `WorkspaceReset` so the model re-derives rather than trusting vanished state (agent §5.1, §5.4, §7.1, invariant H8). Making the workspace survive hibernation is a reversal of that stance, and the note must say what that costs.
 
 The good news, established in §2: **the hard part (durability, ordering, fencing, quorum recovery) is already built and carries over unchanged.** What is missing is a different *materialization* layer above the same Replicator, plus a snapshot seam that can move bytes at scale. The rest of this note is about that delta.
 
@@ -21,7 +21,7 @@ The good news, established in §2: **the hard part (durability, ordering, fencin
 
 ## 2. One substrate, three record interpretations
 
-entity's journal seam (`EntityJournal`, storage §2.1) already operates on **opaque, codec-agnostic record bytes**:
+entity's journal seam (`EntityJournal`, storage §3.1) already operates on **opaque, codec-agnostic record bytes**:
 
 ```rust
 fn append(&self, entity: &EntityName, after: Seq, events: Vec<Vec<u8>>) -> AppendOutcome; // quorum, term-fenced
@@ -29,22 +29,22 @@ fn load (&self, entity: &EntityName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u
 fn head (&self, entity: &EntityName) -> Seq;                                              // quorum read-repair recovery
 ```
 
-Nothing in `append`/`load`/`head` or in the Replicator below it (storage §4, `replicator.rs`, `store.rs`) interprets the bytes. The whole distributed-systems core is **content-blind**:
+Nothing in `append`/`load`/`head` or in the Replicator below it (storage §5, `replicator.rs`, `store.rs`) interprets the bytes. The whole distributed-systems core is **content-blind**:
 
-- **single writer per entity** → the records are already totally ordered, no consensus on the data path (storage §4, E1);
-- **term fence** → a deposed leader's append reaches no quorum, so the byte stream never forks (storage §5, `StoreAck::Fenced`/`Stale` in `store.rs`);
-- **quorum read-repair recovery** → a fresh leader reconstructs the entity's head slot-by-slot from a write quorum, losing no acknowledged record (storage §5, §8, E14);
-- **input/output gates** → no second command observes half-applied state; the reply waits until the record is durable (entity §5).
+- **single writer per entity** → the records are already totally ordered, no consensus on the data path (storage §5, E1);
+- **term fence** → a deposed leader's append reaches no quorum, so the byte stream never forks (storage §6, `StoreAck::Fenced`/`Stale` in `store.rs`);
+- **quorum read-repair recovery** → a fresh leader reconstructs the entity's head slot-by-slot from a write quorum, losing no acknowledged record (storage §6, §9, E14);
+- **input/output gates** → no second command observes half-applied state; the reply waits until the record is durable (entity §6).
 
 So the only variable across entity flavors is **"what is the record, and how is it materialized into servable state?"**
 
 | Flavor | Record (`Vec<u8>`) | Materialized state | Snapshot | Status |
 |---|---|---|---|---|
 | **Event** (today) | user `Event`, codec-encoded | in-memory `State` via pure `apply` fold | serialized `State` blob | shipped |
-| **SQLite** | a **WAL frame** = `(page#, page bytes, commit marker)` | an **on-disk SQLite DB file** | a **checkpointed DB file** | deferred (entity §13) |
-| **File** | a **byte-range / slice write + inode op** | an **on-disk directory tree** | a **metadata image + live-block manifest** | deferred (entity §13) |
+| **SQLite** | a **WAL frame** = `(page#, page bytes, commit marker)` | an **on-disk SQLite DB file** | a **checkpointed DB file** | deferred (status §5) |
+| **File** | a **byte-range / slice write + inode op** | an **on-disk directory tree** | a **metadata image + live-block manifest** | deferred (status §5) |
 
-This is exactly the Cloudflare Durable Objects framing (DO §4.2): a WAL frame is "write these bytes at this offset," an opaque position-addressed idempotent record, shipped to a quorum on commit. entity's Replicator is the same shape as Cloudflare's Storage Relay Service, minus the interpretation. The entity §13 extension is therefore **not a new storage engine: it is two new record interpreters over the existing one.**
+This is exactly the Cloudflare Durable Objects framing (DO §4.2): a WAL frame is "write these bytes at this offset," an opaque position-addressed idempotent record, shipped to a quorum on commit. entity's Replicator is the same shape as Cloudflare's Storage Relay Service, minus the interpretation. The status §5 extension is therefore **not a new storage engine: it is two new record interpreters over the existing one.**
 
 ---
 
@@ -56,7 +56,7 @@ There are two ways to make a SQLite-backed entity, and they are the database ana
 
 - **Statement-sourced**: the `Event` is a SQL statement; `apply` runs it against an in-memory SQLite connection. **This needs nothing new**: it is an ordinary event-sourced entity whose `State` happens to be a `rusqlite` in-memory database serialized via the backup API. Its limits are the limits of the event model: the database must fit in memory and replay cost grows with history (bounded only by snapshots), and **every statement must be deterministic**: `random()`, `CURRENT_TIMESTAMP`, and implicit `ROWID` allocation must be avoided or pre-resolved, because replay re-executes them and any divergence violates the deterministic-fold invariant (entity E2). Good for small, append-mostly metadata; not a "durable object database."
 
-- **Frame-sourced**: the record is the **physical WAL frame** SQLite produces, shipped *after* the engine has executed the statement. This is the deferred entity §13 work and the thing worth building, for three reasons: (1) the database lives **on disk**, so it can be gigabytes and reads are zero-latency local (DO §4.2, entity §6); (2) replay is **byte-identical and deterministic regardless of SQL nondeterminism**, because you ship the resulting pages, not the statement that produced them: `random()` is resolved once on the writer and the same bytes land everywhere; (3) it matches the proven Cloudflare/dqlite/libSQL design.
+- **Frame-sourced**: the record is the **physical WAL frame** SQLite produces, shipped *after* the engine has executed the statement. This is the deferred status §5 work and the thing worth building, for three reasons: (1) the database lives **on disk**, so it can be gigabytes and reads are zero-latency local (DO §4.2, entity §7); (2) replay is **byte-identical and deterministic regardless of SQL nondeterminism**, because you ship the resulting pages, not the statement that produced them: `random()` is resolved once on the writer and the same bytes land everywhere; (3) it matches the proven Cloudflare/dqlite/libSQL design.
 
 The rest of §3 is about frame-sourcing.
 
@@ -71,7 +71,7 @@ SQLite in WAL mode appends **frames** to a `-wal` file (source: SQLite *WAL-mode
 | salt-1, salt-2 | WAL "epoch" tags; salt-1 increments and salt-2 randomizes on each checkpoint/reset, invalidating stale frames |
 | checksum-1, checksum-2 | running Fibonacci-weighted checksum chained frame-to-frame; a reader stops at the first bad checksum, which is how SQLite finds the valid tail |
 
-A transaction is a run of frames ending in a commit frame. To apply received frames on a replica and obtain a byte-identical database, write each frame's page bytes to `(page# − 1) × page_size` and, on the commit frame, set the DB size to the stated page count. **This is precisely entity's `apply`, with the fold target moved from an in-memory value to a file**: position-addressed, idempotent, order-sensitive within the log. entity's per-`Seq`-slot idempotency (storage §4) and quorum read-repair (storage §5) work on these bytes unchanged; a late-committing timed-out frame simply reappears at its slot on recovery, exactly as an event would.
+A transaction is a run of frames ending in a commit frame. To apply received frames on a replica and obtain a byte-identical database, write each frame's page bytes to `(page# − 1) × page_size` and, on the commit frame, set the DB size to the stated page count. **This is precisely entity's `apply`, with the fold target moved from an in-memory value to a file**: position-addressed, idempotent, order-sensitive within the log. entity's per-`Seq`-slot idempotency (storage §5) and quorum read-repair (storage §6) work on these bytes unchanged; a late-committing timed-out frame simply reappears at its slot on recovery, exactly as an event would.
 
 ### 3.3 Interception in Rust, and where to capture the frame
 
@@ -99,19 +99,19 @@ The SQLite commit path slots onto entity's §6 protocol with no new concept:
    on NotLeader/Unavailable: discard, step down; the writer's local -wal is a stale cache (E3)
 ```
 
-The **input gate** (no second command while an append is in flight, entity §5) gives single-threaded SQLite exactly the serialization it wants; there is never a concurrent reader to observe a frame that has not yet quorum-committed. The subtlety to get right: SQLite considers a transaction committed **locally** once its commit frame hits the local `-wal`, *before* the quorum acks. The host must therefore hold the application-visible success (the output gate already does this) and, on `Unavailable`/`NotLeader`, **abandon the local commit**, stepping down and letting rehydration rebuild the DB from the quorum-durable head, rather than letting a subsequent read observe a locally-committed-but-not-replicated transaction. This is the byte-stream form of entity's existing "fold only after durability, fold only a contiguous head" rule (E1).
+The **input gate** (no second command while an append is in flight, entity §6) gives single-threaded SQLite exactly the serialization it wants; there is never a concurrent reader to observe a frame that has not yet quorum-committed. The subtlety to get right: SQLite considers a transaction committed **locally** once its commit frame hits the local `-wal`, *before* the quorum acks. The host must therefore hold the application-visible success (the output gate already does this) and, on `Unavailable`/`NotLeader`, **abandon the local commit**, stepping down and letting rehydration rebuild the DB from the quorum-durable head, rather than letting a subsequent read observe a locally-committed-but-not-replicated transaction. This is the byte-stream form of entity's existing "fold only after durability, fold only a contiguous head" rule (E1).
 
 ### 3.5 Checkpoint = snapshot; the 2×-size rule
 
-A SQLite **checkpoint** folds `-wal` pages back into the main DB file and restarts the WAL. That is the natural snapshot boundary: after a checkpoint the main DB file **is** a consistent snapshot of everything up to that point. This maps onto entity's `save_snapshot`/`load_snapshot` (storage §8), with the snapshot payload being the **checkpointed DB file** instead of a serialized `State`.
+A SQLite **checkpoint** folds `-wal` pages back into the main DB file and restarts the WAL. That is the natural snapshot boundary: after a checkpoint the main DB file **is** a consistent snapshot of everything up to that point. This maps onto entity's `save_snapshot`/`load_snapshot` (storage §9), with the snapshot payload being the **checkpointed DB file** instead of a serialized `State`.
 
-Cloudflare's snapshot cadence is the rule to copy (DO §4.2, source: Cloudflare SRS blog): **snapshot whenever the accumulated log since the last snapshot exceeds the live database size.** This bounds cold-start reconstruction to ≤ 2× the database size (one snapshot + at most one DB's worth of frames) and bounds total stored bytes to ~2× as well. It is also why Cloudflare caps a SQLite-backed object at 10 GB: beyond that, rehydration streams too much. entity's per-entity compaction (storage §8: a replica drops the record prefix a snapshot subsumes, advancing the per-entity base) already implements the "drop frames below the checkpoint" half; the missing half is the size-driven *trigger* and a snapshot payload that is a file, not a blob (§6.1).
+Cloudflare's snapshot cadence is the rule to copy (DO §4.2, source: Cloudflare SRS blog): **snapshot whenever the accumulated log since the last snapshot exceeds the live database size.** This bounds cold-start reconstruction to ≤ 2× the database size (one snapshot + at most one DB's worth of frames) and bounds total stored bytes to ~2× as well. It is also why Cloudflare caps a SQLite-backed object at 10 GB: beyond that, rehydration streams too much. entity's per-entity compaction (storage §9: a replica drops the record prefix a snapshot subsumes, advancing the per-entity base) already implements the "drop frames below the checkpoint" half; the missing half is the size-driven *trigger* and a snapshot payload that is a file, not a blob (§6.1).
 
 ---
 
 ## 4. The filesystem / workspace entity
 
-A workspace is a working directory: files the agent creates and edits, which today vanish on hibernation (agent §4.4). Making it durable is a *general* filesystem-over-a-log problem, and the cleanest published template is **JuiceFS's split** (source: JuiceFS architecture/internals docs).
+A workspace is a working directory: files the agent creates and edits, which today vanish on hibernation (agent §5.4). Making it durable is a *general* filesystem-over-a-log problem, and the cleanest published template is **JuiceFS's split** (source: JuiceFS architecture/internals docs).
 
 ### 4.1 The record: metadata op + immutable content block
 
@@ -132,7 +132,7 @@ The decisive property for entity: **the metadata is small and is the only thing 
 
 ### 4.3 Selective durability
 
-A workspace is not uniformly worth replicating. `node_modules`, `target/`, `.venv`, and build caches are large, regenerable, and churn-heavy; replicating their byte streams through a quorum is waste. A durable-workspace design should support **include/exclude rules** (a `.entityignore`, or an explicit "durable paths" set), replicating source and agent-authored artifacts while leaving regenerable trees to a non-durable local overlay that is rebuilt by re-running the build on rehydration. This keeps the record stream proportional to *meaningful* change, not disk churn, the filesystem analogue of not journaling scratch state. (This directly tempers the cost of reversing agent §4.4: durable does not have to mean *all* of the workspace.)
+A workspace is not uniformly worth replicating. `node_modules`, `target/`, `.venv`, and build caches are large, regenerable, and churn-heavy; replicating their byte streams through a quorum is waste. A durable-workspace design should support **include/exclude rules** (a `.entityignore`, or an explicit "durable paths" set), replicating source and agent-authored artifacts while leaving regenerable trees to a non-durable local overlay that is rebuilt by re-running the build on rehydration. This keeps the record stream proportional to *meaningful* change, not disk churn, the filesystem analogue of not journaling scratch state. (This directly tempers the cost of reversing agent §5.4: durable does not have to mean *all* of the workspace.)
 
 ---
 
@@ -143,7 +143,7 @@ The whole design rests on one line drawn cleanly:
 **Durable (must survive eviction and machine moves; lives in the quorum):**
 - the ordered **record stream** back to the last snapshot (WAL frames, or metadata ops + block refs), term-fenced and quorum-acked;
 - periodic **snapshots** (checkpointed DB file; metadata image + live-block manifest);
-- the **commit watermark** (highest quorum-acked `Seq`), already entity's recovered `head` (storage §8);
+- the **commit watermark** (highest quorum-acked `Seq`), already entity's recovered `head` (storage §9);
 - a **whole-state rolling checksum** **(inferred** as a desirable add; LiteFS carries one per transaction**)** so a rehydrated replica can *prove* byte-identity and detect split-brain before serving.
 
 **Rebuildable local cache (drop freely):**
@@ -151,9 +151,9 @@ The whole design rests on one line drawn cleanly:
 
 Two cases that entity treats alike today but which differ sharply in cost here, and this distinction is the practical heart of the user's question:
 
-- **Same-node idle hibernation (the easy win).** The entity leaves memory but the **leader does not move** (entity §7 idle eviction). The on-disk DB file / workspace directory can stay on local disk as a **warm cache**; reactivation needs only to confirm the head from the quorum and re-open the file, with no large transfer. *This is the case where "survive hibernation" is cheap and clearly worth doing.* It requires entity to let a hibernated entity leave its materialized artifact on disk rather than deleting it, keyed by entity name, and to validate it against the recovered head on re-open (discarding it if a higher term wrote past it while it slept).
+- **Same-node idle hibernation (the easy win).** The entity leaves memory but the **leader does not move** (entity §8 idle eviction). The on-disk DB file / workspace directory can stay on local disk as a **warm cache**; reactivation needs only to confirm the head from the quorum and re-open the file, with no large transfer. *This is the case where "survive hibernation" is cheap and clearly worth doing.* It requires entity to let a hibernated entity leave its materialized artifact on disk rather than deleting it, keyed by entity name, and to validate it against the recovered head on re-open (discarding it if a higher term wrote past it while it slept).
 
-- **Cross-node migration (the expensive case).** Leadership moves (storage §5.3), so the new leader has **none** of the entity's bytes locally and must rebuild from the quorum: download the latest snapshot, replay frames to the head. For a multi-GB entity this is real work, and it is why §4.2's lazy hydration matters and why §6.4's hibernation policy must differ from the 10s event-entity default.
+- **Cross-node migration (the expensive case).** Leadership moves (storage §6.3), so the new leader has **none** of the entity's bytes locally and must rebuild from the quorum: download the latest snapshot, replay frames to the head. For a multi-GB entity this is real work, and it is why §4.2's lazy hydration matters and why §6.4's hibernation policy must differ from the 10s event-entity default.
 
 Cloudflare accepts exactly this asymmetry (DO §5): cheap idle hibernation, more costly relocation, mitigated by lazy reconstruction and sticky placement. entity should too.
 
@@ -161,19 +161,19 @@ Cloudflare accepts exactly this asymmetry (DO §5): cheap idle hibernation, more
 
 ## 6. What this demands of the entity model (the delta)
 
-Everything in entity §5–storage §5 (gates, term fence, quorum append, head recovery, ordering, single-writer) carries over **unchanged**; that is the headline. The gaps are all in the *materialization and snapshot* seam, plus lifecycle tuning.
+Everything in entity §6–storage §6 (gates, term fence, quorum append, head recovery, ordering, single-writer) carries over **unchanged**; that is the headline. The gaps are all in the *materialization and snapshot* seam, plus lifecycle tuning.
 
 ### 6.1 The snapshot seam must stream, not pass a blob
 Today `save_snapshot(entity, at, state: Vec<u8>)` and `load_snapshot → Option<(Seq, Vec<u8>)>` move the entire snapshot as one in-memory buffer (`journal.rs`), and `host.rs` `rehydrate` folds events into one in-memory `self.state`. A checkpointed multi-GB DB file cannot be a `Vec<u8>`. The seam needs a **chunked/streamed snapshot** (write/read by ranges, or a content-addressed block list) and a snapshot store that can hold large objects (local file dir single-node; object store clustered). This is the single largest seam change.
 
 ### 6.2 The host needs a pluggable materializer
-`host.rs` hard-codes "fold record via `G::apply` into in-memory `State`." SQLite/File entities need the fold target to be **an on-disk artifact**: `apply_frame(file, frame)` / `apply_fs_op(tree, op)`. The clean shape is a **`Materializer` trait** the host drives instead of `G::apply` directly, with three implementations (in-memory fold = today's behavior; SQLite-file; FS-tree). The durability protocol (entity §5 steps 1–6) does not change; only the "fold AFTER durability" line dispatches through the materializer. The decide/apply split (entity §3.2) also loosens: a SQLite entity's "decision" is *execute the statement and capture the resulting frames*, which is an effectful local execution, not a pure `(state) → (events, reply)`. Worth spelling out as a distinct `EntityHandler` variant rather than bending the pure-fold one.
+`host.rs` hard-codes "fold record via `G::apply` into in-memory `State`." SQLite/File entities need the fold target to be **an on-disk artifact**: `apply_frame(file, frame)` / `apply_fs_op(tree, op)`. The clean shape is a **`Materializer` trait** the host drives instead of `G::apply` directly, with three implementations (in-memory fold = today's behavior; SQLite-file; FS-tree). The durability protocol (entity §6 steps 1–6) does not change; only the "fold AFTER durability" line dispatches through the materializer. The decide/apply split (entity §4.2) also loosens: a SQLite entity's "decision" is *execute the statement and capture the resulting frames*, which is an effectful local execution, not a pure `(state) → (events, reply)`. Worth spelling out as a distinct `EntityHandler` variant rather than bending the pure-fold one.
 
 ### 6.3 Determinism restated (E2 still holds, differently)
 Frame-sourcing makes E2 *easier*, not harder: replay applies bytes, so it is deterministic even when the originating SQL was not. The obligation moves to "the captured frame stream is the canonical effect", which the writer guarantees by capturing post-execution. Statement-sourcing (§3.1) keeps the old, stricter E2 (deterministic SQL only). The invariant catalogue should distinguish the two.
 
 ### 6.4 Hibernation policy must be size-aware
-entity's 10s `idle_after` default (entity §7) assumes reactivation is a cheap snapshot+replay. For a large SQLite/workspace entity that is false on migration. These entity types want: a **longer `idle_after`**, **on-disk artifact retention across same-node hibernation** (§5), **sticky placement** so leadership moves reluctantly, and **lazy hydration** (§4.2) so even a cold reactivation does not materialize the whole artifact up front. This is per-entity-type config, not a global change.
+entity's 10s `idle_after` default (entity §8) assumes reactivation is a cheap snapshot+replay. For a large SQLite/workspace entity that is false on migration. These entity types want: a **longer `idle_after`**, **on-disk artifact retention across same-node hibernation** (§5), **sticky placement** so leadership moves reluctantly, and **lazy hydration** (§4.2) so even a cold reactivation does not materialize the whole artifact up front. This is per-entity-type config, not a global change.
 
 ### 6.5 What does *not* change
 No new transport, no new consensus, no change to the shard/leader-election/shard-map machinery, no change to the term fence or quorum recovery, no change to the gateway/routing. The Replicator (`replicator.rs`, `store.rs`, `replica_store.rs`) ships and recovers opaque bytes already; SQLite frames and FS records *are* opaque bytes. This is the payoff of entity having kept the journal a content-blind seam.
@@ -184,7 +184,7 @@ No new transport, no new consensus, no change to the shard/leader-election/shard
 
 1. **Statement-sourced SQLite entity**: zero new substrate; validates the ergonomics of a SQLite-shaped entity and the deterministic-SQL constraint. A day's work over the existing model.
 2. **Streamed snapshot seam (§6.1)**: the prerequisite for any large-artifact entity; useful on its own (large event-entity snapshots).
-3. **`Materializer` trait + on-disk SQLite via custom VFS (dqlite pattern) on the `Local` tier**: frame capture, file replay, checkpoint-as-snapshot, all single-node, fully in the deterministic simulator (entity §11). Proves byte-identical replay with no clustering.
+3. **`Materializer` trait + on-disk SQLite via custom VFS (dqlite pattern) on the `Local` tier**: frame capture, file replay, checkpoint-as-snapshot, all single-node, fully in the deterministic simulator (entity §10). Proves byte-identical replay with no clustering.
 4. **`Quorum` tier**: frames ride the existing per-entity quorum append and read-repair recovery; this is where it becomes a true durable object. Most risk is in §6.4 lifecycle tuning, not the data path.
 5. **Filesystem entity (JuiceFS split) + lazy hydration + selective durability**: the workspace use case; reuses 2–4 with a different record interpreter and a content-addressed block store.
 6. **libSQL virtual WAL** as an alternative to the custom VFS if the cleaner `xFrames` feed proves worth the libSQL dependency.
@@ -196,14 +196,14 @@ No new transport, no new consensus, no change to the shard/leader-election/shard
 - **Snapshot of a live SQLite file under the single-writer gate.** A `VACUUM`/full checkpoint can be large and slow; does it block the input gate, or run against a frozen WAL generation while writes continue? Cloudflare snapshots asynchronously off the write path; entity needs the same, which interacts with §6.1's streaming seam.
 - **Block store ownership for the FS entity.** Are immutable data blocks per-entity (replicated through its quorum) or in a cluster-shared content-addressed store referenced by hash? Shared is far cheaper for large workspaces but adds a second durability domain off the entity's quorum; its GC and its own replication need a design.
 - **Rolling whole-state checksum.** Worth adding to entity's recovery (E14) generally, or only for byte-stream entities? It is cheap insurance against a silently divergent replica that quorum-intersection alone would not catch if a record were misapplied.
-- **Reversing agent §4.4 selectively.** With a durable workspace available, does the agent runtime keep `WorkspaceReset` for the non-durable (excluded) subtree and drop it for the durable subtree? The two coexist; the record stream should say which paths survived.
+- **Reversing agent §5.4 selectively.** With a durable workspace available, does the agent runtime keep `WorkspaceReset` for the non-durable (excluded) subtree and drop it for the durable subtree? The two coexist; the record stream should say which paths survived.
 - **Is dqlite's in-memory-VFS model or an on-disk-VFS model right?** dqlite keeps DB+WAL in memory (fast, size-capped); a true durable object wants on-disk (large, zero-latency local reads). The VFS work differs; §3.3 leans on-disk but this needs prototyping.
 
 ---
 
 ## Sources
 
-- entity substrate: [`entity-spec.md`](../docs/entity-spec.md) §5–storage §8, entity §13; agent workspace stance: [`agent-spec.md`](../docs/agent-spec.md) §4.1, §4.4, §5.2; Durable Objects lessons: [`durable-objects.md`](durable-objects.md).
+- entity substrate: [`entity-spec.md`](../docs/entity-spec.md) §6–storage §9, status §5; agent workspace stance: [`agent-spec.md`](../docs/agent-spec.md) §5.1, §5.4, §7.1; Durable Objects lessons: [`durable-objects.md`](durable-objects.md).
 - Cloudflare, *Zero-latency SQLite storage in every Durable Object*: https://blog.cloudflare.com/sqlite-in-durable-objects/ (SRS, WAL-frame shipping, 3-of-5 quorum, snapshot-when-log≥db-size, 16 MB/10 s batching, 30-day PITR, 10 GB cap).
 - SQLite, *WAL-mode File Format*: https://sqlite.org/walformat.html ; *Database File Format*: https://sqlite.org/fileformat.html ; *WAL hook*: https://sqlite.org/c3ref/wal_hook.html
 - libSQL virtual WAL: https://github.com/tursodatabase/libsql/blob/main/libsql-sqlite3/doc/libsql_extensions.md and `wal.h`; Turso sync (physical pages, byte-identical): https://docs.turso.tech/libsql

@@ -1,11 +1,11 @@
-//! The disk facet (spec facets §4.4): a raw block image per entity.
+//! The disk facet (spec facets §5.4): a raw block image per entity.
 //!
-//! A **physical facet** (facets §3) on the SQL facet's seam (facets §4.3), with **dirty
+//! A **physical facet** (facets §4) on the SQL facet's seam (facets §5.3), with **dirty
 //! blocks** for WAL frames and a **raw image** for the database file: a
 //! fixed-size disk a microVM mounts as its rootfs. A session's dirty set can
 //! run to gigabytes, far past the replicator's message bounds, so block bytes
 //! never ride a record: a **capture** `put`s each dirty block as a
-//! content-addressed blob (storage §9) and stages exactly one record, a **capture
+//! content-addressed blob (storage §10) and stages exactly one record, a **capture
 //! manifest** of `(block index, BlobId)` pairs, joining the command's atomic
 //! batch (E19); one capture, one record, one commit, so a crash can never
 //! commit part of one.
@@ -13,18 +13,18 @@
 //! **Capture rides a command.** The guest writes the image *between* commands,
 //! so nothing captures implicitly at [`Facet::seal`]: the consumer drives every
 //! capture through [`DiskHandle::capture`] inside an explicit command; the
-//! machine's checkpoint alarm and quiescent points (machine §4). Between
+//! machine's checkpoint alarm and quiescent points (machine §6). Between
 //! captures the guest's writes live only in the activation-local image, a
 //! rebuildable cache (§1); a non-committed outcome discards it (E20).
 //!
-//! **Dirty tracking is content-hash pruning** (facets §4.4's reference mechanism):
+//! **Dirty tracking is content-hash pruning** (facets §5.4's reference mechanism):
 //! the committed form keeps a per-block [`BlobId`] index, and a capture scans
 //! the image, diffing block hashes against it, the mismatches *are* the dirty
 //! set. The tracking has to be the facet's own: Firecracker's diff snapshots track
 //! guest *memory* and expose no block-device write bitmap, so the VMM cannot say
 //! which blocks changed. The scan is unprivileged and deterministic under
 //! simulation, at the cost of a full image read per capture. Not implemented: the
-//! copy-on-write overlay whose allocated extents would be the dirty set (§13).
+//! copy-on-write overlay whose allocated extents would be the dirty set (status §7).
 //!
 //! **Checkpoints upload nothing.** The composite-snapshot contribution is the
 //! block index serialized as a full-coverage manifest: every referenced blob
@@ -63,23 +63,23 @@ use crate::facet_blobs::io_facet_err;
 use crate::facet_blobs::put_pulled;
 
 /// Capture/checkpoint block size: 1 MiB, content-addressed, so an unchanged
-/// region hashes to a blob already stored (incremental by dedup, facets §4.4).
+/// region hashes to a blob already stored (incremental by dedup, facets §5.4).
 const BLOCK_BYTES: usize = 1 << 20;
 
-/// The most bytes one image may hold (spec facets §4.4: the image is fixed-size, a
+/// The most bytes one image may hold (spec facets §5.4: the image is fixed-size, a
 /// configured maximum, so a guest cannot make the host materialize an
 /// unmetered allocation). Bounds [`DiskHandle::import`] and every folded
 /// manifest.
 pub const MAX_IMAGE_BYTES: u64 = 16 << 30;
 
-/// The disk facet marker (spec facets §4.4): declare `type Facets = (Disk, …)` and
+/// The disk facet marker (spec facets §5.4): declare `type Facets = (Disk, …)` and
 /// reach the image through [`EntityCtx::disk`](crate::EntityCtx::disk).
 pub struct Disk;
 
 impl Sealed for Disk {}
 
 /// A disk operation failed: an *application-level* outcome the handler maps
-/// into its reply, distinct from a durability failure (§9).
+/// into its reply, distinct from a durability failure (§3.2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskError(pub String);
 
@@ -99,7 +99,7 @@ pub struct DiskCaptureStats {
     pub bytes: u64,
 }
 
-/// The capture manifest (spec facets §4.4): the facet's record payload and its
+/// The capture manifest (spec facets §5.4): the facet's record payload and its
 /// composite-snapshot contribution. Indices and ids, never bytes: the block
 /// bytes live in the entity's blob area. A capture record carries the dirty
 /// subset; the checkpoint contribution carries full coverage.
@@ -114,7 +114,7 @@ struct DiskManifest {
 }
 
 impl DiskManifest {
-    /// Reject a manifest that breaches the facet's bounds (spec facets §4.4): a
+    /// Reject a manifest that breaches the facet's bounds (spec facets §5.4): a
     /// hostile or corrupt record cannot make the host materialize past the
     /// fixed maximum, place a block outside the image, or mix block sizes.
     fn validate(&self) -> Result<(), FacetError> {
@@ -191,7 +191,7 @@ struct DiskState {
     pending: Vec<DiskManifest>,
 }
 
-/// How much of the image a manifest accounts for (facets §4.4): what
+/// How much of the image a manifest accounts for (facets §5.4): what
 /// [`DiskState::apply`] needs to know to fold it, and the one difference between
 /// an import and a capture on that path.
 #[derive(Clone, Copy, Debug)]
@@ -221,7 +221,7 @@ impl DiskState {
     }
 
     /// The committed block index as a full-coverage manifest: the snapshot
-    /// contribution (facets §4.4) and the basis of [`content_digest`](Self::content_digest).
+    /// contribution (facets §5.4) and the basis of [`content_digest`](Self::content_digest).
     fn manifest(&self) -> DiskManifest {
         DiskManifest {
             image_bytes: self.image_bytes,
@@ -310,7 +310,7 @@ impl DiskForm {
 }
 
 /// The per-command stage: the one capture manifest this command staged, if a
-/// [`DiskHandle::capture`] or [`DiskHandle::import`] ran (facets §4.4: one capture,
+/// [`DiskHandle::capture`] or [`DiskHandle::import`] ran (facets §5.4: one capture,
 /// one record).
 #[derive(Default)]
 pub struct DiskStage {
@@ -336,7 +336,7 @@ impl Facet for Disk {
         Ok(())
     }
 
-    // `seal` keeps the default no-op: nothing captures implicitly (facets §4.4;
+    // `seal` keeps the default no-op: nothing captures implicitly (facets §5.4;
     // the guest writes between commands, so only the explicit capture command
     // stages, and a lifecycle boundary runs that command to completion first).
 
@@ -345,7 +345,7 @@ impl Facet for Disk {
     }
 
     fn fold(form: &mut DiskForm, payload: &[u8]) -> Result<(), FacetError> {
-        // Replay only: the live path skips physical facets (facets §3); the
+        // Replay only: the live path skips physical facets (facets §4); the
         // capture that staged this record already mutated the materialization.
         // Decode and queue (pure, F1 on the recorded bytes); `rehydrate`
         // validates and applies each pending manifest before the first
@@ -373,7 +373,7 @@ impl Facet for Disk {
 
     async fn snapshot(form: &DiskForm, _env: &FacetEnv) -> Result<Vec<u8>, FacetError> {
         // The committed block index as a full-coverage manifest, no scan and
-        // no uploads (facets §4.4). `None` entries (never covered by a manifest) are
+        // no uploads (facets §5.4). `None` entries (never covered by a manifest) are
         // all-zero regions and restore as such.
         let manifest = form.image()?.state().manifest();
         Ok(crate::facet::encode_payload(&manifest))
@@ -406,14 +406,14 @@ impl Facet for Disk {
     }
 }
 
-/// The handler-facing disk accessor (spec facets §4.4), obtained from
+/// The handler-facing disk accessor (spec facets §5.4), obtained from
 /// [`EntityCtx::disk`](crate::EntityCtx::disk). [`capture`](DiskHandle::capture)
 /// and [`import`](DiskHandle::import) stage one manifest into the command's
 /// atomic batch (E19), or are discarded with the materialization (E20).
 ///
 /// **Dirtiness is the consumer's to track.** The host observes guest writes
 /// only at a capture's scan, so "the image holds uncaptured writes" is a
-/// conservative activation-local flag the consumer owns (machine §4: set it
+/// conservative activation-local flag the consumer owns (machine §6: set it
 /// whenever the guest has run since the last committed capture) and consults
 /// in `can_hibernate`, so the idle path cannot strand a dirty image.
 pub struct DiskHandle<'a, G: Entity, I>
@@ -425,7 +425,7 @@ where
 }
 
 impl<G: Entity> EntityCtx<G> {
-    /// The entity's raw block image (spec facets §4.4). Compiles exactly when the
+    /// The entity's raw block image (spec facets §5.4). Compiles exactly when the
     /// entity declares the [`Disk`] facet (`type Facets = (Disk, …)`): the E10
     /// discipline applied to storage. Capture and import are valid only inside
     /// a command handler: the capture command is the only durability window,
@@ -447,7 +447,7 @@ where
     G::Facets: HasFacet<Disk, I>,
 {
     /// The image file's path: what the consumer hands its microVM as the
-    /// drive's backing file (machine §2.5). The file exists once an import has
+    /// drive's backing file (machine §3.2). The file exists once an import has
     /// committed; before that it is absent (a zero-byte disk).
     pub fn path(&self) -> Result<PathBuf, DiskError> {
         self.ctx
@@ -482,12 +482,12 @@ where
     }
 
     /// Provision the image from `src`, staging one **full-coverage** manifest:
-    /// the base image *is* a capture (facets §4.4), so a fresh machine boots against
+    /// the base image *is* a capture (facets §5.4), so a fresh machine boots against
     /// content-addressed base blocks and diverges by dirty blocks. Every block is
     /// put into **this** entity's blob area, so dedup is within the entity: two
-    /// entities imported from one base each store its blocks (machine §7 defers
+    /// entities imported from one base each store its blocks (status §11 defers
     /// fleet-wide sharing). Replaces any prior image wholesale (also the
-    /// restore-from-checkpoint path, machine §7). One capture or import per command.
+    /// restore-from-checkpoint path, status §11). One capture or import per command.
     pub async fn import(&self, src: &std::path::Path) -> Result<DiskCaptureStats, DiskError> {
         let (path, image) = self.begin_staged_op()?;
         let src_bytes = fs::metadata(src).map_err(io_disk_err)?.len();
@@ -502,7 +502,7 @@ where
         // only as one lands, so memory stays bounded by that many blocks (not by
         // the image, which may be `MAX_IMAGE_BYTES`) while a `Quorum` deployment
         // overlaps the rounds instead of paying one end to end per block. Every
-        // put precedes staging (plan, then stage, facets §3): a failed put stages
+        // put precedes staging (plan, then stage, facets §4): a failed put stages
         // nothing, and blobs orphaned by a failed commit are unrooted and swept by
         // the host's unioned GC.
         //
@@ -574,12 +574,12 @@ where
         Ok(stats)
     }
 
-    /// The capture command's body (facets §4.4): scan the image at a quiescent point
-    /// (the consumer pauses or stops the guest first, machine §4; the host
+    /// The capture command's body (facets §5.4): scan the image at a quiescent point
+    /// (the consumer pauses or stops the guest first, machine §6; the host
     /// never captures a running guest's concurrently-written image), diff
     /// block hashes against the committed index, `put` the dirty blocks, and
     /// stage one manifest. A clean image stages nothing and the command rides
-    /// the §6 read path. One capture or import per command.
+    /// the §7 read path. One capture or import per command.
     pub async fn capture(&self) -> Result<DiskCaptureStats, DiskError> {
         let (path, image) = self.begin_staged_op()?;
         let (image_bytes, index) = {
@@ -594,7 +594,7 @@ where
         }
         let live = fs::metadata(&path).map_err(io_disk_err)?.len();
         if live != image_bytes {
-            // The image is fixed-size (facets §4.4): a block device never resizes,
+            // The image is fixed-size (facets §5.4): a block device never resizes,
             // so a length change means the file was tampered with out of band.
             return Err(DiskError(format!(
                 "image is {live} bytes, committed size is {image_bytes}"
@@ -695,13 +695,13 @@ where
             .with_overlay::<Disk, I, _>(|form, stage| {
                 let Some(stage) = stage else {
                     return Err(DiskError(
-                        "disk captures are only valid inside a command handler (spec facets §4.4)"
+                        "disk captures are only valid inside a command handler (spec facets §5.4)"
                             .into(),
                     ));
                 };
                 if stage.manifest.is_some() {
                     return Err(DiskError(
-                        "one capture or import per command (spec facets §4.4)".into(),
+                        "one capture or import per command (spec facets §5.4)".into(),
                     ));
                 }
                 let image = form.image().map_err(|e| DiskError(e.to_string()))?;
@@ -728,7 +728,7 @@ fn io_disk_err(e: std::io::Error) -> DiskError {
 
 /// Carry a block transfer's failure out as the handler's application-level
 /// outcome. The shared blob helpers speak [`FacetError`] because most of their
-/// callers are facet hooks; a capture and an import are commands, and facets §4.4 has
+/// callers are facet hooks; a capture and an import are commands, and facets §5.4 has
 /// them reply rather than fail the activation.
 fn facet_disk_err(e: FacetError) -> DiskError {
     DiskError(e.0)

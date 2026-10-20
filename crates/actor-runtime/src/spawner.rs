@@ -1,4 +1,4 @@
-//! The production [`Spawner`]: tasks run on a tokio runtime (spec §2.12.1).
+//! The production [`Spawner`]: tasks run on a tokio runtime (spec §11.1).
 //!
 //! Holds a [`tokio::runtime::Handle`] rather than the runtime itself, so the
 //! spawner clones freely while the runtime is owned elsewhere (typically by

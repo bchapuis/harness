@@ -1,8 +1,8 @@
-//! The facet seam (spec facets §3): one substrate, many storage features.
+//! The facet seam (spec facets §4): one substrate, many storage features.
 //!
 //! A **facet** is a durable storage feature of one entity defined entirely as an
 //! interpretation over the two storage primitives: ordered, term-fenced records
-//! (storage §4) and immutable content-addressed blobs (storage §9). It gets no replication
+//! (storage §5) and immutable content-addressed blobs (storage §10). It gets no replication
 //! path, no fence, and no recovery protocol of its own; those exist once, in the
 //! substrate.
 //!
@@ -11,28 +11,30 @@
 //! entity's own event fold. Tags run to `MAX_TAG`, the high bit being reserved as
 //! the mark of another envelope version (`RECORD`). All records a command
 //! produces (its events plus every facet's staged operations) append as one
-//! atomic batch (§5), so a command that touches state, the KV map, and the
+//! atomic batch (§6), so a command that touches state, the KV map, and the
 //! filesystem commits everywhere or nowhere. Replay dispatches each record to its
 //! facet by tag; an unrecognized tag aborts activation rather than being skipped,
 //! so an entity's history is never silently misread by a runtime missing one of its
 //! facets.
 //!
-//! **Two facet classes (facets §3).** A *logical* facet folds: its records are
+//! **Two facet classes (facets §4).** A *logical* facet folds: its records are
 //! semantic operations applied by a pure, deterministic [`Facet::fold`] (F1), on
 //! replay and after a live commit alike. A *physical* facet
 //! (`PHYSICAL = true`) materializes: its live form mutates locally during the
 //! command (inside [`Facet::begin`]/[`Facet::seal`]) and its records are captured
 //! deltas, so the live path skips the fold and a non-committed outcome
 //! [`Facet::discard`]s the materialization outright (E20); the form is a
-//! rebuildable cache (§1).
+//! rebuildable cache (§1). Running the form ahead of durability is safe because
+//! the host's gates hide it: no other command runs during the append, the reply
+//! is held until the commit, and a failed outcome destroys the only tainted copy.
 //!
 //! **Staging.** Handlers write through per-command stages surfaced by the
 //! [`EntityCtx`](crate::EntityCtx) accessors; the host arms a fresh stage before the
 //! handler runs and drains it into the command's tagged records afterwards. A
-//! stage dropped on failure was never observable (§3.2: committed state changes
+//! stage dropped on failure was never observable (§4.2: committed state changes
 //! only at the commit point).
 //!
-//! The seam is **public and sealed** (facets §3): [`Facet`], [`FacetSet`], and
+//! The seam is **public and sealed** (facets §4): [`Facet`], [`FacetSet`], and
 //! [`HasFacet`] are published, but only this crate can implement them, so the
 //! built-in facets are the only ones. An entity composes them by declaring
 //! `type Facets = (Kv, Ws);`: a tuple, giving each accessor a compile-time
@@ -40,7 +42,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
-// The concrete facets (spec facets §4.1, §4.2-§4.6), re-exported so the family is one
+// The concrete facets (spec facets §5.1, §5.2-§5.6), re-exported so the family is one
 // name away rather than scattered across the crate root. Each is an independent
 // leaf: it depends on this module and on blobs, never on another facet.
 pub use crate::alarm::Alarm;
@@ -91,10 +93,10 @@ use serde::Serialize;
 use crate::blobs::PendingRoots;
 use crate::facet_blobs::RootSet;
 
-/// The record tag of facet 0: the entity's own event fold (spec facets §3).
+/// The record tag of facet 0: the entity's own event fold (spec facets §4).
 pub(crate) const EVENT_TAG: u8 = 0;
 
-/// The record envelope's format (spec storage §8, compatibility spec §4).
+/// The record envelope's format (spec storage §9, compatibility spec §4).
 ///
 /// Version 1 is `[tag][payload]` with `tag <= MAX_TAG`, so the stamp costs **no
 /// bytes on disk**: the format is marked through the tag space rather than through
@@ -139,7 +141,7 @@ impl std::fmt::Display for FacetError {
 impl std::error::Error for FacetError {}
 
 /// Prefix `payload` with its facet `tag`: the record envelope every journaled
-/// record wears (spec facets §3).
+/// record wears (spec facets §4).
 ///
 /// Panics on a tag above `MAX_TAG`, mirroring the refusal in [`split_record`]:
 /// the high bit means "another envelope version" to every reader, so a record
@@ -162,7 +164,7 @@ pub(crate) fn split_record(bytes: &[u8]) -> Result<(u8, &[u8]), FacetError> {
         .split_first()
         .ok_or_else(|| FacetError("empty record (missing facet tag)".into()))?;
     if lead > MAX_TAG {
-        // The high bit marks another envelope version (storage §8), which version 1 never
+        // The high bit marks another envelope version (storage §9), which version 1 never
         // sets, so these bytes come from another build. Refuse by name:
         // "unrecognized facet tag 129" would send an operator hunting for a
         // missing facet, when the fault is a version skew at the other end.
@@ -176,7 +178,7 @@ pub(crate) fn split_record(bytes: &[u8]) -> Result<(u8, &[u8]), FacetError> {
 }
 
 /// Postcard-encode a facet payload: an op, a delta, a manifest, a form. Facet
-/// payloads are runtime-internal plain owned data (facets §3), so encoding cannot
+/// payloads are runtime-internal plain owned data (facets §4), so encoding cannot
 /// fail.
 pub(crate) fn encode_payload<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("facet payload postcard encoding is infallible")
@@ -191,7 +193,7 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
     postcard::from_bytes(bytes).map_err(|e| FacetError(format!("{what}: {e}")))
 }
 
-/// The composite snapshot's stamp (spec storage §8, compatibility spec §4).
+/// The composite snapshot's stamp (spec storage §9, compatibility spec §4).
 ///
 /// A snapshot gets a full magic and version rather than the record envelope's
 /// reserved bit (`RECORD`): `postcard` gives its leading bytes no structure a
@@ -201,7 +203,7 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
 pub(crate) const SNAPSHOT: compat::Stamp =
     compat::Stamp::new(b"GRSNAP", compat::Format::new("entity.snapshot", 1));
 
-/// The composite snapshot's on-disk body (spec facets §3), inside the [`SNAPSHOT`]
+/// The composite snapshot's on-disk body (spec facets §4), inside the [`SNAPSHOT`]
 /// stamp.
 #[derive(Serialize, Deserialize)]
 struct SnapshotBody {
@@ -209,7 +211,7 @@ struct SnapshotBody {
     ///
     /// Recorded because facet 0's contribution is the only part of a snapshot that
     /// is **not** codec-independent: it is a user type encoded with the
-    /// deployment's codec (§3.1, §4), while facet payloads are deliberately
+    /// deployment's codec (§4.1, §5), while facet payloads are deliberately
     /// `postcard`. Without it, a codec change reads as a corrupt entity.
     codec: String,
     /// Facet 0's state, inline or as the manifest of its chunks.
@@ -218,12 +220,12 @@ struct SnapshotBody {
     facets: Vec<(u8, Vec<u8>)>,
 }
 
-/// Where facet 0's encoded `State` lives in a snapshot (spec facets §3), as the
+/// Where facet 0's encoded `State` lives in a snapshot (spec facets §4), as the
 /// snapshot body carries it.
 ///
 /// Small states ride inline in the snapshot record, as they always have. Past
 /// [`SNAPSHOT_INLINE_MAX`] the state is cut into content-defined chunks ([`crate::cdc`]),
-/// stored in the entity's blob area (storage §9), and the record carries only their ids,
+/// stored in the entity's blob area (storage §10), and the record carries only their ids,
 /// so a snapshot of an entity that grew by one turn puts one or two chunks instead of
 /// broadcasting the whole folded transcript to every replica (`docs/hardware-envelope.md`
 /// §3.9).
@@ -321,13 +323,13 @@ impl StatePayload {
     }
 }
 
-/// The composite snapshot (spec facets §3): facet 0's codec-encoded `State` plus one
+/// The composite snapshot (spec facets §4): facet 0's codec-encoded `State` plus one
 /// contribution per declared facet, all at one `Seq`. E4 applies to the composite
 /// as a whole. Encoded with `postcard`: facet payloads and this envelope are
 /// runtime-internal, deliberately independent of the deployment's user codec.
 pub(crate) struct CompositeSnapshot {
     /// Facet 0's contribution: the entity's `State`, encoded with the system codec
-    /// (it is a user type; the codec is the system's, §3.1), and carried either
+    /// (it is a user type; the codec is the system's, §4.1), and carried either
     /// inline or by blob ([`StatePayload`]).
     pub state: StatePayload,
     /// One `(tag, contribution)` per declared facet, in facet-set order.
@@ -364,7 +366,7 @@ impl CompositeSnapshot {
         if body.codec != codec {
             return Err(FacetError(format!(
                 "entity.snapshot: encoded with codec '{}', but this node runs '{codec}': \
-                 facet 0's state is codec-encoded (§3.1), so it cannot be decoded here",
+                 facet 0's state is codec-encoded (§4.1), so it cannot be decoded here",
                 body.codec
             )));
         }
@@ -375,11 +377,13 @@ impl CompositeSnapshot {
     }
 }
 
-/// What a facet's snapshot/restore work may reach (spec facets §3): the entity's
-/// colocated blob area (bulk snapshot bytes, storage §9), the entity's name, and a
-/// node-local scratch directory for **physical** materializations (facets §4.3; the
+/// What a facet's snapshot/restore work may reach (spec facets §4): the entity's
+/// colocated blob area (bulk snapshot bytes, storage §10), the entity's name, and a
+/// node-local scratch directory for **physical** materializations (facets §5.3; the
 /// SQL facet's database file lives under it, keyed by the entity). The directory
-/// holds rebuildable caches only, never a source of truth (§1).
+/// holds rebuildable caches only, never a source of truth (§1). The host joins the
+/// node's id onto the configured scratch directory, so two nodes in one process (a
+/// simulated cluster, across a failover) never share a materialization path.
 pub struct FacetEnv {
     blobs: EntityBlobs,
     dir: std::path::PathBuf,
@@ -408,12 +412,12 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-/// One durable storage feature of an entity (spec facets §3). **Sealed**: the built-in
-/// facets are the only implementations (the KV map facets §4.2, the workspace filesystem
-/// facets §4.1, the SQL database facets §4.3, the disk image facets §4.4, the alarm facets §4.5, the step
-/// memo facets §4.6); third-party facets are a deferred policy decision (§13).
+/// One durable storage feature of an entity (spec facets §3.1, §4). **Sealed**: the
+/// built-in facets are the only implementations (facets §5: the KV map, the workspace
+/// filesystem, the SQL database, the disk image, the alarm, and the step memo);
+/// third-party facets are a deferred policy decision (status §7).
 ///
-/// The obligations are the facet contract (facets §3): [`fold`](Facet::fold) is
+/// The obligations are the facet contract (facets §4): [`fold`](Facet::fold) is
 /// deterministic (**F1**), [`restore`](Facet::restore)-then-replay equals the full
 /// fold (**F2**), [`roots`](Facet::roots) covers every blob the restored form can
 /// reference (**F3**), and a physical facet survives [`discard`](Facet::discard)
@@ -423,7 +427,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// of its composite-snapshot contribution. Never reused across facets.
     const TAG: u8;
 
-    /// Whether this facet materializes (a physical facet, facets §3): its live form
+    /// Whether this facet materializes (a physical facet, facets §4): its live form
     /// mutates during the command, so the live path skips [`fold`](Facet::fold)
     /// and a failed commit [`discard`](Facet::discard)s the form (E20).
     const PHYSICAL: bool = false;
@@ -448,13 +452,13 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
 
     /// Called after the handler returns, before the append: a physical facet
     /// commits its local transaction and captures the delta into the stage
-    /// (facets §4.3). Logical facets need nothing.
+    /// (facets §5.3). Logical facets need nothing.
     fn seal(_form: &mut Self::Form, _stage: &mut Self::Stage) -> Result<(), FacetError> {
         Ok(())
     }
 
     /// Drain the stage into record payloads, in order. An empty result means the
-    /// facet contributes nothing to this command's batch (a read, §6).
+    /// facet contributes nothing to this command's batch (a read, §7).
     fn drain(stage: Self::Stage) -> Vec<Vec<u8>>;
 
     /// Interpret one committed record into the form. MUST be deterministic
@@ -463,7 +467,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     fn fold(form: &mut Self::Form, payload: &[u8]) -> Result<(), FacetError>;
 
     /// Resolve blob-referencing replayed records into the materialization
-    /// (spec facets §4.4). Called once by the host after restore + replay, before the
+    /// (spec facets §5.4). Called once by the host after restore + replay, before the
     /// first command: a facet whose records carry blob ids rather than bytes
     /// (the disk facet's capture manifests) fetches and applies them here, so
     /// [`fold`](Facet::fold) stays synchronous and pure (**F1** holds on the
@@ -482,9 +486,9 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// local materialization, which the next activation rebuilds.
     fn discard(_form: &mut Self::Form) {}
 
-    /// The facet's composite-snapshot contribution at the committed head (facets §3).
+    /// The facet's composite-snapshot contribution at the committed head (facets §4).
     /// Bulk bytes go to `blobs`; the returned payload holds manifests of ids,
-    /// keeping the snapshot record small (facets §4.3).
+    /// keeping the snapshot record small (facets §5.3).
     fn snapshot(
         form: &Self::Form,
         env: &FacetEnv,
@@ -499,13 +503,13 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Form, FacetError>> + Send;
 
     /// Every blob the form references (**F3**): the facet's contribution to the
-    /// entity's unioned live set (facets §3). A facet never sweeps: the one sweep above
+    /// entity's unioned live set (facets §4). A facet never sweeps: the one sweep above
     /// the seam is [`EntityBlobs::gc`](crate::facet::EntityBlobs::gc), which the
     /// application calls with its own roots, over a handle the host built with this
     /// union folded in, so one facet's GC can never drop another's.
     fn roots(form: &Self::Form) -> BTreeSet<BlobId>;
 
-    /// The runtime hook for durable alarms (spec facets §4.5): the pending deadline this
+    /// The runtime hook for durable alarms (spec facets §5.5): the pending deadline this
     /// facet holds, in nanoseconds since the clock epoch, or `None`. Only the
     /// [`Alarm`] facet returns a deadline; every other facet keeps
     /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
@@ -520,7 +524,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
         None
     }
 
-    /// Stage the consumption of a fired alarm (spec facets §4.5): before invoking
+    /// Stage the consumption of a fired alarm (spec facets §5.5): before invoking
     /// `on_alarm`, the host stages a cancel so a fired alarm clears atomically
     /// unless the handler re-arms it (last write wins in the shared stage, the DO
     /// consume-on-fire semantic). Only the [`Alarm`] facet acts;
@@ -528,7 +532,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     fn stage_clear_alarm(_stage: &mut Self::Stage) {}
 }
 
-/// An entity's declared facet set (spec facets §3): the unit tuple `()` (no facets) or
+/// An entity's declared facet set (spec facets §4): the unit tuple `()` (no facets) or
 /// a tuple of distinct [`Facet`]s, e.g. `(Kv, Ws)`. **Sealed**: implemented
 /// for tuples up to arity 4, in-crate only.
 ///
@@ -557,7 +561,7 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
     /// Fold one committed record, dispatched by tag. On **replay**
     /// (`live = false`) every facet folds, physical included (rebuilding its
     /// materialization from deltas). On the **live** path a physical facet
-    /// skips: its form already mutated locally (facets §4.3); folding again would
+    /// skips: its form already mutated locally (facets §5.3); folding again would
     /// double-apply. Logical facets fold identically on both paths (F1). An
     /// unclaimed tag is the E19 abort.
     fn fold(forms: &mut Self::Forms, tag: u8, payload: &[u8], live: bool)
@@ -586,15 +590,15 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
         env: &FacetEnv,
     ) -> impl Future<Output = Result<Self::Forms, FacetError>> + Send;
 
-    /// The union of every facet's blob roots (facets §3).
+    /// The union of every facet's blob roots (facets §4).
     fn roots(forms: &Self::Forms) -> BTreeSet<BlobId>;
 
-    /// The pending alarm deadline of whichever facet holds one (spec facets §4.5), or
+    /// The pending alarm deadline of whichever facet holds one (spec facets §5.5), or
     /// `None`. At most one facet in a set is the [`Alarm`] facet, so
     /// the first non-`None` is the entity's single alarm.
     fn alarm_due(forms: &Self::Forms) -> Option<u64>;
 
-    /// Stage the consumption of a fired alarm across the set (spec facets §4.5). Only the
+    /// Stage the consumption of a fired alarm across the set (spec facets §5.5). Only the
     /// [`Alarm`] facet's stage is touched.
     fn stage_clear_alarm(stages: &mut Self::Stages);
 }
@@ -769,7 +773,7 @@ pub struct Here(());
 pub struct There<I>(PhantomData<I>);
 
 /// A compile-time containment proof: the facet set holds `F` at position `I`
-/// (spec facets §3). The index parameter exists only so the per-position impls do
+/// (spec facets §4). The index parameter exists only so the per-position impls do
 /// not overlap; call sites leave it to inference: `ctx.kv()` compiles exactly
 /// when the entity's set contains [`Kv`] once (the E10 discipline).
 pub trait HasFacet<F: Facet, I>: FacetSet {
@@ -811,7 +815,7 @@ has_facet!((A, B, C, D), D, 3, There<There<There<Here>>>);
 /// and are **never held across an await**: async work (snapshot's blob puts)
 /// operates on a [`forms`](FacetCell::forms) clone. `stages` is `Some` only while
 /// a command is being decided; a facet write outside a command has no stage and
-/// panics (staging is command-scoped, §3.2).
+/// panics (staging is command-scoped, §4.2).
 pub(crate) struct FacetCell<FS: FacetSet> {
     forms: Mutex<FS::Forms>,
     stages: Mutex<Option<FS::Stages>>,
@@ -877,7 +881,7 @@ impl<FS: FacetSet> FacetCell<FS> {
         Ok(())
     }
 
-    /// Close the command's stage (physical facets commit-and-capture, facets §4.3) and
+    /// Close the command's stage (physical facets commit-and-capture, facets §5.3) and
     /// drain it into `(tag, payload)` records. Always disarms the stage, so a
     /// facet write outside a command can never leak into a later batch.
     pub(crate) fn seal_and_drain(&self) -> Result<Vec<(u8, Vec<u8>)>, FacetError> {
@@ -900,13 +904,13 @@ impl<FS: FacetSet> FacetCell<FS> {
         FS::fold(&mut forms, tag, payload, false)
     }
 
-    /// Replace the forms wholesale (snapshot restore, storage §8).
+    /// Replace the forms wholesale (snapshot restore, storage §9).
     pub(crate) fn install(&self, forms: FS::Forms) {
         *self.forms.lock().expect("facet forms lock") = forms;
     }
 
     /// Resolve blob-referencing replayed records after restore + replay
-    /// ([`Facet::rehydrate`], spec facets §4.4). Runs against a forms clone (cheap
+    /// ([`Facet::rehydrate`], spec facets §5.4). Runs against a forms clone (cheap
     /// `Arc`d handles sharing the same materializations), so no lock spans the
     /// blob fetches.
     pub(crate) async fn rehydrate(&self, env: &FacetEnv) -> Result<(), FacetError> {
@@ -919,13 +923,13 @@ impl<FS: FacetSet> FacetCell<FS> {
         self.forms.lock().expect("facet forms lock").clone()
     }
 
-    /// Discard every physical materialization (E20, facets §4.3).
+    /// Discard every physical materialization (E20, facets §5.3).
     pub(crate) fn discard(&self) {
         let mut forms = self.forms.lock().expect("facet forms lock");
         FS::discard(&mut forms);
     }
 
-    /// The union of every facet's blob roots **and facet 0's** (facets §3): what the
+    /// The union of every facet's blob roots **and facet 0's** (facets §4): what the
     /// host adds to any [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) sweep.
     pub(crate) fn roots(&self) -> BTreeSet<BlobId> {
         let mut roots = FS::roots(&self.forms.lock().expect("facet forms lock"));
@@ -959,14 +963,14 @@ impl<FS: FacetSet> FacetCell<FS> {
             .reset(ids);
     }
 
-    /// The entity's pending alarm deadline (spec facets §4.5), in nanoseconds since the
+    /// The entity's pending alarm deadline (spec facets §5.5), in nanoseconds since the
     /// clock epoch, or `None`. Read by the host after each commit and on
     /// activation to arm the callerless timer.
     pub(crate) fn alarm_due(&self) -> Option<u64> {
         FS::alarm_due(&self.forms.lock().expect("facet forms lock"))
     }
 
-    /// Stage the consumption of a fired alarm into the armed command (spec facets §4.5).
+    /// Stage the consumption of a fired alarm into the armed command (spec facets §5.5).
     /// Called by the host before `on_alarm`, so the deadline clears atomically
     /// unless the handler re-arms it. Panics outside a command, exactly as the
     /// other stage writers: the host only calls it inside the alarm protocol.
@@ -989,7 +993,7 @@ impl<FS: FacetSet> FacetCell<FS> {
     }
 
     /// Run `write` against `F`'s armed stage (a facet accessor's write path).
-    /// Panics outside a command handler: staging is command-scoped (§3.2), and a
+    /// Panics outside a command handler: staging is command-scoped (§4.2), and a
     /// write from `on_activate`/`on_deactivate` would otherwise vanish silently.
     pub(crate) fn with_stage<F, I, R>(&self, write: impl FnOnce(&mut F::Stage) -> R) -> R
     where
@@ -999,14 +1003,14 @@ impl<FS: FacetSet> FacetCell<FS> {
         let mut stages = self.stages.lock().expect("facet stages lock");
         let stage = stages
             .as_mut()
-            .expect("facet writes are only valid inside a command handler (spec facets §3)");
+            .expect("facet writes are only valid inside a command handler (spec facets §4)");
         write(<FS as HasFacet<F, I>>::stage_mut(stage))
     }
 
     /// Run `write` against `F`'s committed form and its armed stage together (a
     /// facet whose stage derives from the form, e.g. a scratch overlay cloned on
     /// first write). Panics outside a command handler, exactly as
-    /// [`with_stage`](FacetCell::with_stage) does: staging is command-scoped (§3.2).
+    /// [`with_stage`](FacetCell::with_stage) does: staging is command-scoped (§4.2).
     pub(crate) fn with_form_and_stage<F, I, R>(
         &self,
         write: impl FnOnce(&F::Form, &mut F::Stage) -> R,
@@ -1019,14 +1023,14 @@ impl<FS: FacetSet> FacetCell<FS> {
             write(
                 form,
                 stage.expect(
-                    "facet writes are only valid inside a command handler (spec facets §3)",
+                    "facet writes are only valid inside a command handler (spec facets §4)",
                 ),
             )
         })
     }
 
     /// Run `read` against `F`'s committed form AND its armed stage, if any: the
-    /// read-your-staged-writes overlay (facets §3). The stage is `None` outside a
+    /// read-your-staged-writes overlay (facets §4). The stage is `None` outside a
     /// command, in which case only the committed form is consulted.
     pub(crate) fn with_overlay<F, I, R>(
         &self,
@@ -1184,7 +1188,7 @@ mod tests {
 
     #[test]
     fn a_codec_change_is_reported_as_a_codec_change() {
-        // Facet 0's state is codec-encoded (§3.1), so a snapshot written under one
+        // Facet 0's state is codec-encoded (§4.1), so a snapshot written under one
         // codec cannot be read under another.
         let bytes = composite().encode("json").unwrap();
         let err = CompositeSnapshot::decode(&bytes, "postcard")

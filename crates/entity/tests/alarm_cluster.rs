@@ -1,5 +1,5 @@
 //! Durable alarms across a **real node failover** on the clustered `Quorum` tier
-//! (entity §13): an alarm fires with no caller present after the leader that armed
+//! (facets §5.5): an alarm fires with no caller present after the leader that armed
 //! it has crashed.
 //!
 //! The Local-tier tests (`alarm_index.rs`) prove each mechanism on its own: the
@@ -176,11 +176,11 @@ fn run_failover(seed: u64) {
     );
 }
 
-// --- Alarm reconciliation across a shard split (storage §7, facets §4.5) ------------------
+// --- Alarm reconciliation across a shard split (storage §8, facets §5.5) ------------------
 
 #[test]
 fn an_alarm_fires_after_a_split_moves_its_entity() {
-    // §4.5 across storage §7: alarms armed on one shard's entities must still fire after
+    // §5.5 across storage §8: alarms armed on one shard's entities must still fire after
     // a split moves roughly half of them to a fresh child, with no caller touching
     // any timer. The child's driver picks a moved entity up from the child's index
     // (it re-registered there on the split's re-activation), and the parent's

@@ -63,7 +63,7 @@ mod system;
 
 pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationReason};
 // The codec vocabulary, re-exported so a deployment choosing a wire codec
-// (spec §2.11) needs no direct `actor-serialization` dependency.
+// (spec §3.4) needs no direct `actor-serialization` dependency.
 pub use actor_serialization::{Codec, CodecError, JsonCodec, PostcardCodec};
 pub use context::Ctx;
 pub use error::CallError;

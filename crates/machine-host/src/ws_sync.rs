@@ -1,11 +1,11 @@
 //! The workspace as a tar stream, through a capability handle (sandbox spec
-//! §4.1, S1; feature `ws`).
+//! §5.1, S1; feature `ws`).
 //!
 //! Both microVM consumers move a host-side workspace directory in and out of
 //! a guest as a capped tar stream over vsock: the agent sandbox's `Native`
-//! tier brackets every call with it (sandbox spec §4), and the persistent
+//! tier brackets every call with it (sandbox spec §5), and the persistent
 //! machine syncs its workspace facet at boot and at capture quiescent points
-//! (machine spec §4). This module owns the codec; each consumer keeps its own
+//! (machine spec §6). This module owns the codec; each consumer keeps its own
 //! wire protocol around it.
 //!
 //! Every byte crosses through a `cap_std::fs::Dir` handle, so a path outside
@@ -19,7 +19,7 @@
 //! deterministic (sorted entries, zero mtimes) and budgeted against
 //! [`MAX_TAR`] *before* bytes accumulate (headers and all), so a workspace
 //! beyond the cap fails the pack rather than sizing an unmetered host
-//! allocation (the sandbox spec §4.2 stance).
+//! allocation (the sandbox spec §5.2 stance).
 
 use std::path::Path;
 
@@ -106,7 +106,7 @@ fn append_dir(
 /// unpack into a sibling `<ws>.incoming` staging directory, then swap the
 /// trees by rename through a sibling `<ws>.outgoing` (both on the same
 /// filesystem as the workspace, so no rename fails with `EXDEV`). Any failure
-/// leaves the workspace as it was (machine spec §2.2): a corrupt or truncated
+/// leaves the workspace as it was (machine spec §3.1): a corrupt or truncated
 /// tar never reaches it, and a swap that fails part-way is undone. That
 /// matters because both consumers durably capture the workspace (the sandbox
 /// after every tool call, the machine at every quiescent point), and a partial
@@ -338,7 +338,7 @@ mod tests {
     }
 
     /// A swap that fails at any one of its renames leaves the workspace as it
-    /// was (machine spec §2.2): every moved entry goes back, old and new alike.
+    /// was (machine spec §3.1): every moved entry goes back, old and new alike.
     #[test]
     fn a_swap_failing_at_any_rename_leaves_the_workspace_as_it_was() {
         let build = |old: &Dir, new: &Dir| {

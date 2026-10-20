@@ -1,6 +1,6 @@
 //! The SSH server: a `russh` handler that terminates SSH against the
 //! machine's journaled policy and bridges each channel to the guest agent
-//! (machine §2.5).
+//! (machine §5.1).
 //!
 //! Authentication is publickey-only, checked at [`Handler::auth_publickey`]
 //! against [`MachineAuthority::authorizes`] (M4). The attachment it journals
@@ -46,7 +46,7 @@ use crate::FrontDoorError;
 use crate::MachineAuthority;
 
 /// Terminate SSH on `stream` for `machine`, bridging channels to its guest
-/// agent (machine §2.5). Presents the machine's journaled host key at KEX and
+/// agent (machine §5.1). Presents the machine's journaled host key at KEX and
 /// runs to connection close.
 pub async fn serve_connection<A, B, S>(
     stream: S,
@@ -69,7 +69,7 @@ where
     });
     // The attachment id is shared with the handler so the entrypoint can
     // journal the detach after the connection closes (the handler is consumed
-    // by `run_stream`, machine §2.5).
+    // by `run_stream`, machine §5.1).
     let attachment: Arc<std::sync::Mutex<Option<u64>>> = Arc::new(std::sync::Mutex::new(None));
     // The session handle exists only once `run_stream` returns, after the
     // handler has moved into the session, so it reaches the handler through a

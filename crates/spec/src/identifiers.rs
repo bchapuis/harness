@@ -113,6 +113,11 @@ pub const EXEMPT: &[Exempt] = &[
     e("Fn", Why::Elsewhere, "std, a closure bound"),
     e("FnMut", Why::Elsewhere, "std, a closure bound"),
     e("Future", Why::Elsewhere, "std, the seams' return type"),
+    e(
+        "Deserializer",
+        Why::Elsewhere,
+        "erased_serde, in the codec plug point's signature",
+    ),
     e("Range", Why::Elsewhere, "std, a blob `get`'s byte range"),
     e(
         "Duration::from_secs",

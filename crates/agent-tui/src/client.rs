@@ -37,7 +37,7 @@ pub struct SessionEntry {
 
 /// A parsed SSE frame from a streamed run: a `records` batch, a `truncated`
 /// notice (compaction outran the stream's cursor; records up to the base are
-/// gone, §8.2), the terminal `outcome`, an `error`, or the stream's `end`
+/// gone, §10.2), the terminal `outcome`, an `error`, or the stream's `end`
 /// marker.
 #[derive(Debug)]
 pub enum Event {
@@ -83,7 +83,7 @@ impl GatewayClient {
     }
 
     /// Read a page of a session's committed records, from sequence `from`.
-    /// Also returns the journal's compaction base (§8.2): a `from` below it
+    /// Also returns the journal's compaction base (§10.2): a `from` below it
     /// asked for records the session's snapshot has subsumed, so the history
     /// shown starts truncated.
     pub async fn fetch_records(

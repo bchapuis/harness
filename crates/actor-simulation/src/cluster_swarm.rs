@@ -1,4 +1,4 @@
-//! Swarm testing for the cluster (spec §2.12.2; docs/simulation-testing.md).
+//! Swarm testing for the cluster (spec §11; docs/simulation-testing.md).
 //!
 //! Runs a [`ClusterWorkload`] over a multi-node [`SimNetwork`] while a seeded
 //! [`Nemesis`](nemesis) injects partitions (symmetric and one-way), crashes,
@@ -78,7 +78,7 @@ const CLUSTER_SETTLE_MAX: Duration = Duration::from_secs(30);
 pub struct ClusterCtx {
     nodes: Vec<SimNode>,
     net: SimNetwork,
-    /// The simulated external registry, in registry-based mode (spec §6.4.2):
+    /// The simulated external registry, in registry-based mode (spec cluster §5.4.2):
     /// the operator handle a workload mutates and outages under seed control.
     registry: Option<SimRegistry>,
 }
@@ -107,19 +107,19 @@ impl ClusterCtx {
 /// outlives the borrow of the workload that produced it.
 pub type Rehost = Arc<dyn Fn(&SimNode) + Send + Sync>;
 
-/// A membership-mode choice for a [`ClusterWorkload`] (spec §6.4). Declarative
+/// A membership-mode choice for a [`ClusterWorkload`] (spec cluster §5.4). Declarative
 /// because the registry- and leader-based modes need per-run resources (the
 /// simulated registry, the voter set) only the driver can build.
 #[derive(Clone, Copy, Debug)]
 pub enum ClusterModeSpec {
-    /// Fixed roster (spec §6.4.1); `detector` enables the observe-only SWIM loop.
+    /// Fixed roster (spec cluster §5.4.1); `detector` enables the observe-only SWIM loop.
     Static { detector: Option<SwimConfig> },
-    /// Peer-to-peer gossip with a coordinator (spec §6.4.4).
+    /// Peer-to-peer gossip with a coordinator (spec cluster §5.4.4).
     Gossip {
         swim: SwimConfig,
         downing: DowningPolicy,
     },
-    /// An external registry, simulated with seeded faults (spec §6.4.2). The
+    /// An external registry, simulated with seeded faults (spec cluster §5.4.2). The
     /// driver registers every node up front and hands the operator handle to the
     /// workload via [`ClusterCtx::registry`].
     Registry {
@@ -127,7 +127,7 @@ pub enum ClusterModeSpec {
         sync_interval: Duration,
         faults: RegistryFaultPolicy,
     },
-    /// A self-hosted Raft log (spec §6.4.3): the first `voters` nodes (by join
+    /// A self-hosted Raft log (spec cluster §5.4.3): the first `voters` nodes (by join
     /// order) form the voter set, with in-memory storage.
     Leader {
         swim: SwimConfig,
@@ -177,7 +177,7 @@ pub trait ClusterWorkload {
         crate::swim_config()
     }
 
-    /// The membership mode to sweep under (spec §6.4): static, gossip-based,
+    /// The membership mode to sweep under (spec cluster §5.4): static, gossip-based,
     /// registry-based, or leader-based, each under the same nemesis and fault
     /// injection. Required rather than defaulted so the control plane a sweep ran
     /// under is stated in the workload that ran it.
@@ -210,7 +210,7 @@ pub trait ClusterWorkload {
     /// Drive traffic; the returned future resolves when the workload is done.
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()>;
 
-    /// Invariants checked continuously and at the end (spec §10).
+    /// Invariants checked continuously and at the end (spec §13).
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         default_invariants()
     }
@@ -223,7 +223,7 @@ enum Fault {
     Partition,
     /// Sever one random group's frames *to* another, leaving the reverse
     /// flowing: the asymmetric case `Partition` cannot express, and the source
-    /// of zombie leaders (§5.1).
+    /// of zombie leaders (cluster §7).
     PartitionOneWay,
     /// Isolate a node from every peer: a crash as the rest of the cluster sees
     /// it. The process keeps running; [`Fault::Restart`] is the one that kills it.
@@ -240,7 +240,7 @@ enum Fault {
     /// A quiet round.
     Quiet,
     /// A bounded registry outage window: the "stalled, lagging, or unavailable
-    /// registry sync" fault (spec §6.4.2 item 6).
+    /// registry sync" fault (spec cluster §5.4.2 item 6).
     RegistryOutage,
 }
 
@@ -251,7 +251,7 @@ enum Fault {
 /// the wire this run is allowed to reach), and because a nemesis taking them
 /// one-by-one grows an argument per fault.
 pub(crate) struct Consent {
-    /// The simulated external registry, in registry-based mode (spec §6.4.2).
+    /// The simulated external registry, in registry-based mode (spec cluster §5.4.2).
     pub(crate) registry: Option<SimRegistry>,
     /// How to put a restarted node back to work ([`ClusterWorkload::rehost`]).
     pub(crate) rehost: Option<Rehost>,
@@ -306,8 +306,8 @@ fn two_groups(entropy: &SimEntropy, nodes: &[NodeId]) -> Option<(Vec<NodeId>, Ve
 /// that outlived the nemesis would stall the run rather than fault it, so the
 /// freeze and its thaw are one action, as the registry outage is. A partition or
 /// a crash lasts until a later round draws [`Fault::Heal`], so the last round is
-/// followed by one: the specs promise liveness once faults cease (actor §2.6
-/// requirement 8, storage §5), and a run whose final draw leaves no quorum
+/// followed by one: the specs promise liveness once faults cease (actor §3.7
+/// requirement 8, storage §6), and a run whose final draw leaves no quorum
 /// anywhere would otherwise fail its liveness verdict on a precondition the
 /// system never claimed to survive. The seeded transport faults (loss,
 /// duplication, latency) stay on for the whole run.
@@ -426,7 +426,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
             faults,
         } => {
             let registry = SimRegistry::new(&sim).with_faults(faults);
-            // The platform registers every node up front (spec §6.4.2 item 2);
+            // The platform registers every node up front (spec cluster §5.4.2 item 2);
             // runtime mutations are the workload's and nemesis's job.
             for i in 1..=workload.node_count() as u64 {
                 registry.register(NodeId::new(i));
@@ -582,7 +582,7 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
 
 /// Sweep a cluster workload across many seeds, checking invariants on each run
 /// and returning the *aggregate* fault activity the sweep exercised (spec
-/// §10). A test asserts each fault type fired at least once.
+/// §13). A test asserts each fault type fired at least once.
 ///
 /// The assertion is a claim about the whole declared range, so size it with
 /// [`coverage_seeds`](crate::coverage_seeds), which never narrows:
@@ -612,7 +612,7 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
 
 /// How many `ask`s the run has issued but not yet resolved, read by
 /// [`drive_cluster`] to decide when the run has gone quiet. It is the
-/// no-silent-loss invariant itself (spec §10 #1), fed through the
+/// no-silent-loss invariant itself (spec §13 #1), fed through the
 /// [`Checker`]'s own forget-then-observe step, so the driver and the invariant
 /// cannot disagree about what pending means: an ask issued by a process that
 /// has since died never reaches an outcome, and waiting for it would spend the

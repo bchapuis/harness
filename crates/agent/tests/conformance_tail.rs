@@ -1,4 +1,4 @@
-//! Tail conformance (agent spec §8.2): reading a run is a journal read at
+//! Tail conformance (agent spec §10.2): reading a run is a journal read at
 //! the entity gateway, not a session command, so observation neither wakes a
 //! hibernated session (rehydration plus workspace rematerialization) nor loses
 //! records across the hibernation it leaves undisturbed.
@@ -93,7 +93,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     );
 
     // Tail the whole run from the hibernated journal: the gateway serves it
-    // without get-or-activating the session (§8.2).
+    // without get-or-activating the session (§10.2).
     let page = sim
         .block_on({
             let session = session.clone();
@@ -136,7 +136,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
 }
 
 /// A kind config that snapshots aggressively, so a short run crosses the
-/// compaction trigger (storage §8) and truncates the journal's prefix.
+/// compaction trigger (storage §9) and truncates the journal's prefix.
 fn compacting(snapshot_every: u64) -> entity::EntityConfig {
     entity::EntityConfig {
         snapshot_every,
@@ -176,7 +176,7 @@ fn a_compacted_session_announces_truncation_to_tail_and_follower() {
     }
 
     // A tail from ZERO asked for records the session's snapshot has subsumed:
-    // the reply announces the truncation (§8.2) instead of serving a short
+    // the reply announces the truncation (§10.2) instead of serving a short
     // history a reader would mistake for the whole transcript.
     let page = sim
         .block_on({

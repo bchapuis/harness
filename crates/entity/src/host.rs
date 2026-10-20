@@ -1,14 +1,14 @@
 //! The host actor: the durability protocol, rehydration, and hibernation
-//! (spec §5, storage §8, entity §7).
+//! (spec §6, storage §9, entity §8).
 //!
-//! An entity's live activation is a host actor, running the §5 per-command protocol
+//! An entity's live activation is a host actor, running the §6 per-command protocol
 //! on its serial executor. Two gate guarantees fall out of that serial executor:
 //!
-//! - **Input gate** (§5): the executor runs each handler future to completion
+//! - **Input gate** (§6): the executor runs each handler future to completion
 //!   before pulling the next message, and the protocol mutates state only *after*
 //!   the commit with no `.await` between the fold and the reply, so no second
 //!   command ever observes half-committed state.
-//! - **Output gate** (§5): the reply is simply the value the handler returns
+//! - **Output gate** (§6): the reply is simply the value the handler returns
 //!   *after* the commit await; a failed commit returns an `EntityError` instead, so
 //!   no observer is ever told an effect happened that did not durably happen
 //!   (invariant **E5**).
@@ -74,8 +74,8 @@ const REPLAY_BATCH: usize = 256;
 
 /// The internal command carrying a typed message to the host. Its reply is
 /// `Result<M::Reply, EntityError>`: the durability outcome wraps the user's
-/// application reply, keeping the two failure layers distinct (§3.2, §9). It is the
-/// host's network surface for commands (§4.5): the wrapper is transparent and borrows
+/// application reply, keeping the two failure layers distinct (§4.2, §3.2). It is the
+/// host's network surface for commands (§5.5): the wrapper is transparent and borrows
 /// the inner manifest, so the wire key is the command's own.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
@@ -83,11 +83,11 @@ pub(crate) struct RunTyped<M>(pub(crate) M);
 
 impl<M: Message> Message for RunTyped<M> {
     type Reply = Result<M::Reply, EntityError>;
-    // The inner manifest is the dispatch key (§4.5); the wrapper adds none.
+    // The inner manifest is the dispatch key (§5.5); the wrapper adds none.
     const MANIFEST: Manifest = M::MANIFEST;
 }
 
-/// An internal self-tick that drives idle eviction (§7): the host checks how
+/// An internal self-tick that drives idle eviction (§8): the host checks how
 /// long it has been idle and either hibernates or reschedules.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckIdle;
@@ -97,7 +97,7 @@ impl Message for CheckIdle {
     const MANIFEST: Manifest = Manifest::new("entity.CheckIdle");
 }
 
-/// An internal self-tick that fires a durable alarm (spec facets §4.5): the host runs the
+/// An internal self-tick that fires a durable alarm (spec facets §5.5): the host runs the
 /// entity's [`on_alarm`](crate::Entity::on_alarm) with no caller present. `epoch` is
 /// the arm generation this timer was launched for; a re-arm bumps it, so a
 /// superseded timer's tick is ignored: a cancellation without a channel. Local
@@ -112,7 +112,7 @@ impl Message for AlarmDue {
     const MANIFEST: Manifest = Manifest::new("entity.AlarmDue");
 }
 
-/// The outcome of one alarm-index registration attempt (spec facets §4.5): the task
+/// The outcome of one alarm-index registration attempt (spec facets §5.5): the task
 /// [`sync_alarm_index`](Host::sync_alarm_index) launches posts this back, so the
 /// host learns (on its own executor, off the command path) whether the index
 /// durably holds its deadline. `epoch` is the attempt generation, guarding a
@@ -129,7 +129,7 @@ impl Message for AlarmSynced {
 }
 
 /// Where this activation's deadline stands with its shard's [`AlarmIndex`] (spec
-/// facets §4.5). Only `Acked` licenses [`CheckIdle`] to hibernate an alarmed entity: the
+/// facets §5.5). Only `Acked` licenses [`CheckIdle`] to hibernate an alarmed entity: the
 /// index's reply releases only after its commit (output gate, **E5**), so an ack
 /// is evidence that the driver's sweep will find the deadline. Ephemeral
 /// activation state (**E3**), reset to `Unsynced` per activation.
@@ -141,7 +141,7 @@ enum IndexSync {
     /// A registration `ask` for `due` is in flight.
     Pending { due: Option<u64> },
     /// The index committed `due` and replied, as durable as the index's own
-    /// journal tier makes it (a quorum on the `Quorum` tier, storage §5).
+    /// journal tier makes it (a quorum on the `Quorum` tier, storage §6).
     Acked { due: Option<u64> },
 }
 
@@ -151,7 +151,7 @@ enum IndexSync {
 pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
 
 /// The committed head a resident activation publishes for its gateway (spec
-/// §6): the floor of the non-activating read. Written by the host (at the
+/// §7): the floor of the non-activating read. Written by the host (at the
 /// end of head recovery and after each commit), and read by the serial gateway
 /// without touching the host's mailbox, so a read never queues behind the
 /// input gate. It only ever holds *committed* heads (it is set from journal
@@ -159,12 +159,12 @@ pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
 /// stopping host is safe to serve at or below.
 pub(crate) type CommittedCell = std::sync::Arc<std::sync::atomic::AtomicU64>;
 
-/// What an activation is to its handlers (spec §2.2): the identity and seams every
+/// What an activation is to its handlers (spec §3.2): the identity and seams every
 /// [`EntityCtx`] reads. Built once per activation by the gateway and shared between
 /// the [`Host`] and each context it hands a handler, so one decision about what an
 /// activation carries lives in one struct.
 pub(crate) struct Activation<G: Entity> {
-    /// The runtime type name (spec §4.1), so a self-reference resolves under the
+    /// The runtime type name (spec §5.1), so a self-reference resolves under the
     /// right type.
     pub(crate) entity_type: &'static str,
     pub(crate) name: EntityName,
@@ -172,7 +172,7 @@ pub(crate) struct Activation<G: Entity> {
     /// The journal seam, so the entity can reach its colocated blob area
     /// ([`EntityCtx::blobs`]).
     pub(crate) journal: Arc<dyn DynEntityJournal>,
-    /// The facet cell (spec facets §3): the declared facets' committed forms and the
+    /// The facet cell (spec facets §4): the declared facets' committed forms and the
     /// per-command stage, read and staged through by the facet accessors (`kv()`,
     /// `ws()`, …). Rebuilt from the composite snapshot plus tagged records on
     /// rehydration (**E3**).
@@ -182,13 +182,13 @@ pub(crate) struct Activation<G: Entity> {
     /// activation state (**E3**): a rehydrated entity re-watches from its folded
     /// state in `on_activate`.
     pub(crate) watches: std::sync::Mutex<Vec<ActorId>>,
-    /// This node's blocking-I/O pool (storage §2.2), so a physical facet's scan runs off
+    /// This node's blocking-I/O pool (storage §3.2), so a physical facet's scan runs off
     /// the executor driving Raft.
     pub(crate) blocking_io: Arc<dyn crate::blocking::BlockingIo>,
 }
 
-/// An entity's live activation (spec §7): state folded from the journal, plus the
-/// machinery of the §5 durability protocol. Disposable: rebuilt from the journal
+/// An entity's live activation (spec §8): state folded from the journal, plus the
+/// machinery of the §6 durability protocol. Disposable: rebuilt from the journal
 /// on the next activation (invariant **E3**).
 pub struct Host<G: Entity> {
     entity: G,
@@ -198,7 +198,7 @@ pub struct Host<G: Entity> {
     head: Seq,
     /// The gateway-visible mirror of `head` ([`CommittedCell`]): published at the
     /// end of head recovery and after each commit, so the gateway's
-    /// non-activating read (§6) serves at or below it without asking this
+    /// non-activating read (§7) serves at or below it without asking this
     /// actor. [`HEAD_UNPUBLISHED`] until recovery completes.
     committed: CommittedCell,
     /// The seq of the latest persisted snapshot, to decide when to snapshot again.
@@ -206,26 +206,26 @@ pub struct Host<G: Entity> {
     /// The identity and seams its handlers see, shared with every [`EntityCtx`].
     activation: Arc<Activation<G>>,
     /// The shard this activation serves under: resolved by the gateway from the
-    /// committed partition (§4.1) at activation, fixed for the activation's
-    /// lifetime. Keys the per-shard alarm index (facets §4.5); after a split/merge moves
+    /// committed partition (§5.1) at activation, fixed for the activation's
+    /// lifetime. Keys the per-shard alarm index (facets §5.5); after a split/merge moves
     /// the name, the next activation carries the new shard.
     shard: u32,
     config: EntityConfig,
-    /// The operator-facing sink (§10), lifted out of `config` because it is read on
+    /// The operator-facing sink (§3.4), lifted out of `config` because it is read on
     /// every commit.
     metrics: Arc<dyn crate::metrics::EntityMetrics>,
-    /// Virtual time of the last *command* (not a tick), for idle eviction (§7).
+    /// Virtual time of the last *command* (not a tick), for idle eviction (§8).
     last_active: actor_core::Instant,
-    /// Live record sinks (spec §6.3): one bounded channel per subscription, drained
+    /// Live record sinks (spec §7.3): one bounded channel per subscription, drained
     /// by a forwarder task. Dropped when the host stops, so a move or hibernation
     /// ends every subscription and subscribers re-subscribe (**E3**).
     sinks: Vec<async_channel::Sender<Arc<RecordBatch>>>,
-    /// The durable-alarm arm generation (spec facets §4.5). Bumped on every (re)arm so a
+    /// The durable-alarm arm generation (spec facets §5.5). Bumped on every (re)arm so a
     /// stale timer task's [`AlarmDue`] is ignored. Ephemeral activation state, reset
     /// per activation (**E3**).
     alarm_epoch: u64,
     /// The per-shard alarm index this host registers its pending deadline with
-    /// (spec facets §4.5), so a new leader can re-activate this entity after a failover.
+    /// (spec facets §5.5), so a new leader can re-activate this entity after a failover.
     /// `None` when alarm-index wiring is off: alarms then fire only while
     /// resident.
     alarm_index: Option<Entities<AlarmIndex<G::System>>>,
@@ -233,7 +233,7 @@ pub struct Host<G: Entity> {
     /// hibernation veto and the retry-until-acked loop
     /// ([`sync_alarm_index`](Host::sync_alarm_index)). `Unsynced` at activation, so
     /// the first arm after rehydration always re-registers: the reconciliation
-    /// that self-heals a lost register (facets §4.5). Ephemeral.
+    /// that self-heals a lost register (facets §5.5). Ephemeral.
     index_sync: IndexSync,
     /// The registration attempt generation: bumped on every launched sync, so a
     /// superseded attempt's late [`AlarmSynced`] is ignored. Ephemeral.
@@ -271,13 +271,13 @@ impl<G: Entity> Host<G> {
         }
     }
 
-    /// Build the handler/lifecycle context for the entity (§2.2).
+    /// Build the handler/lifecycle context for the entity (§3.2).
     fn entity_ctx(&self, ctx: &Ctx<Host<G>>) -> EntityCtx<G> {
         EntityCtx::new(Arc::clone(&self.activation), ctx.system().clone())
     }
 
     /// Install the death watches the entity queued through [`EntityCtx::watch`]
-    /// (actor §2.5), delivering each target's `Terminated` onto this host's own
+    /// (actor §10), delivering each target's `Terminated` onto this host's own
     /// mailbox. Called after each handler/lifecycle hook completes, so a watch
     /// requested mid-command is live before the reply releases.
     fn register_watches(&self, ctx: &Ctx<Host<G>>) {
@@ -287,8 +287,8 @@ impl<G: Entity> Host<G> {
         }
     }
 
-    /// The facet environment (spec facets §3): a bare blob handle and the node-local
-    /// scratch directory a physical facet materializes under (facets §4.3). The
+    /// The facet environment (spec facets §4): a bare blob handle and the node-local
+    /// scratch directory a physical facet materializes under (facets §5.3). The
     /// directory is keyed by node as well as entity: under the simulator many nodes
     /// share one process (and one scratch root), so a failover must never land two
     /// nodes' materializations of the same entity on one path.
@@ -305,21 +305,21 @@ impl<G: Entity> Host<G> {
         )
     }
 
-    /// Rebuild state from the journal (spec storage §8): load the latest snapshot, then
+    /// Rebuild state from the journal (spec storage §9): load the latest snapshot, then
     /// replay the events after it, folding with `apply`. The head is taken from
     /// the journal's authority (**E3**); a snapshot whose seq exceeds that head is
     /// ignored and replay starts from `ZERO` (**E4**).
     async fn rehydrate(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), BoxError> {
         // Timed from here, before the barrier: the quorum head recovery is usually
         // the largest part of a cold activation, so a measurement that skipped it
-        // would report the cheap half (§10).
+        // would report the cheap half (§3.4).
         let rehydrate_started = ctx.system().now();
         let codec = ctx.system().codec();
-        // `head` is the rehydration barrier (spec storage §5, §8, invariant E3/E14): on the
+        // `head` is the rehydration barrier (spec storage §6, §9, invariant E3/E14): on the
         // `Quorum` tier it recovers the entity's head from a write quorum by
         // read-repair, so an entity activating on a freshly-elected leader never
         // rebuilds from a stale head and then serves stale reads; it fails fast with
-        // `Unavailable` while the shard is still electing (storage §5.3).
+        // `Unavailable` while the shard is still electing (storage §6.3).
         let head = self.activation.journal.head(&self.activation.name).await.map_err(boxed)?;
 
         let (mut seq, from_snapshot) = match self
@@ -330,7 +330,7 @@ impl<G: Entity> Host<G> {
             .map_err(boxed)?
         {
             Some((s_seq, bytes)) if s_seq <= head => {
-                // The snapshot is a composite (spec facets §3): facet 0's `State` plus
+                // The snapshot is a composite (spec facets §4): facet 0's `State` plus
                 // one contribution per declared facet, all at `s_seq`. E4 applies
                 // to it as a whole; a part that will not restore aborts the
                 // activation rather than serving a half-rebuilt entity.
@@ -359,7 +359,7 @@ impl<G: Entity> Host<G> {
             // exists only in the snapshot, so replaying from `ZERO` after discarding
             // one yields a truncated state. It is the safe direction to fail in, and
             // `entities.rs` pins it with a store double. Restore still runs: a
-            // physical facet materializes its empty form here (facets §4.3).
+            // physical facet materializes its empty form here (facets §5.3).
             _ => {
                 self.state = G::State::default();
                 let forms = G::Facets::restore(&[], &self.facet_env(ctx))
@@ -381,7 +381,7 @@ impl<G: Entity> Host<G> {
                 .map_err(boxed)?;
             // Defence in depth for the fold (E3): the replay cursor starts at the
             // loaded snapshot's seq, and compaction never passes the newest
-            // snapshot (storage §8), so a base above the cursor means the store and the
+            // snapshot (storage §9), so a base above the cursor means the store and the
             // snapshot disagree about where history begins, folding on would
             // silently skip the gap, so abort the activation instead.
             if batch.base > seq {
@@ -394,7 +394,7 @@ impl<G: Entity> Host<G> {
                 break;
             }
             for (s, bytes) in batch.records {
-                // Dispatch each record by its facet tag (spec facets §3). A tag no
+                // Dispatch each record by its facet tag (spec facets §4). A tag no
                 // declared facet claims aborts the activation (**E19**): an entity's
                 // history must never be silently misread by a runtime missing one
                 // of its facets.
@@ -417,7 +417,7 @@ impl<G: Entity> Host<G> {
         self.last_active = ctx.system().now();
 
         // Resolve blob-referencing facet records into their materializations (spec
-        // facets §4.4): replay folded them into a pending set (F1 holds on the recorded
+        // facets §5.4): replay folded them into a pending set (F1 holds on the recorded
         // bytes), and the fetch-and-apply runs here, once, before `on_activate`.
         self.activation.facets
             .rehydrate(&self.facet_env(ctx))
@@ -425,18 +425,18 @@ impl<G: Entity> Host<G> {
             .map_err(boxed)?;
 
         // Run `on_activate` BEFORE announcing the activation: if it fails, the
-        // activation aborts (§7) and must leave no `Activated` on the stream; a
+        // activation aborts (§8) and must leave no `Activated` on the stream; a
         // phantom `Activated` with no matching `Deactivated` would both misreport
-        // the lifecycle (§10) and corrupt a E6 activation checker.
+        // the lifecycle (§11) and corrupt a E6 activation checker.
         let ectx = self.entity_ctx(ctx);
         self.entity.on_activate(&ectx).await?;
         // An entity whose folded state names live peers re-watches them here, and a
         // watch-after-death fires immediately, reconciling what died while the
-        // entity slept (actor §2.5).
+        // entity slept (actor §10).
         self.register_watches(ctx);
 
         // Now the activation is real: `Rehydrated` describes the rebuild, then
-        // `Activated` marks the entity ready to serve its first command (§10).
+        // `Activated` marks the entity ready to serve its first command (§11).
         let node = ctx.system().node();
         ctx.system().emit_entity_event(EntityEvent::Rehydrated {
             node,
@@ -448,9 +448,9 @@ impl<G: Entity> Host<G> {
             node,
             name: self.activation.name.clone(),
         });
-        // What a cold access cost, and one more entity resident (§10); the
+        // What a cold access cost, and one more entity resident (§3.4); the
         // `Deactivated` decrement is the pair that makes the gauge track the working
-        // set hibernation is meant to bound (§7).
+        // set hibernation is meant to bound (§8).
         self.metrics.rehydrated(
             self.activation.entity_type,
             ctx.system().now().duration_since(rehydrate_started),
@@ -458,15 +458,15 @@ impl<G: Entity> Host<G> {
         );
         self.metrics.activation_delta(self.activation.entity_type, 1);
         self.schedule_idle_check(ctx);
-        // Re-arm the durable alarm from the rehydrated form (spec facets §4.5), so firing
+        // Re-arm the durable alarm from the rehydrated form (spec facets §5.5), so firing
         // survives deactivation (**E3**).
         self.arm_alarm(ctx);
         Ok(())
     }
 
-    /// The §5 per-command protocol, the one place the durability barrier lives:
+    /// The §6 per-command protocol, the one place the durability barrier lives:
     /// arm the facet stage, run `decide` (the handler or a callerless hook, whose
-    /// staged facet operations are not observable before the commit, §3.2, facets §3),
+    /// staged facet operations are not observable before the commit, §4.2, facets §4),
     /// then [`commit`](Host::commit) the produced events and staged operations as
     /// one atomic batch.
     ///
@@ -501,8 +501,8 @@ impl<G: Entity> Host<G> {
         Ok(reply)
     }
 
-    /// The callerless alarm protocol (spec facets §4.5): fire the entity's
-    /// [`on_alarm`](Entity::on_alarm) through the same §5 durability barrier. Before
+    /// The callerless alarm protocol (spec facets §5.5): fire the entity's
+    /// [`on_alarm`](Entity::on_alarm) through the same §6 durability barrier. Before
     /// the handler runs, stage a cancel of the fired alarm, so the deadline clears
     /// atomically unless `on_alarm` re-arms it (consume-on-fire).
     async fn run_alarm(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), EntityError> {
@@ -516,10 +516,10 @@ impl<G: Entity> Host<G> {
         .await
     }
 
-    /// The callerless death-watch protocol (actor §2.5): run the entity's
-    /// [`on_peer_terminated`](Entity::on_peer_terminated) through the same §5
+    /// The callerless death-watch protocol (actor §10): run the entity's
+    /// [`on_peer_terminated`](Entity::on_peer_terminated) through the same §6
     /// durability barrier. An empty decision with nothing staged commits nothing
-    /// (§6), so a stale signal is free.
+    /// (§7), so a stale signal is free.
     async fn run_peer_terminated(
         &mut self,
         msg: Terminated,
@@ -534,7 +534,7 @@ impl<G: Entity> Host<G> {
         .await
     }
 
-    /// The commit half of the §5 protocol (steps 2–7): encode the decided events
+    /// The commit half of the §6 protocol (steps 2–7): encode the decided events
     /// and drained facet records into one atomic batch, append, and (on a durable
     /// quorum commit) fold, deliver, snapshot, and re-arm the alarm. The facet
     /// stage MUST already be armed ([`FacetCell::begin`]).
@@ -543,10 +543,10 @@ impl<G: Entity> Host<G> {
         events: Vec<G::Event>,
         ctx: &Ctx<Host<G>>,
     ) -> Result<(), EntityError> {
-        // 2. Encode the events (facet 0) under their record tag (facets §3). A
+        // 2. Encode the events (facet 0) under their record tag (facets §4). A
         //    serialization failure is a non-committed outcome like any other: the
         //    disk facet has already folded its capture into the committed form
-        //    (facets §4.4), so the materialization is discarded and the node steps down
+        //    (facets §5.4), so the materialization is discarded and the node steps down
         //    (E20) rather than left claiming blocks no record journaled.
         //    Encoded in full before the step-down's await: neither the events'
         //    borrow nor the codec's error is `Send`.
@@ -567,9 +567,9 @@ impl<G: Entity> Host<G> {
             return Err(EntityError::Call(CallError::Serialization(reason)));
         }
 
-        // 3. Seal and drain the facet stages into tagged records (facets §3): a
+        // 3. Seal and drain the facet stages into tagged records (facets §4): a
         //    physical facet commits its local transaction and captures the delta
-        //    here (facets §4.3). All records join one atomic batch (**E19**).
+        //    here (facets §5.3). All records join one atomic batch (**E19**).
         let facet_records = match self.activation.facets.seal_and_drain() {
             Ok(records) => records,
             Err(e) => {
@@ -583,23 +583,23 @@ impl<G: Entity> Host<G> {
             encoded.push(tag_record(*tag, payload));
         }
 
-        // 4. Read path: an empty batch after the drain commits nothing (§6) and
+        // 4. Read path: an empty batch after the drain commits nothing (§7) and
         //    is served from the in-memory activation. This is the relaxed,
-        //    **read-your-leader** contract (§6): a deposed-but-unfenced minority
+        //    **read-your-leader** contract (§7): a deposed-but-unfenced minority
         //    leader can serve a stale read until its activation stops. Writes never
-        //    fork (Raft fences the commit, storage §5); only reads can be stale, and only
+        //    fork (Raft fences the commit, storage §6); only reads can be stale, and only
         //    on the minority side of a partition.
         if encoded.is_empty() {
             return Ok(());
         }
         let batch_len = encoded.len() as u64;
 
-        // Keep the encoded bytes for subscription delivery (§6.3) only when a sink
+        // Keep the encoded bytes for subscription delivery (§7.3) only when a sink
         // is attached, so an unsubscribed entity pays nothing.
         let from = self.head;
         let to_deliver = (!self.sinks.is_empty()).then(|| encoded.clone());
 
-        // The commit measurement (§10): the latency the caller actually waited and the
+        // The commit measurement (§3.4): the latency the caller actually waited and the
         // outcome it actually got, recorded on every arm below. Kept here rather than
         // in the journal because this is the only place that sees both.
         let started = ctx.system().now();
@@ -616,10 +616,10 @@ impl<G: Entity> Host<G> {
         match appended {
             // 5. Durable on a quorum: fold AFTER durability, advance head, reply.
             AppendOutcome::Committed(new_head) => {
-                // The entity is its shard's single writer (storage §5), so its head MUST
+                // The entity is its shard's single writer (storage §6), so its head MUST
                 // advance by exactly this batch. A jump past that means the head we
                 // appended from was stale, e.g. a prior timed-out append that
-                // committed late (storage §4), so the intervening committed events were
+                // committed late (storage §5), so the intervening committed events were
                 // never folded into our state. The journal is the authority (E3):
                 // step down rather than fold onto a state that is missing them.
                 let expected = Seq::new(self.head.value() + batch_len);
@@ -630,7 +630,7 @@ impl<G: Entity> Host<G> {
                 for event in &events {
                     G::apply(&mut self.state, event);
                 }
-                // Fold the facets' records on the live path (facets §3): logical facets
+                // Fold the facets' records on the live path (facets §4): logical facets
                 // fold exactly as replay will (F1); a physical facet's form already
                 // mutated at its local commit and is skipped. A facet that cannot
                 // fold its own just-drained record leaves the in-memory forms
@@ -650,28 +650,28 @@ impl<G: Entity> Host<G> {
                     shard: self.shard,
                     seq: new_head.value(),
                 });
-                // Push the batch to subscribers (§6.3) after the output gate:
+                // Push the batch to subscribers (§7.3) after the output gate:
                 // observational, so it never gates the commit (**E5**).
                 if let Some(bytes) = to_deliver {
                     self.deliver_records(from, new_head, bytes);
                 }
                 self.maybe_snapshot(ctx).await;
-                // Re-arm the durable alarm from the just-folded form (spec facets §4.5): a
+                // Re-arm the durable alarm from the just-folded form (spec facets §5.5): a
                 // fresh timer supersedes any prior one (the epoch bump inside
                 // `arm_alarm` cancels it).
                 self.arm_alarm(ctx);
                 Ok(()) // OUTPUT GATE releases here.
             }
-            // 6. Leadership moved off this node (storage §5): step down, redirect. The
+            // 6. Leadership moved off this node (storage §6): step down, redirect. The
             //    state is untouched; no fold, no success reply (**E5**). Physical
             //    facet materializations mutated at their local commit and are
-            //    discarded (**E20**, facets §4.3).
+            //    discarded (**E20**, facets §5.3).
             AppendOutcome::NotLeader(hint) => {
                 self.forced_step_down(ctx).await;
                 Err(EntityError::NotLeader(hint))
             }
-            // 7. Shard quorum lost or the commit timed out (storage §10): the append's fate
-            //    is ambiguous (it may yet commit, storage §4), so the in-memory head can
+            // 7. Shard quorum lost or the commit timed out (storage §11): the append's fate
+            //    is ambiguous (it may yet commit, storage §5), so the in-memory head can
             //    no longer be trusted. Step down; the next access rehydrates from
             //    the journal authority (E3).
             AppendOutcome::Unavailable(why) => {
@@ -681,7 +681,7 @@ impl<G: Entity> Host<G> {
         }
     }
 
-    /// Emit `Deactivated` and stop: the one deactivation seam (§10). Every
+    /// Emit `Deactivated` and stop: the one deactivation seam (§11). Every
     /// `Activated` gets a matching `Deactivated`/`NodeDown`, the basis of the
     /// **E6** singleton checker.
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
@@ -693,13 +693,13 @@ impl<G: Entity> Host<G> {
         ctx.stop();
     }
 
-    /// Deactivate on an involuntary stop: leadership moved (storage §5), the shard went
-    /// unavailable (storage §10), or the head desynced. The in-memory forms can no longer
+    /// Deactivate on an involuntary stop: leadership moved (storage §6), the shard went
+    /// unavailable (storage §11), or the head desynced. The in-memory forms can no longer
     /// be trusted, so every physical facet materialization is discarded (**E20**,
-    /// facets §4.3); the next activation rebuilds from the composite snapshot plus
+    /// facets §5.3); the next activation rebuilds from the composite snapshot plus
     /// committed records. Runs `on_deactivate`, which is safe even when the journal
     /// is unwritable (the [`EntityCtx`] exposes no `persist`). Unlike idle
-    /// hibernation (§7) it takes **no snapshot**.
+    /// hibernation (§8) it takes **no snapshot**.
     async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
         self.activation.facets.discard();
         let ectx = self.entity_ctx(ctx);
@@ -708,7 +708,7 @@ impl<G: Entity> Host<G> {
     }
 
     /// Persist a snapshot once enough events have accumulated past the last one
-    /// (spec storage §8). The trigger is configuration, not part of the model, and it is the
+    /// (spec storage §9). The trigger is configuration, not part of the model, and it is the
     /// *only* trigger: the idle path comes through here too
     /// ([`hibernate`](Host::hibernate)).
     async fn maybe_snapshot(&mut self, ctx: &Ctx<Host<G>>) {
@@ -723,10 +723,10 @@ impl<G: Entity> Host<G> {
     }
 
     /// Persist a snapshot at the current head if any events are uncovered by the
-    /// last one (spec storage §8). A snapshot is only an optimization; an encode or
+    /// last one (spec storage §9). A snapshot is only an optimization; an encode or
     /// persist failure is swallowed, leaving the journal as the authority.
     ///
-    /// The payload is the **composite** (spec facets §3): facet 0's `State` plus one
+    /// The payload is the **composite** (spec facets §4): facet 0's `State` plus one
     /// contribution per declared facet, all at this head. Facet contributions run
     /// against a forms *clone*, so no lock spans the (possibly blob-putting) await.
     ///
@@ -771,20 +771,20 @@ impl<G: Entity> Host<G> {
         }
     }
 
-    /// Hibernate on idle (spec §7): run `on_deactivate`, snapshot if enough has
+    /// Hibernate on idle (spec §8): run `on_deactivate`, snapshot if enough has
     /// accumulated to be worth one, and stop. The gateway prunes the name via death
     /// watch, and the next message reactivates and rehydrates (invariant **E12**).
     ///
     /// The snapshot goes through the **same** threshold as the write path
     /// ([`maybe_snapshot`](Host::maybe_snapshot)), not unconditionally, because of
-    /// what a snapshot costs on the `Quorum` tier: it goes to every replica (storage §2.1),
+    /// what a snapshot costs on the `Quorum` tier: it goes to every replica (storage §3.1),
     /// so an unconditional one here would replicate something for every entity that
     /// is written once and then left alone, every idle window, billed R−1 times to
     /// the uplink (`docs/hardware-envelope.md` §3.9, I2). Chunking facet 0's state
-    /// (facets §3) makes that *something* proportional to what changed, which lowers the
+    /// (facets §4) makes that *something* proportional to what changed, which lowers the
     /// cost without removing it: an idle window still buys a round of puts and a
     /// record. Skipping it costs a longer replay on the next activation, and replay
-    /// reads come from the *local* store (storage §8), where there is capacity to spare
+    /// reads come from the *local* store (storage §9), where there is capacity to spare
     /// (hw §3.1).
     async fn hibernate(&mut self, ctx: &Ctx<Host<G>>) {
         let ectx = self.entity_ctx(ctx);
@@ -793,7 +793,7 @@ impl<G: Entity> Host<G> {
         self.step_down(ctx); // emit Deactivated + stop, the one deactivation seam
     }
 
-    /// Arm the next idle check (spec §7): after `idle_after` of virtual time,
+    /// Arm the next idle check (spec §8): after `idle_after` of virtual time,
     /// send ourselves a [`CheckIdle`].
     ///
     /// The window is exact: no minimum residency and no jitter is applied, though
@@ -813,13 +813,13 @@ impl<G: Entity> Host<G> {
         }));
     }
 
-    /// Arm the durable-alarm timer (spec facets §4.5) from the folded [`Alarm`](crate::alarm::Alarm)
+    /// Arm the durable-alarm timer (spec facets §5.5) from the folded [`Alarm`](crate::alarm::Alarm)
     /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`](Self::alarm_epoch), so a
     /// still-sleeping earlier timer's [`AlarmDue`] is ignored, and it is the sole
     /// disarm when the form carries no deadline. Called after every commit and at the
     /// end of rehydration, so the timer always reflects the durable form (**E3**).
     fn arm_alarm(&mut self, ctx: &Ctx<Host<G>>) {
-        // Keep the per-shard index current before (re)arming the local timer (facets §4.5).
+        // Keep the per-shard index current before (re)arming the local timer (facets §5.5).
         self.sync_alarm_index(ctx);
         self.alarm_epoch = self.alarm_epoch.wrapping_add(1);
         let Some(due_nanos) = self.activation.facets.alarm_due() else {
@@ -837,7 +837,7 @@ impl<G: Entity> Host<G> {
     }
 
     /// Register (or clear) this entity's pending deadline in its shard's alarm index
-    /// (spec facets §4.5), so a node that later leads the shard (or this node's own
+    /// (spec facets §5.5), so a node that later leads the shard (or this node's own
     /// driver, once the entity hibernates) can re-activate it with no caller. A
     /// no-op unless the node wired its alarm index into this type; the entity's own
     /// alarm facet, not the index, is the source of truth.
@@ -879,7 +879,7 @@ impl<G: Entity> Host<G> {
         }));
     }
 
-    /// Push one committed batch to every live sink (spec §6.3). `try_send`, never
+    /// Push one committed batch to every live sink (spec §7.3). `try_send`, never
     /// `send`: a sink whose buffer is full is dropped (the subscriber re-subscribes
     /// and backfills by `load`), so a slow subscriber never blocks a write. Only
     /// enqueues to in-process channels; the cross-node push is in each forwarder.
@@ -895,11 +895,11 @@ impl<G: Entity> Actor for Host<G> {
     type System = G::System;
 
     /// Accept each of the entity's commands over the network as `RunTyped<M>` (spec
-    /// §4.5). The list is the entity's own `register` allowlist, bridged through
+    /// §5.5). The list is the entity's own `register` allowlist, bridged through
     /// [`EntityRegistry`].
     fn register(registry: &mut HandlerRegistry<Host<G>>) {
         // The framework built-in: every entity type's host accepts `Subscribe`
-        // (spec §6.3), independent of the entity's own allowlist below.
+        // (spec §7.3), independent of the entity's own allowlist below.
         registry.accept::<Subscribe<G>>();
         let mut entity_registry = EntityRegistry::<G>::new();
         G::register(&mut entity_registry);
@@ -918,7 +918,7 @@ where
     G: EntityHandler<M>,
     M: Message,
 {
-    /// The command path of the §5 protocol: the entity's handler is the decision.
+    /// The command path of the §6 protocol: the entity's handler is the decision.
     async fn handle(
         &mut self,
         msg: RunTyped<M>,
@@ -932,7 +932,7 @@ where
 }
 
 impl<G: Entity> Handler<Subscribe<G>> for Host<G> {
-    /// Register a record sink (spec §6.3). The forwarder pushes batches off the
+    /// Register a record sink (spec §7.3). The forwarder pushes batches off the
     /// host's executor, so transport backpressure never reaches the write path;
     /// the returned head tells the subscriber how far to backfill.
     async fn handle(&mut self, msg: Subscribe<G>, ctx: &Ctx<Host<G>>) -> Subscribed {
@@ -940,11 +940,11 @@ impl<G: Entity> Handler<Subscribe<G>> for Host<G> {
         let sink = msg.sink;
         ctx.system().launch(Box::pin(async move {
             // Ends when the host drops `tx` (a lag-drop, deactivation, or a
-            // forced step-down, §6.3/§7) or the sink is gone. Dropping `tx`
+            // forced step-down, §7.3/§8) or the sink is gone. Dropping `tx`
             // alone would end only this task: the sink, spawned on the
             // subscriber's node, would keep the subscriber's stream open and
             // silent. So the close is told to the sink explicitly, and the
-            // subscriber re-subscribes and backfills (§6.3). A sink already gone
+            // subscriber re-subscribes and backfills (§7.3). A sink already gone
             // dead-letters the close, which is fine.
             while let Ok(batch) = rx.recv().await {
                 if sink.tell((*batch).clone()).await.is_err() {
@@ -961,7 +961,7 @@ impl<G: Entity> Handler<Subscribe<G>> for Host<G> {
 impl<G: Entity> Handler<AlarmDue> for Host<G> {
     async fn handle(&mut self, msg: AlarmDue, ctx: &Ctx<Host<G>>) {
         // Ignore a superseded timer: a re-arm (a later commit, or a re-activation)
-        // bumped the epoch, so this tick is from a cancelled deadline (spec facets §4.5).
+        // bumped the epoch, so this tick is from a cancelled deadline (spec facets §5.5).
         if msg.epoch != self.alarm_epoch {
             return;
         }
@@ -1005,7 +1005,7 @@ impl<G: Entity> Handler<Terminated> for Host<G> {
     async fn handle(&mut self, msg: Terminated, ctx: &Ctx<Host<G>>) {
         // A failed commit steps the activation down (the journal is the authority,
         // E3); the next activation re-watches from its folded state and a
-        // watch-after-death re-fires (actor §2.5).
+        // watch-after-death re-fires (actor §10).
         let _ = self.run_peer_terminated(msg, ctx).await;
     }
 }
@@ -1013,12 +1013,12 @@ impl<G: Entity> Handler<Terminated> for Host<G> {
 impl<G: Entity> Handler<CheckIdle> for Host<G> {
     async fn handle(&mut self, _msg: CheckIdle, ctx: &Ctx<Host<G>>) {
         let now = ctx.system().now();
-        // Idle long enough AND the entity permits eviction (§7): an entity with
+        // Idle long enough AND the entity permits eviction (§8): an entity with
         // autonomous, not-yet-journaled work vetoes hibernation until it settles
         // (`can_hibernate`), so the host reschedules rather than evicting it
         // mid-flight.
         //
-        // A pending durable alarm pins the entity resident (spec facets §4.5) unless its
+        // A pending durable alarm pins the entity resident (spec facets §5.5) unless its
         // *current* deadline is acked-registered in the per-shard [`AlarmIndex`],
         // so the driver's leader sweep (entity_ref.rs) will re-activate it at its due
         // time with no caller. Anything short of that keeps the safe default: stay

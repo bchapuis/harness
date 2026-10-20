@@ -1,20 +1,20 @@
-//! The production TCP [`Transport`] (spec §2.13).
+//! The production TCP [`Transport`] (spec cluster §4).
 //!
 //! Frames travel length-delimited over TCP (see [`crate::wire`]). Each *directed*
 //! pair of nodes uses its own connection, and outbound traffic always goes over
 //! the connection this node dialed, so per-pair FIFO ordering holds end to end
-//! over one association (spec §3.3, §4). Accepted connections are receive-only: a
+//! over one association (spec §6, §8.1). Accepted connections are receive-only: a
 //! reply travels back over the replier's own dialed connection, not the request's
 //! socket.
 //!
 //! Before any actor traffic, the two ends exchange a [`Hello`] handshake (the
 //! wire version, node identity, codec name, cluster secret) and reject the
-//! association on any mismatch (spec §2.14). When a [`TlsConfig`] is present the
+//! association on any mismatch (spec cluster §9.1). When a [`TlsConfig`] is present the
 //! handshake runs over a mutually-authenticated TLS stream and the node allowlist
-//! is enforced (§9).
+//! is enforced (cluster §11).
 //!
 //! Addresses live in a runtime book **seeded** from [`TcpConfig::peers`] and
-//! grown **dynamically** (spec §6.3): every handshake teaches both ends the
+//! grown **dynamically** (spec cluster §5.3): every handshake teaches both ends the
 //! peer's advertised address, and nodes periodically gossip their known
 //! `(node, address)` table, so addresses propagate to peers a node never
 //! directly contacted. An unknown peer, a failed dial, or a closed connection
@@ -93,7 +93,7 @@ pub fn node_addr(host: &str, port_base: u16, id: u64) -> Result<SocketAddr, Stri
         .ok_or_else(|| format!("resolve {host}:{port}: no address"))
 }
 
-/// The TLS material for mutually-authenticated associations (spec §9). Both
+/// The TLS material for mutually-authenticated associations (spec cluster §11). Both
 /// the acceptor and the connector require a peer certificate, so every
 /// association is mutually authenticated against the trusted roots baked into
 /// these configs. [`mutual`](TlsConfig::mutual) assembles them from the raw
@@ -146,7 +146,7 @@ impl TlsConfig {
 trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
-/// Static configuration for a [`TcpTransport`] (spec §2.14, §9).
+/// Static configuration for a [`TcpTransport`] (spec cluster §9.1, §11).
 #[derive(Clone)]
 pub struct TcpConfig {
     /// This node's identity, announced in the handshake.
@@ -155,32 +155,32 @@ pub struct TcpConfig {
     /// back (the bound address may be a wildcard or ephemeral port).
     pub advertised: SocketAddr,
     /// Seed addresses: enough peers to reach the cluster once. The runtime
-    /// address book starts here and grows by handshake and gossip (spec §6.3).
+    /// address book starts here and grows by handshake and gossip (spec cluster §5.3).
     pub peers: BTreeMap<NodeId, SocketAddr>,
-    /// How often to gossip the known endpoint table to peers (spec §6.3).
+    /// How often to gossip the known endpoint table to peers (spec cluster §5.3).
     /// 1 second from [`TcpConfig::new`].
     pub endpoint_gossip_interval: Duration,
-    /// How long a TCP connect may take before it is `Unreachable` (spec §2.13), so
+    /// How long a TCP connect may take before it is `Unreachable` (spec cluster §4), so
     /// a dial to a black-holed peer cannot stall the detector or gossip.
     /// 5 seconds from [`TcpConfig::new`].
     pub connect_timeout: Duration,
     /// How long the association handshake may take before it is torn down (spec
-    /// §2.13, §9), so a silent peer cannot tie up a task. 5 seconds from
+    /// cluster §4, §11), so a silent peer cannot tie up a task. 5 seconds from
     /// [`TcpConfig::new`].
     pub handshake_timeout: Duration,
     /// Per-peer outbound queue depth before sends fail fast with backpressure
-    /// (spec §3.3, §4): a bounded queue means a peer too slow to drain it costs
+    /// (spec §6, §8.1): a bounded queue means a peer too slow to drain it costs
     /// failed sends, never unbounded memory. 1024 from [`TcpConfig::new`].
     pub outbound_capacity: usize,
-    /// The wire codec; both ends must agree (spec §2.11).
+    /// The wire codec; both ends must agree (spec §3.4).
     pub codec: Arc<dyn Codec>,
     /// A shared secret that guards against accidental cross-cluster association
-    /// (spec §9). Peers presenting a different secret are rejected.
+    /// (spec cluster §11). Peers presenting a different secret are rejected.
     pub cluster_secret: String,
-    /// If set, only these node identities may associate (spec §9). `None`
+    /// If set, only these node identities may associate (spec cluster §11). `None`
     /// permits any peer that clears the version/codec/secret checks.
     pub allowlist: Option<BTreeSet<NodeId>>,
-    /// How this association is protected on the wire (spec §9).
+    /// How this association is protected on the wire (spec cluster §11).
     ///
     /// Deliberately not an `Option<TlsConfig>` defaulting to `None`: the plaintext
     /// choice is a security decision every deployment must make on purpose, and an
@@ -221,7 +221,7 @@ impl TcpConfig {
     }
 }
 
-/// How a transport association is protected (spec §9).
+/// How a transport association is protected (spec cluster §11).
 ///
 /// The `cluster_secret` is what authorizes membership, and it crosses the wire in
 /// the association handshake. Under [`Encryption::PlaintextTrusted`] anyone who can
@@ -245,14 +245,14 @@ struct Shared {
     /// The per-peer association slots ([`Slots`]): outbound connections this
     /// node dialed, one live per peer. Held only briefly to decide; dialing
     /// happens with the lock released. The queue is bounded (backpressure,
-    /// spec §3.3). The arbitration and eviction *rules* live socket-free in
+    /// spec §6). The arbitration and eviction *rules* live socket-free in
     /// [`crate::association`], where they are deterministically tested.
     slots: Mutex<Slots<Conn>>,
-    /// The runtime address book ([`Book`], spec §6.3): seeded from config,
+    /// The runtime address book ([`Book`], spec cluster §5.3): seeded from config,
     /// then grown as handshakes and gossip reveal more peers.
     book: Mutex<Book>,
     /// Flipped to `true` on [`shutdown`](TcpTransport::shutdown); the accept loop,
-    /// gossip loop, and connection tasks watch it and stop (spec §6.3).
+    /// gossip loop, and connection tasks watch it and stop (spec cluster §5.3).
     shutdown: watch::Sender<bool>,
 }
 
@@ -313,7 +313,7 @@ impl Shared {
     /// we reached it.
     fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
         // Version first, so a build skew is never reported as a security failure
-        // (compatibility §3.3).
+        // (cluster §4).
         WIRE.admit(hello.version).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));
@@ -376,7 +376,7 @@ impl TcpTransport {
 
     /// Get a sender to `peer`'s outbound queue, dialing and handshaking if no
     /// live connection exists. Connect and handshake are bounded by timeouts, so
-    /// an unresponsive peer surfaces as `Unreachable` (spec §2.13).
+    /// an unresponsive peer surfaces as `Unreachable` (spec cluster §4).
     async fn connection(&self, peer: NodeId) -> Result<Conn, TransportError> {
         // Fast path: reuse a live connection.
         if let Some(conn) = self.lookup(peer) {
@@ -464,7 +464,7 @@ impl Transport for TcpTransport {
         // Non-blocking enqueue with backpressure: a full queue (peer too slow) or
         // a closed one (connection died) both surface as `Unreachable`, and the
         // dead/saturated entry is dropped so the next send re-dials. At-most-once:
-        // this frame is never resent (spec §4), and a dropped frame an `ask` was
+        // this frame is never resent (spec §8.1), and a dropped frame an `ask` was
         // awaiting completes it as `Unreachable`, so nothing is silently lost.
         conn.tx.try_send(Wire::Frame(frame)).map_err(|_| {
             self.shared
@@ -476,7 +476,7 @@ impl Transport for TcpTransport {
         })
     }
 
-    /// Stop the node's transport (spec §6.3): signal the accept, gossip, and
+    /// Stop the node's transport (spec cluster §5.3): signal the accept, gossip, and
     /// connection tasks to exit (releasing the listener and open sockets), close
     /// the inbound path so the receive loop ends, and drop the outbound queues.
     /// Idempotent.
@@ -503,17 +503,17 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                 let _ = stream.set_nodelay(true);
                 tokio::spawn(serve_accepted(stream, Arc::clone(&shared)));
             }
-            _ = shutdown.changed() => return, // node stopping (spec §6.3)
+            _ = shutdown.changed() => return, // node stopping (spec cluster §5.3)
         }
     }
 }
 
 /// Handshake an accepted connection, then read frames from it until it closes.
 /// A failed TLS or application handshake tears down the association, never the
-/// node (spec §2.13, §9).
+/// node (spec cluster §4, §11).
 async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
     // Bound the whole accept-side handshake: a peer that connects but never
-    // speaks must not tie up this task (spec §2.13, §9). As on the dial side,
+    // speaks must not tie up this task (spec cluster §4, §11). As on the dial side,
     // the stream type is erased first so the sequence exists once for both
     // encryption modes.
     let handshake_timeout = shared.config.handshake_timeout;
@@ -574,7 +574,7 @@ async fn dialed_connection<S>(
     tokio::select! {
         _ = &mut writer => {}
         _ = &mut reader => {}
-        _ = shutdown.changed() => {} // node stopping (spec §6.3)
+        _ = shutdown.changed() => {} // node stopping (spec cluster §5.3)
     }
 
     // Deregister so the next send re-dials. `evict_if_same` leaves a successor
@@ -602,14 +602,14 @@ where
                 }
                 Err(_) => return, // malformed frame or peer closed
             },
-            _ = shutdown.changed() => return, // node stopping (spec §6.3)
+            _ = shutdown.changed() => return, // node stopping (spec cluster §5.3)
         }
     }
 }
 
 /// Dispatch an inbound [`Wire`] message: actor frames go up to the cluster's
 /// receive loop; an endpoint table is merged into the address book and consumed
-/// here (spec §6.3). Returns `false` if the cluster's receive side is gone.
+/// here (spec cluster §5.3). Returns `false` if the cluster's receive side is gone.
 async fn deliver(shared: &Arc<Shared>, peer: NodeId, msg: Wire) -> bool {
     match msg {
         Wire::Frame(frame) => shared.inbound.send((peer, frame)).await.is_ok(),
@@ -622,7 +622,7 @@ async fn deliver(shared: &Arc<Shared>, peer: NodeId, msg: Wire) -> bool {
 
 /// Dialer side of the handshake: announce ourselves, then read and validate the
 /// peer's `Hello`, confirming it is the node we meant to reach, and learn its
-/// advertised address (spec §6.3).
+/// advertised address (spec cluster §5.3).
 async fn client_handshake<S>(mut stream: S, shared: &Arc<Shared>, expected: NodeId) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -638,7 +638,7 @@ where
 
 /// Acceptor side of the handshake: read and validate the peer's `Hello` first,
 /// then announce ourselves. Returns the verified peer identity and learns its
-/// advertised address (spec §6.3).
+/// advertised address (spec cluster §5.3).
 async fn server_handshake<S>(mut stream: S, shared: &Arc<Shared>) -> io::Result<(S, NodeId)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -652,7 +652,7 @@ where
     Ok((stream, node))
 }
 
-/// Endpoint anti-entropy (spec §6.3): every `interval`, push the known
+/// Endpoint anti-entropy (spec cluster §5.3): every `interval`, push the known
 /// `(node, address)` table to each known peer, dialing it if not already
 /// connected. Gossip is the bootstrap, so it must be able to dial.
 ///
@@ -666,7 +666,7 @@ async fn endpoint_gossip(transport: TcpTransport, interval: Duration) {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
-            _ = shutdown.changed() => return, // node stopping (spec §6.3)
+            _ = shutdown.changed() => return, // node stopping (spec cluster §5.3)
         }
         // One lock: the table to push and who to push it to (the book minus
         // ourselves, connected or not) are one consistent snapshot.

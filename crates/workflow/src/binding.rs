@@ -1,7 +1,7 @@
-//! An activation-scoped external resource (workflow spec §2.6).
+//! An activation-scoped external resource (workflow spec §8).
 //!
 //! A consumer frequently holds something for the life of an activation, such as
-//! the agent runtime's sandbox (agent §2.3): opened once, released on every
+//! the agent runtime's sandbox (agent §3.3): opened once, released on every
 //! deactivation, and vetoing hibernation while the open is in flight.
 //!
 //! The workflow supplies this as a **component rather than a trait method**,
@@ -13,7 +13,7 @@
 //! `on_deactivate` ([`Binding::take`]). A consumer that does not need one declares
 //! nothing.
 
-/// Where an activation-scoped resource stands (spec §2.6).
+/// Where an activation-scoped resource stands (spec §8).
 pub enum BindingState<T> {
     /// Nothing held, nothing in flight. The next effect that needs the resource
     /// triggers the open (lazily, so an entity that never needs one never pays).
@@ -42,7 +42,7 @@ impl<T> std::fmt::Debug for BindingState<T> {
     }
 }
 
-/// An activation-scoped external resource (spec §2.6): opened once on demand,
+/// An activation-scoped external resource (spec §8): opened once on demand,
 /// released by its holder on every deactivation, and never journaled.
 pub struct Binding<T> {
     state: BindingState<T>,
@@ -93,7 +93,7 @@ impl<T> Binding<T> {
     }
 
     /// Whether an open is in flight, and therefore whether this binding vetoes
-    /// hibernation (§6). A `Failed` binding does **not** veto: the failure is
+    /// hibernation (§7). A `Failed` binding does **not** veto: the failure is
     /// the activation's to surface through a settle, not to wait on.
     pub fn is_opening(&self) -> bool {
         matches!(self.state, BindingState::Opening)

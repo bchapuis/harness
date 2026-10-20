@@ -79,7 +79,7 @@ fn main() {
     divan::main();
 }
 
-/// The facet's fixed block size (spec facets §4.4), mirrored here: every benchmark below
+/// The facet's fixed block size (spec facets §5.4), mirrored here: every benchmark below
 /// is per-block or a whole multiple of it, so it must be the same 1 MiB the facet
 /// hashes and puts.
 const BLOCK: usize = 1 << 20;
@@ -267,7 +267,7 @@ impl Entity for DiskBox {
     }
 }
 
-/// Provision the image from a source file, the create path (facets §4.4: the base image
+/// Provision the image from a source file, the create path (facets §5.4: the base image
 /// *is* a capture), and the command a machine create is waiting on.
 #[derive(Clone, Serialize, Deserialize)]
 struct ImportFrom(String);
@@ -501,7 +501,7 @@ fn puts(bencher: Bencher, count: usize) {
 }
 
 /// A capture of an untouched image: the full scan, every block clean, nothing put
-/// and nothing staged (§6; the command rides the read path).
+/// and nothing staged (§7; the command rides the read path).
 ///
 /// The floor under *every* capture, paid by a checkpointing machine at each quiescent
 /// point whether or not the guest wrote anything. It should come out at layer 1's

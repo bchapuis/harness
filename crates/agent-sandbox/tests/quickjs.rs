@@ -162,7 +162,7 @@ fn a_runaway_script_is_stopped_by_fuel() {
     let out = run_js(&bench, json!({ "code": "while (true) {}" }));
     assert!(
         matches!(&out, Err(ToolError::Sandbox(e)) if e.contains("fuel")),
-        "an infinite JS loop is bounded by fuel (§4.2), got {out:?}"
+        "an infinite JS loop is bounded by fuel (§5.2), got {out:?}"
     );
 }
 

@@ -1,11 +1,11 @@
-//! The workspace-sync channels, host side (machine spec §4): `WsPush`,
+//! The workspace-sync channels, host side (machine spec §6): `WsPush`,
 //! `WsPull`, and `Sync` drivers over the guest agent's channel protocol
 //! ([`machine_proto`]) and the shared frame codec ([`machine_host::vsock`]).
 //!
 //! One connection per op. A push sends the header, `Data` chunks, `Eof`, and
 //! reads a status; a pull sends the header and reads `Data` chunks to `Eof`
 //! then a status, the accumulation capped at [`MAX_TAR`] before any byte
-//! sizes a host allocation (sandbox spec §4.2).
+//! sizes a host allocation (sandbox spec §5.2).
 //!
 //! The drivers take an opened channel, not a socket path: the same three ops run
 //! over a microVM's vsock and over a container's relayed pipe, because what
@@ -109,7 +109,7 @@ pub async fn pull(mut stream: impl Duplex) -> Result<Vec<u8>, SyncError> {
     Ok(tar)
 }
 
-/// `Sync`: flush the guest's page cache (machine §2.4), so the pause that
+/// `Sync`: flush the guest's page cache (machine §3.3), so the pause that
 /// follows a pull sees a filesystem-clean image.
 pub async fn sync(mut stream: impl Duplex) -> Result<(), SyncError> {
     read_to_status(&mut stream, None).await

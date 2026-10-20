@@ -1,4 +1,4 @@
-//! Durable Raft state on the local filesystem (spec §6.4.3 item 2, §6).
+//! Durable Raft state on the local filesystem (spec cluster §5.4.3 item 2, cluster §5).
 //!
 //! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote, log, and
 //! state-machine snapshot survive a process restart, so a restarted voter can never
@@ -22,7 +22,7 @@
 //!   [`Wal::truncate`](wal::Wal::truncate) at the entry's recorded offset followed by
 //!   [`Wal::append_batch`](wal::Wal::append_batch); both fsync before returning.
 //! - **`snapshot`**: one postcard record `{index, term, data}` for the compacted
-//!   prefix (§6), rewritten by the same atomic replace as `term`. Written *before*
+//!   prefix (cluster §5), rewritten by the same atomic replace as `term`. Written *before*
 //!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
 //!   than the log but never the reverse. Stamped as `actor.raft.snapshot`
 //!   (compatibility §4). This is the format where a *missing* stamp would be most
@@ -91,7 +91,7 @@ const LOG_RECORDS: compat::Format = compat::Format::new("actor.raft.log", 1);
 const TERM: compat::Stamp =
     compat::Stamp::new(b"\x89RFTERM\n", compat::Format::new("actor.raft.term", 1));
 
-/// The `term` file's content (spec §6.4.3 item 2): the current term and the
+/// The `term` file's content (spec cluster §5.4.3 item 2): the current term and the
 /// vote cast in it, always written together; they are one atomic decision.
 #[derive(Serialize, Deserialize)]
 struct TermRecord {
@@ -114,7 +114,7 @@ const SNAPSHOT: compat::Stamp = compat::Stamp::new(
     compat::Format::new("actor.raft.snapshot", 1),
 );
 
-/// The `snapshot` file's content behind the stamp (spec §6): the compacted
+/// The `snapshot` file's content behind the stamp (spec cluster §5): the compacted
 /// prefix's last index and term, and the application snapshot taken at it.
 #[derive(Serialize, Deserialize)]
 struct SnapshotBody {
@@ -253,7 +253,7 @@ impl FileRaftWAL {
     /// `(group, node)`'s state lives in its own `data_dir/<group>/<node>/`
     /// subdirectory, so a node's several Raft groups never share a log. Panics if
     /// a directory cannot be opened: a voter without durable storage must not
-    /// start (spec §6.4.3 item 2).
+    /// start (spec cluster §5.4.3 item 2).
     ///
     /// [`RaftConfig::storage`]: actor_cluster::RaftConfig
     pub fn factory(

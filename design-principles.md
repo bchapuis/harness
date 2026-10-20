@@ -24,7 +24,7 @@ Complexity accumulates one small compromise at a time. Tolerate none.
 Working code is not the goal; a good design is. Spend a steady fraction of effort
 improving structure rather than bolting on the smallest patch that works. The spec's
 design stance is this principle in the large: hand-written manifests and `register` lists
-(§1, §2.10) cost the user boilerplate now to keep the wire contract explicit and the
+(§1, §7) cost the user boilerplate now to keep the wire contract explicit and the
 framework simple.
 
 ```rust
@@ -47,7 +47,7 @@ let payload = encode(codec, &msg)?;
 let bytes = system.remote_ask(&id, M::MANIFEST, payload, deadline).await?;
 let reply: M::Reply = decode(codec, &bytes)?;
 
-// ✓ Deep: one call hides local-vs-remote, codec, correlation, and timeout (§2.2, §2.10).
+// ✓ Deep: one call hides local-vs-remote, codec, correlation, and timeout (§3.2, §7).
 let reply = actor.ask(msg).await?;
 ```
 
@@ -56,13 +56,13 @@ let reply = actor.ask(msg).await?;
 Each module should encapsulate one design decision and expose none of it. When two
 modules share a secret, changing it changes both. Consolidate the secret. The framework's
 central secret is actor state: it lives inside the actor and is reachable only through its
-own handlers (§2.1).
+own handlers (§3.1).
 
 ```rust
 // ✗ A handle that hands out the actor's state couples every caller to it.
 
-// ✓ ActorRef holds only { id, system }, never state or handlers (§2.2). The actor's
-//   fields stay private; the codec is likewise a private, per-system choice (§2.11).
+// ✓ ActorRef holds only { id, system }, never state or handlers (§3.2). The actor's
+//   fields stay private; the codec is likewise a private, per-system choice (§3.4).
 pub struct ActorRef<A: Actor> { id: ActorId, system: A::System }
 ```
 
@@ -71,12 +71,12 @@ pub struct ActorRef<A: Actor> { id: ActorId, system: A::System }
 Make the interface general enough to describe without naming the caller; let the
 implementation serve only today's need. General interfaces are smaller and decoupled. The
 runtime seam is the prime example: production and the simulator are two implementations of
-the *same* traits (§2.12.1, §2.12.2), so the real system code runs unchanged under test.
+the *same* traits (§11.1, §11), so the real system code runs unchanged under test.
 
 ```rust
 // ✗ Bake tokio + the wall clock + an OS RNG into the runtime; nothing can drive it deterministically.
 
-// ✓ General capabilities; production and simulation each implement them (§2.12.1).
+// ✓ General capabilities; production and simulation each implement them (§11.1).
 pub trait Clock:   Clone + Send + Sync + 'static { fn now(&self) -> Instant; /* sleep, timeout */ }
 pub trait Entropy: Send + Sync + 'static { fn next_u64(&self) -> u64; /* pick_index */ }
 pub trait Spawner: Send + Sync + 'static { fn launch(&self, task: BoxFuture<'static, ()>); }
@@ -87,14 +87,14 @@ pub trait Spawner: Send + Sync + 'static { fn launch(&self, task: BoxFuture<'sta
 Each layer should offer a different abstraction. Delete layers that only relay. Remove
 pass-through methods and pass-through variables; carry cross-cutting values in a context.
 The typed `ActorRef` layer and the byte-level `ActorSystem` trait are different
-abstractions (types and locality above, serialized payloads and transport below, §2.8),
+abstractions (types and locality above, serialized payloads and transport below, §3.3),
 not one forwarding to the other.
 
 ```rust
 // ✗ Adds nothing.
 fn fetch(&self, id: ActorId) -> ActorRef<A> { self.system.resolve(id) }
 
-// ✓ Thread shared capabilities through context, not every signature (§2.3).
+// ✓ Thread shared capabilities through context, not every signature (§3.2).
 async fn handle(&mut self, msg: M, ctx: &Ctx<Self>) -> M::Reply;
 ```
 
@@ -107,13 +107,13 @@ implementer absorb hard cases; give callers sane defaults.
 // ✗ Make the user run the lifecycle: reserve an id, start a mailbox, mark ready…
 
 // ✓ One call composes assign_id → register mailbox → actor_ready; the order is the
-//   system's secret, not the caller's burden (§2.8, §3.1).
+//   system's secret, not the caller's burden (§3.3, §4).
 fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;
 ```
 
 Pull down complexity about *how* the module works. Leave up choices about *what* the
 caller wants. A local actor inherits an empty `register` default and never thinks about
-the wire (§2.10); a remote one overrides it; one spawn path serves both.
+the wire (§7); a remote one overrides it; one spawn path serves both.
 
 ## Define errors out of existence
 
@@ -124,13 +124,13 @@ otherwise mask it inside the module or handle many sites in one place.
 // ✗ If resolution could fail, every send site would branch on it.
 
 // ✓ Every ActorId is well-formed and locality-classifiable, so resolve is infallible:
-//   there is no failure case to handle (§2.2, §3.2).
+//   there is no failure case to handle (§3.2, §5).
 fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 ```
 
 This is design, not `unwrap()`. Keep `Result`/`CallError` for genuine transport failures;
 eliminate the fake ones. Keep the two kinds apart: an application failure is a *value*
-inside `M::Reply` (e.g. `Result<T, E>`), distinct from a transport `CallError` (§2.1, §8).
+inside `M::Reply` (e.g. `Result<T, E>`), distinct from a transport `CallError` (§3.1, §8).
 The type system then forces the caller to handle the real ones.
 
 ## Decide: together or apart
@@ -152,7 +152,7 @@ hard to describe, the design is too complex.
 
 ```rust
 /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed and
-/// locality-classifiable (§2.2), so resolution never fails; callers need no error arm.
+/// locality-classifiable (§3.2), so resolution never fails; callers need no error arm.
 fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 ```
 
@@ -163,7 +163,7 @@ consistently. A name you cannot choose signals a muddled design.
 
 ```rust
 // ✗ spawn() for both raw tasks and actors blurs two distinct concepts.
-// ✓ launch() a raw future; spawn() an actor: one word per concept (§2.12.1, §2.3).
+// ✓ launch() a raw future; spawn() an actor: one word per concept (§11.1, §3.2).
 fn launch(&self, task: BoxFuture<'static, ()>);   // Spawner
 fn spawn<A: Actor>(&self, actor: A) -> ActorRef<A>;
 ```
@@ -176,7 +176,7 @@ consistency cuts cognitive load.
 
 ```rust
 // ✗ supervise(true, 5, false)
-// ✓ A named directive states intent (§2.4).
+// ✓ A named directive states intent (§9).
 SupervisionDirective::Restart {
     max: 5,
     within: Duration::from_secs(30),
@@ -193,7 +193,7 @@ costs before deciding: [docs/hardware-envelope.md](docs/hardware-envelope.md) st
 machine this tree targets and the arithmetic that follows, so a technique inherited from
 slower storage has to re-earn its complexity against the numbers rather than against
 habit. The local fast path is design, not micro-optimization: a local send enqueues by
-value and skips serialization entirely (§3.2), yet its observable result is identical to
+value and skips serialization entirely (§5), yet its observable result is identical to
 the remote path. The framework ships no macros of its own (§1), resisting the
 derive-everything trend except where an *optional* derive lowers boilerplate.
 

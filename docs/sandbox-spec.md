@@ -1,134 +1,153 @@
 # Sandbox Execution Tiers: Specification
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119. Sections of this document are cited as plain **§N**; other documents carry a prefix: **agent §N**, **entity §N**, **actor §N**, **machine §N**. Invariants defined here are **S1–S5** (§6).
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119. Sections of this document are cited as plain **§N**; other documents carry a prefix: **agent §N**, **facets §N**, **actor §N**, **machine §N**, **edge §N**. Invariants defined here are **S1–S5** (§7).
 
 ## 1. Scope
 
-A sandbox provider supplies the isolated environments the agent runtime's tools run in, behind the runtime's sandbox seam (agent §2.3). This document is the provider's side of that seam: what each tier grants and withholds, what a provider MUST guarantee to offer it, and how it reports loss. The runtime's side (when it opens, what it journals, what it passes) is the agent specification's (agent §2.3, §4.5). This document adds no seam method and no record: `TierAcquired`, `WorkspaceReset`, and tool outcomes are the runtime's vocabulary. The first provider is `agent-sandbox`'s `TieredSandboxes`.
-
-**Rationale:** a sandbox that offers everything offers too much. Most calls only read and write files, and granting them a shell grants the kernel's attack surface for free. Each tier adds one dangerous capability (guest code, network, native processes), taken only through a journaled acquisition, so the tiers that expose the kernel run rarely and the journal records when. Confinement is mandated per tier as a property, not a product.
+A sandbox provider supplies the isolated environments in which the agent runtime's tools run, behind the runtime's sandbox seam (agent §3.3). This document is the provider's side of that seam: the execution tiers, what each grants and withholds, what a provider guarantees in order to offer one, and how it reports loss. The seam's signature and the runtime's side (when it opens, what it journals, which tier each call carries) are the agent's (agent §3.3, §5.3–§5.5), and the workspace is the session's workspace facet (facets §5.1). The runtime is a provider's only caller. This document adds no seam operation and no record: `TierAcquired` and `WorkspaceReset` are the runtime's.
 
 ### 1.1 Non-goals
 
-- **An isolation-technology mandate:** obligations are properties (a path is unrepresentable; egress is default-deny), not products.
-- **A permission system:** the tier cap is static deployment configuration (agent §2.4).
-- **Ingress:** no tier accepts inbound connections; a sandboxed server is reachable only from inside its own environment. The persistent machine accepts inbound connections through its own seam (machine §2), outside this model.
+- **No isolation technology is mandated:** every obligation is a property, met by whatever means the provider chooses.
+- **No per-call permission system:** the only gate on a tier is the kind's tier cap, part of the kind's definition (agent §6.1).
+- **No ingress:** no tier accepts inbound connections, and a server a tool starts is reachable only from inside its own environment. The persistent machine's ingress (machine §5.1) is outside this model.
 
-## 2. Seams
+### 1.2 Conformance classes
 
-### 2.1 The provider (`SandboxProvider`, `Sandbox`)
+- A **provider** conforms by meeting §3–§6 for every tier it offers.
+- A **deployment** that chooses a provider conforms by meeting §5.4.
 
-A plug point: a provider implements it, and the agent runtime consumes it, one environment per session activation (signatures in agent §2.3). `open` receives the session id, the kind's `SandboxProfile` (a provider-interpreted image, the tier cap, the `Network` egress allowlist, and `ComputeLimits`), and the session's workspace directory.
+The runtime is bound by agent §3.3, §5.5, not by this document.
 
-- **The workspace is the caller's.** It is the session's workspace facet (facets §4.1), materialized by the runtime before the open. A provider MAY create it when absent, and MUST NOT delete or truncate it, on `release` or ever: its durability is the caller's, captured after each call.
-- **A grant is honored or refused.** A provider MUST refuse at `open`, with a `SandboxError`, a profile whose grants it cannot honor at every tier it offers (for example a non-empty egress allowlist where its `Native` realization has no dataplane, since holding `Native` implies `Network`'s grants, §3.2). It MUST NOT open and silently withhold a grant.
-- **Calls run at the tier passed.** `call` MUST execute at the tier the runtime passes and no other (§3.3).
-- **Calls may overlap.** The runtime MAY issue several calls on one `Sandbox` concurrently. A provider MUST execute them without corrupting one another, and the runtime's capture after each records the directory as it then stands, concurrent writes included.
-- **Loss is reported as loss.** A call MUST resolve as `ToolError::EnvironmentLost` when the environment itself is gone (§5.2), and any other failure as another `ToolError`.
-- **Release is total.** `release` MUST tear down every provisioned tier's environment, and MUST be idempotent (S5).
+## 2. Model
 
-### 2.2 The toolset (`ToolDecl`)
+- **Provider**: the role that opens sandboxes for the agent runtime (agent §3.3).
+- **Sandbox**: the isolated environment one open yields, through which every sandboxed call of one session activation runs.
+- **Workspace**: the session's working directory, its workspace facet (facets §5.1). The runtime owns it, materializes it before the open, and captures it after each call (agent §5.3).
+- **Tier**: a named capability set a call requires: `Workspace`, `Compute`, `Network`, or `Native` (§4.1). Every sandboxed call carries one.
+- **Tier environment**: what a provider provisions to execute calls at one tier, such as a guest engine or a confined operating-system environment.
+- **Guest**: code that a compute, network, or native environment executes for a call.
+- **Ambient capability**: one a tool or guest reaches without the provider handing it in: the wall clock, entropy, the network, operating-system identity, a file named by path.
+- **Sandbox profile**: the kind's sandbox configuration, passed at open (agent §3.3): an image the provider interprets, the **tier cap** (§4.2), the **egress allowlist** of hosts the network tier can reach, and compute resource bounds.
+- **Held set**: the tiers the current activation has acquired, each through a journaled `TierAcquired` (agent §5.5), which grants the egress allowlist by reference.
+- **Toolset**: the tools a provider executes, each with a name, a tier, and an input, published as tool declarations (agent §6.1).
+- **Environment loss**: the sandbox itself is gone (its workspace directory or its state has vanished). **Single-tier loss**: one tier environment is gone while the sandbox survives.
+- **Confinement grades** of a native environment: under **shared-kernel confinement** its processes run on the host's kernel, restricted by it, and an escape needs a kernel privilege escalation; under **hardware isolation** they run in a virtual machine and reach the host only through a virtual machine monitor.
+- **Failure values**: a call resolves as a value or a `ToolError`, an open as a sandbox or a `SandboxError` (agent §3.3). `ToolError::EnvironmentLost` reports environment loss (§6.2).
 
-A sandboxed tool's name, tier, and input are the provider's: the provider defines which tools it executes at each tier and what each takes, and publishes them as `ToolDecl`s (`TieredSandboxes::tools`, assembled from `workspace_tools()`, `run_js_tool()`, and a `shell` for the configured native realization). A kind declares the provider's tools as published (agent §2.4).
+## 3. Seams
+
+### 3.1 The provider (`SandboxProvider`, `Sandbox`)
+
+A plug point the agent runtime owns, with its signature and the runtime's side in agent §3.3: a provider implements it, and the runtime opens one sandbox per session activation. `open` takes the session id, the sandbox profile, and the workspace directory; `call` takes a tier, a tool name, and an input; `release` tears the sandbox down. A provider:
+
+- **Leaves the workspace to its owner:** a provider MAY create the workspace when absent, and MUST NOT delete or truncate it, on `release` or at any other time.
+- **Honors a grant or refuses it:** a provider MUST refuse at `open`, with a `SandboxError`, a profile whose grants it cannot honor at every tier it offers, and MUST NOT open and silently withhold a grant. For example, a provider whose native environments have no network path MUST refuse a non-empty egress allowlist, since holding `Native` implies `Network`'s grants (§4.2).
+- **Runs a call at the tier passed:** `call` MUST execute at exactly the tier the runtime passes, never at another (§4.3).
+- **Keeps overlapping calls apart:** a provider MUST execute the calls the runtime overlaps on one sandbox (agent §3.3) without corrupting one another. The runtime's capture after each call records the workspace as it then stands, concurrent writes included.
+- **Reports loss as loss:** a call MUST resolve as `ToolError::EnvironmentLost` when the environment itself is gone (§6.2), and any other failure as another `ToolError`.
+- **Releases totally:** `release` MUST tear down every provisioned tier environment, and MUST be idempotent (S5).
+
+### 3.2 The toolset
+
+A sandboxed tool's name, tier, and input are the provider's: the provider defines which tools it executes at each tier and what each takes, and publishes them as tool declarations, which a kind declares as published (agent §6.1).
 
 - A provider MUST answer a call naming a tool it does not implement at the call's tier with a `ToolError`, executing nothing.
-- A provider SHOULD publish only the tools it can execute as configured, so a kind's digest never asserts an environment the provider lacks.
+- A provider SHOULD publish only the tools it can execute as configured.
 
-## 3. The tier model
+## 4. The tier model
 
-### 3.1 Tiers are capability sets
+### 4.1 Tiers are capability sets
 
-A tier names what a call may touch. Each grants one capability over the workspace and withholds the rest:
+A tier names what a call can touch. Each grants one capability over the workspace and withholds the rest:
 
 | Tier | Grants | Withholds |
 |---|---|---|
-| `Workspace` | the session's scoped filesystem, through host-implemented typed tools | guest code; network; ambient clock and entropy |
-| `Compute` | arbitrary guest code over the workspace | network; ambient clock, entropy, OS identity |
+| `Workspace` | the session's confined filesystem, through typed tools the provider implements | guest code; network; ambient clock and entropy |
+| `Compute` | arbitrary guest code over the workspace | network; ambient clock, entropy, operating-system identity |
 | `Network` | compute, plus egress to the profile's allowlist | egress beyond the allowlist; all ingress |
-| `Native` | OS processes and native binaries inside the confined environment | everything outside the environment |
+| `Native` | operating-system processes and native binaries inside the confined environment | everything outside the environment |
 
-The four form an inclusion chain, `Workspace ⊂ Compute ⊂ Network ⊂ Native`, but the names are not numbers: a peripheral tier would sit beside the chain (§7).
+The four form an inclusion chain, `Workspace ⊂ Compute ⊂ Network ⊂ Native`. Tiers are names, not ranks: only the chain orders them.
 
-### 3.2 Order and the cap
+At every tier, an effect outlives its sandbox only if it lands in the workspace and the runtime captures it (agent §5.3). Everything else a tier environment holds (a guest's memory, a process, a file outside the workspace) lasts at most until the sandbox is released (§4.3) or lost (§6).
 
-A kind's tier cap is a set of tiers, checked by membership: every declared tool's tier MUST be an element of the cap, never merely covered by a greater member, so a cap of `[Native]` rejects a tool declaring `Workspace` (agent §2.4), and a cap MAY hold `Native` without `Network`. A set, unlike a maximum, also admits a peripheral tier beside the chain. Where the chain orders two tiers, holding the greater MUST imply the lesser's grants (a `Native` environment can read its workspace) but not its withholdings (acquiring `Network` does not un-grant compute).
+### 4.2 Order and the cap
 
-### 3.3 Acquisition, provider side
+A tier cap is a set of tiers. A tool's tier is within a cap only when it is a member: a greater member does not cover it. So a cap of {`Native`} excludes a tool declaring `Workspace`, and a cap MAY hold `Native` without `Network`. Kind registration enforces the cap (agent §6.1).
 
-The runtime journals `TierAcquired` before the first call at an unheld tier and passes every call's declared tier (agent §4.5). The provider's half:
+Where the chain orders two tiers, a provider MUST give an environment at the greater tier the lesser tier's grants (a native environment reads and writes its workspace), but not the lesser tier's withholdings (a network environment reaches its allowlisted hosts, though compute withholds the network).
 
-1. **Granted only as journaled:** a provider MUST NOT execute a call at a tier the runtime did not pass. The runtime passes only declared, cap-checked tiers, so a conforming pair grants nothing the journal does not show (S4).
-2. **Provisioned lazily:** a provider builds a tier's environment on the first call that carries it, so a session that never acquires more holds only its workspace. A provider MAY pool or pre-warm environments across sessions, provided no working state leaks between sessions (agent A7).
-3. **Additive, activation-scoped:** held tiers only grow within an activation and all die with it; `release` tears down every provisioned tier (S5), and a fresh activation starts from `Workspace`.
+### 4.3 Acquisition
 
-## 4. Provider obligations per tier
+The runtime journals `TierAcquired` before the first call at a tier the activation does not hold, and passes every call's declared tier (agent §5.5). The provider's half:
 
-### 4.1 `Workspace`: confinement by capability handle
+- **Granted only as journaled:** a provider runs each call at the tier passed (§3.1), and the runtime passes only declared, cap-checked tiers, so a conforming pair grants nothing the journal does not show (S4).
+- **Provisioned on first use:** a provider provisions a tier environment on the first call that carries the tier, so a session that never acquires more holds only its workspace. A provider MAY pool or pre-warm environments across sessions, provided no working state passes between sessions (agent A7).
+- **Additive and activation-scoped:** the held set only grows within an activation and dies with it: a release tears down every provisioned tier environment (S5), and a fresh activation starts from `Workspace`.
 
-The workspace MUST be reachable only through pre-opened directory handles (openat-style), so a path outside the session's workspace is unrepresentable, not merely rejected. String sanitization and canonicalize-then-check are non-conforming: they filter a representable escape, and the symlink and TOCTOU class survives filtering. Workspace tools take no ambient clock or entropy: they are pure functions of the call and the filesystem, so they run unmodified under the deterministic simulator (actor §2.12.2).
+## 5. Provider obligations per tier
 
-### 4.2 `Compute`: hermetic guests
+### 5.1 `Workspace`: confinement by capability
 
-A compute environment executes guest code with no ambient wall clock, entropy, network, or OS identity: every capability the guest holds enters through a host function the provider chose to expose, and the only filesystem it sees is §4.1's workspace. Its outputs are therefore a function of the call, the workspace, and an injected seed. A conforming compute engine MUST be runnable inside the deterministic simulator (actor §2.12.2), which makes "deterministic" checkable. Resource limits (memory and CPU) are REQUIRED; their values are profile configuration (`ComputeLimits`).
+A provider MUST make every path outside the workspace unrepresentable to a workspace tool, not merely rejected: a tool reaches files only through a handle on the workspace directory, opened in advance, that resolves each path inside it, so no relative component, absolute path, or symbolic link names an outside file. Filtering a representable path (string sanitization, or canonicalizing and then checking) does not conform: a symbolic link, or a path changed between the check and the use, survives the filter. Workspace tools take no ambient clock or entropy: each is a pure function of the call and the workspace's contents (actor §11).
 
-The limits MUST also cover what a guest can make the host pay: the bytes handed to a compiler (compilation precedes any execution meter), the table and instance allocations instantiation performs host-side, and any buffer a host function or the call's output materializes outside the guest. A guest-controlled integer (a length in a host-function call, a packed output size) MUST be bounded, or resolved as a view into the guest's own bounded memory, before it sizes anything on the host: an unmetered host allocation is a capability the tier never granted.
+### 5.2 `Compute`: hermetic guests
 
-### 4.3 `Network`: granted egress only
+A compute environment executes guest code with no ambient wall clock, entropy, network, or operating-system identity: every capability the guest holds enters through a host function the provider chose to expose, and the only filesystem it sees is the workspace, confined as in §5.1. Its outputs are therefore a function of the call, the workspace, and a seed the provider injects. A compute environment MUST satisfy the deterministic profile (actor §11).
 
-Egress is default-deny: the only reachable hosts are those on the profile's allowlist that the session's `TierAcquired` record granted by reference, and a provider MUST NOT widen it per call or per session. Egress MUST be attributable to its session (a per-session source identity, proxy, or namespace, at the provider's choice), so provider logs plus the journal answer "which session reached this host". Ingress stays withheld (§1.1).
+Bounds on each call's memory and CPU are REQUIRED, at the values the sandbox profile sets. The bounds MUST also cover what a guest can make the host spend: the bytes handed to a compiler, the allocations instantiation performs on the host, and any buffer a host function or the call's output materializes outside the guest. A guest-controlled integer (a length passed to a host function, a packed output size) MUST be bounded, or resolved as a view into the guest's own bounded memory, before it sizes anything on the host.
 
-### 4.4 `Native`: confinement and the threat model
+### 5.3 `Network`: granted egress only
 
-A native environment runs OS processes with full expressiveness, so its obligation is stated as blast radius: a native tool's effects MUST be confined to the environment. Filesystem outside the workspace mounts, processes outside the environment's lifetime, and network beyond what the held tiers grant are unreachable: the by-construction leg of agent A7. The code here is composed by a model from inputs prompt injection makes attacker-influenced, so it is hostile-code execution.
+Egress is default-deny: a network environment reaches only the hosts on the profile's egress allowlist that the session's `TierAcquired` record granted, and a provider MUST NOT widen that set per call or per session. Every egress flow MUST be attributable to its session: the provider's records, joined with the journal, name the session that reached a host. Ingress stays withheld (§1.1).
 
-- Production deployments SHOULD confine native environments by OS mechanism (user namespaces, seccomp, Landlock) or by hardware virtualization (a microVM). Shared-kernel confinement is SHOULD-grade because kernel privilege-escalation bugs price its guarantee; a microVM turns that residual into a second, far smaller escape problem, at provisioning cost. Multi-tenant deployments SHOULD NOT rely on shared-kernel confinement alone.
-- A development or single-tenant provider MAY run native environments unconfined, and MUST then document itself as trusted-input only.
-- Either way, the journal bounds exposure: `Native` runs only where a declared tool requires it, under a cap the kind agreed to, after a journaled acquisition. Frequency reduction is part of the defense, not a substitute for it.
+### 5.4 `Native`: confinement
 
-## 5. Loss
+A native environment runs operating-system processes with full expressiveness, so its obligation is stated as blast radius: a native tool's effects MUST be confined to its environment. Host files outside the workspace, processes beyond the environment's lifetime, and network beyond what the held tiers grant are unreachable from it. This is the by-construction half of agent A7.
 
-### 5.1 Conduct under loss
+- A production deployment SHOULD confine native environments at one of the two confinement grades (§2). A multi-tenant deployment SHOULD NOT rely on shared-kernel confinement alone.
+- A provider for development or for a single tenant MAY run native environments unconfined, and MUST then document itself as fit for trusted input only.
 
-An environment can vanish at any moment (a crash, an eviction, an idle release), and the loss MUST be reported, never absorbed: a provider that quietly rebuilds, silently re-grants, or lets a loss pass as an ordinary failure undoes every record above it. The rule holds at two grains:
+## 6. Loss
 
-- **Whole-environment loss:** the next activation opens a fresh sandbox, the runtime journals `WorkspaceReset`, and the held set restarts at `Workspace`. A provider MUST NOT carry tier grants across that boundary: a pooled or pre-warmed environment handed to a fresh activation starts at `Workspace`, whatever its previous tenant held.
-- **Single-tier loss** (a compute engine dies, a container is gone) while the sandbox survives: the calls that needed the tier fail as ordinary `ToolError` outcomes, never as a run failure or a silent re-grant. The provider MAY re-provision the tier lazily under the acquisition this activation already journaled, and MUST NOT hold a session at a tier its activation never journaled.
+### 6.1 Conduct under loss
 
-### 5.2 Detecting loss
+An environment can vanish at any moment (a crash, an eviction, an idle release). A provider MUST report a loss, never absorb it: it MUST NOT answer a call that needed a lost environment from a silently rebuilt one, nor re-grant a tier the activation did not journal. The rule holds at two grains:
 
-A provider that can observe that the environment itself is gone (the workspace's backing directory deleted, the engine's state vanished) MUST report the call as `ToolError::EnvironmentLost`, even when the call itself succeeded. Only that outcome engages the runtime's reset (agent §4.4); an ordinary failure would leave the model retrying against vanished state while the journal asserts a workspace the world lost. An open handle keeps a deleted directory's descriptor alive, so only an ambient check of the path, not a read through the handle, witnesses the deletion.
+- **Environment loss:** the runtime journals `WorkspaceReset`, and the fresh sandbox that follows starts with the held set at `Workspace` (agent §5.4, §5.5). A provider MUST NOT carry tier grants across that boundary: a pooled or pre-warmed environment handed to a fresh sandbox starts at `Workspace`, whatever its previous tenant held.
+- **Single-tier loss:** one tier environment is gone (a compute engine died, a native environment vanished) while the sandbox survives. The calls that needed the tier fail as ordinary `ToolError` outcomes, never as a run failure or a silent re-grant. The provider MAY provision the tier again, on first use, under the acquisition this activation already journaled, and MUST NOT hold a session at a tier its activation never journaled.
 
-### 5.3 The fault vocabulary
+### 6.2 Detecting loss
 
-What a `Sandbox` can answer at this seam is closed, and so is what must survive each answer:
+A provider that can observe that the environment itself is gone (the workspace directory removed, the environment's state vanished) MUST report the call as `ToolError::EnvironmentLost`, even when the call itself succeeded. Removal of the workspace directory is environment loss even while the provider still holds the directory open. Only that outcome engages the runtime's reset (agent §5.4).
 
-| Fault | What the seam answers | What must survive |
+### 6.3 The fault vocabulary
+
+What a sandbox can answer at this seam is closed, and so is what holds after each answer:
+
+| Fault | What the seam answers | What then holds |
 |---|---|---|
-| Environment loss | a call returns `EnvironmentLost` (§5.2) | the runtime journals `WorkspaceReset`, and the held set restarts at `Workspace` (S4) |
-| Single-tier loss | a call at a provisioned tier fails as an ordinary `ToolError` (§5.1) | the run continues; the tier is re-provisioned only under the acquisition already journaled (S4) |
-| Slow call | a call outlives the runtime's deadline | the runtime's timeout path, not a provider re-entry; `release` still tears down what was provisioned (S5) |
+| Environment loss | a call returns `ToolError::EnvironmentLost` (§6.2) | the runtime journals `WorkspaceReset`, and the held set restarts at `Workspace` (S4) |
+| Single-tier loss | a call at a provisioned tier fails as an ordinary `ToolError` (§6.1) | the run continues; the tier is provisioned again only under the acquisition already journaled (S4) |
+| Slow call | a call outlives the runtime's deadline | the runtime's timeout path, not a provider re-entry; a release still tears down what was provisioned (S5) |
 
-A refused acquisition is not a runtime fault: a tool whose tier the cap excludes is rejected at registration (agent §2.4), so no session carries a call at it.
+A refused acquisition is not a runtime fault: kind registration rejects a tool whose tier the cap excludes (agent §6.1), so no session carries a call at it.
 
-## 6. Invariants
-
-The Rust copy of this table, with the suites that verify each row, is `agent-sandbox`'s conformance catalogue.
+## 7. Invariants
 
 | # | Invariant | Defined in |
 |---|---|---|
-| S1 | **Workspace confinement.** At every tier, no path outside the session's workspace is representable to a tool or a guest: confinement is by capability handle, never by sanitization of a representable escape. | §4.1, §4.2 |
-| S2 | **Compute hermeticity.** A `Compute` environment takes no ambient clock, entropy, network, or OS identity; its outputs are a function of the call, the workspace, and the injected seed. | §4.2 |
-| S3 | **Granted egress only.** A `Network` environment's egress reaches only hosts on the allowlist its journaled acquisition granted; default-deny; attributable per session. | §4.3, §3.3 |
-| S4 | **Journaled, monotone, capped acquisition.** A `TierAcquired` record precedes the first effect at its tier within the activation; the held set only grows within an activation, never crosses an activation boundary, and never leaves the kind's cap. | §3.3, §5; agent §4.5, §3.3 |
-| S5 | **Per-tier release.** `release` tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of agent A7). | §3.3; agent §2.3 |
+| S1 | **Workspace confinement.** At every tier, no path outside the session's workspace is representable to a tool or a guest: confinement is by capability handle, never by sanitization of a representable escape. | §5.1, §5.2 |
+| S2 | **Compute hermeticity.** A `Compute` environment takes no ambient clock, entropy, network, or operating-system identity; its outputs are a function of the call, the workspace, and the injected seed. | §5.2 |
+| S3 | **Granted egress only.** A `Network` environment's egress reaches only hosts on the allowlist its journaled acquisition granted; default-deny; attributable per session. | §5.3, §4.3 |
+| S4 | **Journaled, monotone, capped acquisition.** A `TierAcquired` record precedes the first effect at its tier within the activation; the held set only grows within an activation, never crosses an activation boundary, and never leaves the kind's cap. | §4.3, §6; agent §5.5, §4.3 |
+| S5 | **Per-tier release.** A release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of agent A7). | §4.3; agent §3.3 |
 
-## 7. Deferred
+## 8. Security considerations
 
-- **Overlapping writers on the microVM grade (breaks §2.1):** a `Native` call on the Firecracker grade copies the workspace into the guest and, when the command ends, copies the guest's back over it, so a `Workspace` or `Compute` call that writes the workspace meanwhile is erased after its success was journaled. The runtime overlaps a step's calls (agent §2.3), so one response asking for `shell` and `write_file` triggers it; the Docker grade shares the directory and is unaffected. The fix either serializes workspace writers against the microVM call or copies back only what the guest changed; `agent-sandbox` documents both and how to test them, the race reproducing without KVM.
-- **Warm pools and snapshots:** every activation provisions its tiers cold (a microVM boots per activation); memory snapshots would also warm-resume a persistent machine (facets §4.4).
-- **A network dataplane:** no provider offers `Network`, so S3 is unexercised and the reference provider refuses a profile that names egress.
-- **Ingress:** a sandboxed server is unreachable from outside; journaled grants could fold in a seam like the machine's (machine §2).
-- **Permission-hook interplay:** when a per-call authorization hook lands (agent §11), a journaled `TierAcquired` is its natural grain.
-- **Peripheral tiers:** a tier granting a device (a browser) beside the chain; its own network activity would escape the session's egress, and each is a versioned change to `Tier`.
-- **Cooperative compute timeouts:** a guest runs to completion under its CPU bound, since yielding or interrupting needs a simulator-owned clock source (actor §2.12.2).
-- **Tier-attributed accounting:** provider cost by tier and session is not joined to the journal's acquisitions.
+- **Threat model:** guest code is composed by a model from inputs that prompt injection makes attacker-influenced: running it is hostile-code execution. The paths a workspace tool receives are equally untrusted.
+- **Attack surface:** escape from the workspace by path (S1); host resources a guest makes the host spend (§5.2); ungranted or unattributable egress (S3); the host kernel beneath a native environment (§5.4); working state passing between sessions through pooled environments (§4.3).
+- **Loss:** a loss absorbed rather than reported leaves the journal asserting a workspace or a grant that is gone (§6).
+- **Exposure is journaled:** a tier above `Workspace` runs only where a declared tool requires it, within the kind's cap, after a journaled acquisition. Running the kernel-exposing tiers rarely is part of the defense, not a substitute for confinement.
+- Who can cause sandboxed calls at all, by addressing a session, is the edge's concern (edge §3.2).

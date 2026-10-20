@@ -1,4 +1,4 @@
-//! Seed-sweep sizing for swarm tests (spec §2.12.2).
+//! Seed-sweep sizing for swarm tests (spec §11).
 //!
 //! A sweep serves two jobs that want different seeds: **regression** against a
 //! pinned corpus, which is what CI runs, and **discovery** across fresh seeds in
@@ -14,7 +14,7 @@
 //!
 //! Sizing is a cost class, not a wall clock: reading the host clock to decide
 //! how much to run would make the seeds that executed depend on the machine that
-//! ran them (spec §2.12.2), and `clippy.toml` bans the call in this crate. Seeds
+//! ran them (spec §11), and `clippy.toml` bans the call in this crate. Seeds
 //! stay independent under all three sizings, so a narrow run is a smaller sample
 //! of the same corpus rather than a different one.
 //!

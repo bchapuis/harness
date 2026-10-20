@@ -1,7 +1,7 @@
-//! Conformance: transport fault injection (spec §4, §10). Per-pair FIFO
+//! Conformance: transport fault injection (spec §8.1, §13). Per-pair FIFO
 //! survives latency jitter (#3); total loss surfaces as `Timeout` rather than a
 //! hang (#1); and duplication is tolerated: the framework gives at-most-once
-//! *at the caller*, not exactly-once delivery (§4).
+//! *at the caller*, not exactly-once delivery (§8.1).
 //!
 //! These are scenarios: each proves a fault behaves correctly *when it fires*.
 //! That every fault type fires at all across a seed sweep (drops, duplication,
@@ -54,7 +54,7 @@ impl Message for Seq {
 }
 
 // An `ask` counterpart to `Seq`: it logs the same way but expects a reply, so a
-// sender can interleave `tell` and `ask` to one recipient (spec §3.3 #3).
+// sender can interleave `tell` and `ask` to one recipient (spec §6 #3).
 #[derive(Serialize, Deserialize)]
 struct SeqAsk(u64);
 impl Message for SeqAsk {
@@ -127,7 +127,7 @@ fn per_pair_fifo_holds_across_interleaved_tell_and_ask() {
         let remote = node_b.resolve::<Order<SimNode>>(order.id().clone());
         // Issue `tell` and `ask` from one sender to one recipient *concurrently*
         // (`join!` initiates all six in argument order), so jittered frames race
-        // in flight. Spec §3.3 #3: `tell` and `ask` from the same sender share one
+        // in flight. Spec §6 #3: `tell` and `ask` from the same sender share one
         // FIFO order; the recipient must still observe 0,1,2,3,4,5.
         let (t0, a1, t2, a3, t4, a5) = futures::join!(
             remote.tell(Seq(0)),
@@ -150,11 +150,11 @@ fn per_pair_fifo_holds_across_interleaved_tell_and_ask() {
     assert_eq!(
         *log.lock().unwrap(),
         (0..6).collect::<Vec<_>>(),
-        "interleaved tell and ask from one sender are observed in send order (spec §3.3 #3)",
+        "interleaved tell and ask from one sender are observed in send order (spec §6 #3)",
     );
 }
 
-// --- #1 / §4: total loss completes with Timeout, never hangs ---------------
+// --- #1 / §8.1: total loss completes with Timeout, never hangs ---------------
 
 #[test]
 fn total_loss_yields_timeout_not_a_hang() {
@@ -182,12 +182,12 @@ fn total_loss_yields_timeout_not_a_hang() {
     assert_eq!(outcome, Err(CallError::Timeout));
 }
 
-// --- §4: duplication double-handles the server but the caller resolves once -
+// --- §8.1: duplication double-handles the server but the caller resolves once -
 //
 // This is the boundary of what the framework promises. It never retransmits a
 // delivered message and never surfaces a call twice to its caller; it does
 // **not** suppress a duplicate the *wire* made, so the recipient's handler runs
-// once per copy. §4 says so and names the remedy in the same breath: higher
+// once per copy. §8.1 says so and names the remedy in the same breath: higher
 // guarantees are built above this layer with explicit idempotency keys.
 //
 // That matters most for an operation whose *answer* depends on the state it
@@ -219,7 +219,7 @@ fn duplication_is_tolerated_with_one_outcome_at_the_caller() {
     assert_eq!(count, Ok(2));
 }
 
-// --- §10: quiescing retires fault injection for the rest of the run ---------
+// --- §13: quiescing retires fault injection for the rest of the run ---------
 
 #[test]
 fn quiescing_the_network_stops_injecting_faults() {

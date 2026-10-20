@@ -1,9 +1,9 @@
-//! Conformance: deterministic placement (utilities spec §2.1, invariant U1).
+//! Conformance: deterministic placement (utilities spec §4.1, invariant U1).
 //!
 //! The placement function is pure, so most of U1 is pinned by direct property
 //! tests: determinism, permutation invariance, minimal movement, distribution
 //! sanity, and the `top`/`owner` relation. The cluster tests then pin the
-//! *serving set* (utilities spec §2.1): converged nodes derive equal sets and
+//! *serving set* (utilities spec §4.1): converged nodes derive equal sets and
 //! therefore equal owners, and a drained or unreachable member leaves the set
 //! (and is restored on resume/heal) without disturbing other keys.
 
@@ -125,7 +125,7 @@ fn top_ranks_distinct_members_and_agrees_with_owner() {
 #[test]
 fn converged_nodes_compute_identical_owners() {
     // The cluster half of U1: three converged views derive equal serving sets,
-    // so `place` agrees everywhere (utilities spec §2.1 item 2).
+    // so `place` agrees everywhere (utilities spec §4.1 item 2).
     let sim = Simulation::new(7);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
@@ -148,7 +148,7 @@ fn converged_nodes_compute_identical_owners() {
 
 #[test]
 fn a_drained_member_leaves_the_serving_set_until_resumed() {
-    // Utilities spec §2.1: `draining` is excluded from placement (the operator
+    // Utilities spec §4.1: `draining` is excluded from placement (the operator
     // cordon routes new work away), and `resume` restores it.
     let sim = Simulation::new(11);
     let registry = SimRegistry::new(&sim);
@@ -181,7 +181,7 @@ fn a_drained_member_leaves_the_serving_set_until_resumed() {
 
 #[test]
 fn an_unreachable_member_leaves_the_serving_set_until_healed() {
-    // Utilities spec §2.1: placement is stricter than the receptionist filter;
+    // Utilities spec §4.1: placement is stricter than the receptionist filter;
     // a confirmed-unreachable member owns nothing until reachability recovers.
     let sim = Simulation::new(13);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);

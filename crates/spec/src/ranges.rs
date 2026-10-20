@@ -69,9 +69,8 @@ pub enum Owner {
 pub const UNREGISTERED: &[(&str, &str)] = &[
     (
         "F",
-        "the facets spec's facet contract (facets §2.1, §3.7): four obligations \
-         stated with the facet seam rather than a catalogue of their own, and no \
-         crate holds a Rust copy of them",
+        "the facets spec's facet contract (facets §7): four obligations a table \
+         states without a Rust copy in any crate",
     ),
     (
         "L",

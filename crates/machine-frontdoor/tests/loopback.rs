@@ -1,7 +1,7 @@
 //! The front door end to end over a loopback: an in-process russh client
 //! authenticates against a fake [`MachineAuthority`], and an exec channel
 //! bridges to a fake guest agent through an in-memory [`ChannelBackend`]
-//! (machine §2.5). Proves M4's auth decision (an authorized key attaches, an
+//! (machine §5.1). Proves M4's auth decision (an authorized key attaches, an
 //! unauthorized one is rejected), its attribution (the journaled principal is
 //! the authenticating key's, not the client's word), the refusal a client is
 //! told about (an authority's reason, distinct from a key rejection), and the
@@ -37,7 +37,7 @@ PcNMBwYrqMK1YvTJerNoAAAAFm1hY2hpbmUtZnJvbnRkb29yLXRlc3QBAgMEBQYH
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-/// The machine's journaled host-key material (machine §3): a raw 32-byte
+/// The machine's journaled host-key material (machine §4): a raw 32-byte
 /// ed25519 seed, expanded exactly as a real authority does.
 const HOST_KEY_SEED: [u8; 32] = [7; 32];
 
@@ -132,7 +132,7 @@ async fn fake_agent(mut agent: tokio::io::DuplexStream, kind: ChannelKind) {
         }
         ChannelKind::Sftp => "sftp\n".to_string(),
         // The front door never opens workspace-sync channels (they are the
-        // machine entity's own, machine §4); an empty reply keeps the fake
+        // machine entity's own, machine §6); an empty reply keeps the fake
         // total.
         ChannelKind::Sync | ChannelKind::WsPush | ChannelKind::WsPull => String::new(),
     };
@@ -296,7 +296,7 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
     );
     // The presented host key is the seed-expanded machine identity: the same
     // journaled 32 bytes always yield this key, so the client's `known_hosts`
-    // pin survives hibernation, migration, and failover (machine §2.5).
+    // pin survives hibernation, migration, and failover (machine §5.1).
     let presented = host_key.expect("the front door must present a host key at KEX");
     assert_eq!(
         presented.key_data(),

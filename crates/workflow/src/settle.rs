@@ -1,20 +1,20 @@
-//! The `Settled` command (workflow spec §4.1): an effect's outcome, back on the
+//! The `Settled` command (workflow spec §5.1): an effect's outcome, back on the
 //! entity's serial command path.
 //!
 //! An effect's outcome returns to the activation as an ordinary command,
 //! delivered through the entity's mailbox like any other and therefore ordered
-//! against every other command by the input gate (entity §5). The engine holds
+//! against every other command by the input gate (entity §6). The engine holds
 //! the manifest and the handler body ([`Engine::settled`](crate::Engine::settled));
 //! the consumer sees only [`Workflow::settle`].
 //!
 //! There is deliberately **no reply**. `Settled` is delivered as a `tell` (core
-//! §2.2), because there is no caller to answer: the effect's result is durable
+//! §3.2), because there is no caller to answer: the effect's result is durable
 //! when its records commit, and anything waiting on it is waiting on the record,
-//! not on the message (§2.7).
+//! not on the message (§9).
 //!
 //! Like the engine's [`Tick`](crate::Tick), this is a **local-only** self-tell.
 //! A consumer MUST NOT `accept` it in its `EntityRegistry`: the registry is the
-//! deserialization allowlist for *network* commands (entity §4.5), and nothing
+//! deserialization allowlist for *network* commands (entity §5.5), and nothing
 //! outside the entity has any business injecting an effect outcome.
 
 use actor_core::Manifest;
@@ -25,7 +25,7 @@ use serde::Serialize;
 use crate::EffectError;
 use crate::Workflow;
 
-/// One effect's outcome, self-`tell`ed back onto the command path (spec §4.1).
+/// One effect's outcome, self-`tell`ed back onto the command path (spec §5.1).
 ///
 /// Generic over the workflow entity so `key` and `outcome` are the consumer's own
 /// types; the `serde` bound is empty because both associated types already carry
@@ -40,7 +40,7 @@ pub struct Settled<D: Workflow> {
 
 // Hand-written rather than `#[derive(Clone)]`: deriving would impose a spurious
 // `D: Clone` bound on the entity behavior, which a message never needs. `Clone` is
-// required because `EntityRef::tell` takes it (entity §2.2), not by `Message`.
+// required because `EntityRef::tell` takes it (entity §3.2), not by `Message`.
 impl<D: Workflow> Clone for Settled<D> {
     fn clone(&self) -> Self {
         Settled {

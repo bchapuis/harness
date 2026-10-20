@@ -1,4 +1,4 @@
-//! The deterministic single-thread executor (spec §2.12.2, §2.12.2).
+//! The deterministic single-thread executor (spec §11, §11).
 //!
 //! All three runtime capabilities share one [`Inner`] behind an `Arc<Mutex<_>>`:
 //! the [`SimSpawner`] enqueues tasks, the
@@ -215,7 +215,7 @@ impl Wake for TaskWaker {
     }
 }
 
-/// Task spawner backed by the simulation scheduler (spec §2.12.1).
+/// Task spawner backed by the simulation scheduler (spec §11.1).
 #[derive(Clone)]
 pub struct SimSpawner {
     shared: Shared,
@@ -474,7 +474,7 @@ impl Simulation {
         let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
         // Fast path: no node is frozen. A run that never pauses draws entropy and
         // orders tasks byte-for-byte as one with pause absent would (the
-        // reproducibility contract, spec §2.12.2).
+        // reproducibility contract, spec §11).
         if inner.paused.is_empty() {
             return match inner.ready.len() {
                 0 => None,

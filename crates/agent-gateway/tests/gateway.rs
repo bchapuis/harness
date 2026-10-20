@@ -94,7 +94,7 @@ fn host_kinds() -> Kinds {
     Kinds::new()
         .register("assistant", build("assistant"))
         // `worker` snapshots aggressively, so the records test below crosses
-        // the compaction trigger (storage §8) in a handful of turns. The
+        // the compaction trigger (storage §9) in a handful of turns. The
         // config is host-side policy: the client-side registry needs no match.
         .register(
             "worker",
@@ -233,7 +233,7 @@ async fn prompt_runs_the_entity_and_isolates_tenants() {
     );
 }
 
-/// `GET /records` surfaces the journal's compaction base (§8.2): once a
+/// `GET /records` surfaces the journal's compaction base (§10.2): once a
 /// session's snapshot has subsumed its oldest records, the page reports
 /// `base > 0` beside the surviving records, so a client reading from 0 learns
 /// its history starts truncated instead of mistaking the short page for the
@@ -328,7 +328,7 @@ async fn a_malformed_body_is_a_structured_bad_request() {
 }
 
 /// A turn id reused with different content is the client's permanent mistake
-/// (agent spec §5.3): a structured `409`, never a retryable or upstream status.
+/// (agent spec §7.2): a structured `409`, never a retryable or upstream status.
 #[tokio::test]
 async fn a_reused_turn_id_with_new_content_is_a_conflict() {
     let gw = gateway().await;
@@ -417,7 +417,7 @@ async fn drained(resp: axum::response::Response) -> String {
 
 /// A streamed prompt whose turn id was used for other content (a `409`) ends
 /// with the conflict even when the original run's `RunEnded` lies behind the
-/// stream's cursor, where the follower will never deliver it (edge §2.1).
+/// stream's cursor, where the follower will never deliver it (edge §4.6).
 #[tokio::test]
 async fn a_streamed_conflict_past_the_old_run_ends_with_the_conflict() {
     let gw = gateway().await;
@@ -473,7 +473,7 @@ fn stream_req(session: &str, from: u64) -> Request<Body> {
 }
 
 /// Watching a turn that ended behind the cursor ends at once: the follower
-/// never replays its `RunEnded`, so waiting for it would never end (edge §2.1).
+/// never replays its `RunEnded`, so waiting for it would never end (edge §4.6).
 #[tokio::test]
 async fn a_stream_of_a_turn_that_ended_before_from_ends_at_once() {
     let gw = gateway().await;

@@ -1,7 +1,7 @@
-//! The production binding, end to end (feature `guest`, machine §2.3): boot the
+//! The production binding, end to end (feature `guest`, machine §3.2): boot the
 //! machine base image, reach the guest agent, round-trip the workspace volume
-//! through the guest's tmpfs (machine §3), pause and resume at a quiescent point
-//! (machine §4), kill.
+//! through the guest's tmpfs (machine §4), pause and resume at a quiescent point
+//! (machine §6), kill.
 //!
 //! One body, run against **both** mechanisms, because that is the claim the
 //! binding makes: a machine's durability does not depend on how its guest is
@@ -122,7 +122,7 @@ async fn probe(args: &[&str]) -> bool {
 /// Boot a machine on `mechanism` and exercise everything the entity drives
 /// through the binding seam.
 async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str) {
-    // The machine writes its drive in place (facets §4.4's departure); the test
+    // The machine writes its drive in place (facets §5.4's departure); the test
     // copies the base image so reruns start clean, standing in for the disk
     // facet's materialization.
     let scratch = tempfile::tempdir().expect("tempdir");
@@ -149,7 +149,7 @@ async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str)
         .await
         .expect("boot: the guest agent must answer a channel");
 
-    // The workspace volume (machine §3), end to end: push a tree into the
+    // The workspace volume (machine §4), end to end: push a tree into the
     // guest's tmpfs over the WsPush channel, pull it back over WsPull, and get
     // the bytes back; the rootfs's /workspace mount, the guest agent's sync
     // channels, and the host codec, all against a real guest.
@@ -165,7 +165,7 @@ async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str)
         "the workspace round-trips through the guest tmpfs"
     );
 
-    // The capture command's quiescent point (machine §4).
+    // The capture command's quiescent point (machine §6).
     runtime.pause().await.expect("pause");
     runtime.resume().await.expect("resume");
     // Idempotent kill (the M5 path and on_deactivate both call it).

@@ -1,12 +1,12 @@
 //! Minimal deterministic Raft: a reusable **multi-group** consensus engine
-//! (spec §6.4.3).
+//! (spec cluster §5.4.3).
 //!
 //! The cluster self-hosts its membership authority as a **replicated log**: an
 //! elected leader serializes every transition as a [`RaftEntry`], a quorum of
 //! **voters** commits it, and the **commit index** is the authority stamp the
-//! membership merge orders decisions by (spec §6.2). The scope is elections,
+//! membership merge orders decisions by (spec cluster §5.2). The scope is elections,
 //! heartbeats, log replication, quorum commit, single-server voter changes, and
-//! snapshot/compaction (storage §8): enough for every observable guarantee the spec
+//! snapshot/compaction (storage §9): enough for every observable guarantee the spec
 //! requires (election safety, log matching, leader completeness) and invariant
 //! #22.
 //!
@@ -19,8 +19,8 @@
 //! entity's per-shard journals are additional groups.
 //!
 //! Determinism: timers come from `Clock`, election jitter from `Entropy`, and
-//! consensus traffic rides the ordinary `Transport` as frames (spec §6.4.3
-//! item 7), so a leader-based cluster simulates like everything else (§2.12.2).
+//! consensus traffic rides the ordinary `Transport` as frames (spec cluster §5.4.3
+//! item 7), so a leader-based cluster simulates like everything else (§11).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -34,13 +34,13 @@ use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The identity of one Raft group (spec §6.4.3). The engine runs O(groups)
+/// The identity of one Raft group (spec cluster §5.4.3). The engine runs O(groups)
 /// independent groups; each owns its log, leadership, and term sequence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct GroupId(pub u64);
 
 impl GroupId {
-    /// The membership control plane's group (spec §6.4.3): the one group every
+    /// The membership control plane's group (spec cluster §5.4.3): the one group every
     /// leader-mode cluster always runs.
     pub const CONTROL: GroupId = GroupId(0);
 
@@ -57,11 +57,11 @@ impl std::fmt::Display for GroupId {
     }
 }
 
-/// The payload of one replicated log entry (spec §6.4.3 item 1).
+/// The payload of one replicated log entry (spec cluster §5.4.3 item 1).
 ///
 /// `Noop`, `AddVoter`, and `RemoveVoter` are **engine-internal**: the group
 /// applies them itself (a term-opening no-op, and single-server configuration
-/// changes, spec §6.4.3 item 2) and never hands them to the caller. `App`
+/// changes, spec cluster §5.4.3 item 2) and never hands them to the caller. `App`
 /// carries the opaque application command (the membership control plane encodes
 /// a `MembershipCommand`, an entity shard encodes its entity-journal record), and
 /// only `App` entries drain to the caller on commit.
@@ -69,7 +69,7 @@ impl std::fmt::Display for GroupId {
 pub enum EntryPayload {
     /// The no-op a new leader commits to open its term (leader completeness).
     Noop,
-    /// Add a voter (single-server configuration change, spec §6.4.3 item 2).
+    /// Add a voter (single-server configuration change, spec cluster §5.4.3 item 2).
     AddVoter(NodeId),
     /// Remove a voter (single-server configuration change).
     RemoveVoter(NodeId),
@@ -83,16 +83,16 @@ pub enum EntryPayload {
 }
 
 /// One replicated log entry: the `term` it was proposed in and its `payload`
-/// (spec §6.4.3 item 1).
+/// (spec cluster §5.4.3 item 1).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RaftEntry {
     pub term: u64,
     pub payload: EntryPayload,
 }
 
-/// The durable Raft state a voter must persist (spec §6.4.3 item 2): the
+/// The durable Raft state a voter must persist (spec cluster §5.4.3 item 2): the
 /// current term, the vote cast in it, the log, and; once the prefix has been
-/// compacted (storage §8); the state-machine snapshot that subsumes it. `log` holds the
+/// compacted (storage §9); the state-machine snapshot that subsumes it. `log` holds the
 /// entries *after* `snapshot_index`, so entry `i` (1-based) lives at
 /// `log[i - snapshot_index - 1]`; with no snapshot `snapshot_index == 0` and the
 /// log is absolute as before.
@@ -150,7 +150,7 @@ impl PersistedRaft {
 /// precisely how a voter votes twice in one term across a restart, or acknowledges an
 /// entry it cannot replay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[must_use = "a voter that cannot persist must stop voting (spec §6.4.3 item 2)"]
+#[must_use = "a voter that cannot persist must stop voting (spec cluster §5.4.3 item 2)"]
 pub enum WalAck {
     /// On stable storage. The caller may announce the state it records.
     Persisted,
@@ -166,7 +166,7 @@ impl WalAck {
     }
 }
 
-/// The durability seam for a voter's Raft state (spec §6.4.3 item 2):
+/// The durability seam for a voter's Raft state (spec cluster §3.4, §5.4.3):
 /// persisted before the state takes effect, reloaded on restart. The methods
 /// are synchronous on purpose: when one returns, the data MUST be durable;
 /// the caller sends the messages announcing the state right after. In-memory
@@ -192,7 +192,7 @@ pub trait RaftWAL: Send + Sync + 'static {
     /// onto its retained suffix.
     fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck;
 
-    /// Record a state-machine snapshot at `index`/`term` (storage §8) and discard the log
+    /// Record a state-machine snapshot at `index`/`term` (storage §9) and discard the log
     /// prefix it subsumes (every entry with absolute index `≤ index`). Persisted
     /// before the engine drops the prefix in memory, so a restart reloads from the
     /// snapshot plus the retained tail rather than a blank log. The default keeps
@@ -257,23 +257,23 @@ impl RaftWAL for InMemoryRaftWAL {
     }
 }
 
-/// Configuration of the leader-based control plane (spec §6.4.3). It configures
+/// Configuration of the leader-based control plane (spec cluster §5.4.3). It configures
 /// the control group and supplies the engine-wide timing and the per-group
 /// storage factory every group is built from.
 #[derive(Clone)]
 pub struct RaftConfig {
-    /// The control group's initial voter set (spec §6.4.3 item 2): a configured,
+    /// The control group's initial voter set (spec cluster §5.4.3 item 2): a configured,
     /// modest subset of members (typically 3 or 5), identical on every node.
     /// Later changes are committed [`EntryPayload::AddVoter`]/
     /// [`EntryPayload::RemoveVoter`] entries.
     pub voters: Vec<NodeId>,
     /// Base election timeout; each election round waits the base plus jitter in
-    /// `[0, base)` drawn from `Entropy` (spec §6.4.3 item 7).
+    /// `[0, base)` drawn from `Entropy` (spec cluster §5.4.3 item 7).
     pub election_timeout: Duration,
     /// Leader heartbeat/replication cadence. Must be well under
     /// `election_timeout`.
     pub heartbeat_interval: Duration,
-    /// Per-`(group, node)` storage factory (spec §6.4.3 item 2). It MUST be
+    /// Per-`(group, node)` storage factory (spec cluster §5.4.3 item 2). It MUST be
     /// **per-(group, node)-stable**: calling it again with the same arguments
     /// must hand back the same durable state, so a restarted voter reloads the
     /// term it voted in rather than a blank slate (the double-vote hazard). A
@@ -309,7 +309,7 @@ impl RaftConfig {
 
 // --- The multi-group registry -------------------------------------------------
 
-/// The node's consensus engine (spec §6.4.3): a registry of [`RaftGroup`]s keyed
+/// The node's consensus engine (spec cluster §5.4.3): a registry of [`RaftGroup`]s keyed
 /// by [`GroupId`]. Every leader-mode node runs one, hosting the control group
 /// and (for entity, later) a group per shard it replicates. All groups share
 /// the engine-wide timing and draw election jitter from the one seeded
@@ -379,7 +379,7 @@ impl MultiRaft {
     }
 
     /// Stop running `group`: drop it from the tick map so it no longer elects,
-    /// heartbeats, or commits (storage §7, E7 reclamation on a shard merge).
+    /// heartbeats, or commits (storage §8, E7 reclamation on a shard merge).
     /// Retiring needs no in-group consensus (see
     /// [`RaftConsensus::remove_group`](crate::RaftConsensus::remove_group)).
     /// Idempotent; a group this node never ran is already gone. Not implemented:
@@ -423,9 +423,9 @@ enum Role {
 }
 
 /// One observation the caller folds into its state machine, in commit order
-/// (spec §6.4.3). The opaque-bytes seam: the caller decodes and applies these.
+/// (spec cluster §5.4.3). The opaque-bytes seam: the caller decodes and applies these.
 /// A `Snapshot` is delivered when this node installs a leader's state-machine
-/// snapshot, the log prefix it subsumes having been compacted away (storage §8). Both
+/// snapshot, the log prefix it subsumes having been compacted away (storage §9). Both
 /// variants ride one ordered stream, so an install and the commands after it
 /// never reorder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -437,7 +437,7 @@ pub enum Committed {
     Snapshot { index: u64, snapshot: Vec<u8> },
 }
 
-/// One message between two members of a group (spec §6.4.3): the engine's whole
+/// One message between two members of a group (spec cluster §5.4.3): the engine's whole
 /// vocabulary, and the only thing it emits or accepts. It names no group, since
 /// every caller already knows one (`tick_all` returns it and a `RaftGroup` holds
 /// its own); the group travels beside it in [`Frame::Raft`](crate::protocol::Frame),
@@ -474,7 +474,7 @@ pub enum RaftMessage {
         match_index: u64,
     },
     /// The `leader`'s state-machine snapshot for a follower whose `next` has fallen
-    /// below the leader's compacted prefix (storage §8): the entries that would catch
+    /// below the leader's compacted prefix (storage §9): the entries that would catch
     /// it up no longer exist. `data` is the opaque application snapshot;
     /// `voters`/`learners` are the membership as of the base.
     InstallSnapshot {
@@ -500,7 +500,7 @@ pub enum RaftMessage {
 /// caller frames each for this group), observations newly
 /// committed in log order ([`Committed`]; the opaque app bytes the caller
 /// decodes and applies, or a snapshot to install), and the term won if this step
-/// made the node leader (the caller emits `LeaderElected`, spec §2.7).
+/// made the node leader (the caller emits `LeaderElected`, spec §3.6).
 #[derive(Default)]
 pub(crate) struct RaftOutput {
     pub messages: Vec<(NodeId, RaftMessage)>,
@@ -517,7 +517,7 @@ struct RaftState {
     /// `snapshot_index == 0` and this is the plain 1-based log.
     log: Vec<RaftEntry>,
     /// The last index covered by the installed snapshot (`0` = nothing compacted,
-    /// storage §8), its term, and the application snapshot bytes (held so a leader can ship
+    /// storage §9), its term, and the application snapshot bytes (held so a leader can ship
     /// them via `RaftInstallSnapshot`). Entries `≤ snapshot_index` are gone from
     /// `log`; their term is only known for `snapshot_index` itself.
     snapshot_index: u64,
@@ -529,11 +529,11 @@ struct RaftState {
     /// application; trails `commit` only inside a step.
     applied: u64,
     /// The current voter set: the configured one plus committed
-    /// `AddVoter`/`RemoveVoter` changes, kept sorted (determinism, spec §2.12.1 #4).
+    /// `AddVoter`/`RemoveVoter` changes, kept sorted (determinism, spec §11.1 #4).
     /// Only voters elect, lead, and count toward a quorum.
     voters: Vec<NodeId>,
     /// Non-voting **learners**: group members the leader replicates to, but which
-    /// never elect, lead, or count toward a quorum (storage §3.1, the entity shards'
+    /// never elect, lead, or count toward a quorum (storage §4.1, the entity shards'
     /// extra replicas beyond the voter quorum). Kept sorted and disjoint from
     /// `voters`. A learner adopts the leader on append, so it can route and serve
     /// reads.
@@ -550,7 +550,7 @@ struct RaftState {
     election_deadline: Instant,
     /// Set once this node's [`RaftWAL`] has answered [`WalAck::Failed`], and never
     /// cleared: it cannot persist, so it must not vote, lead, or acknowledge an
-    /// append (spec §6.4.3 item 2). It stays a group member and keeps answering with
+    /// append (spec cluster §5.4.3 item 2). It stays a group member and keeps answering with
     /// its term, so peers see a live node that refuses rather than a silent one.
     wal_poisoned: bool,
 }
@@ -560,7 +560,7 @@ struct RaftState {
 const FIRST_ELECTION_SLOTS: u32 = 10;
 
 /// How long a freshly built group waits before campaigning for the first time
-/// (spec §6.4.3).
+/// (spec cluster §5.4.3).
 ///
 /// The election timeout exists to detect a leader that has *stopped*. A group that has
 /// never had one is not detecting anything: it is waiting out a timer for a failure
@@ -588,7 +588,7 @@ const FIRST_ELECTION_SLOTS: u32 = 10;
 /// different groups put different nodes first and leadership spreads across the cluster
 /// instead of piling onto the lowest id. It draws **no entropy**: the simulation seeds
 /// every random choice and a draw here would shift that stream, changing the behaviour
-/// of every recorded seed (spec §2.12.2). Being deterministic, it is also the same on
+/// of every recorded seed (spec §11). Being deterministic, it is also the same on
 /// every node, so all of them agree on the order without exchanging anything.
 ///
 /// A group with persisted state keeps the full timeout. A restarting voter rejoining a
@@ -629,7 +629,7 @@ fn first_election_delay(
 }
 
 /// Normalize a group's membership: voters and learners each sorted and deduped
-/// (determinism, spec §2.12.1 #4), with learners kept disjoint from voters (a node is
+/// (determinism, spec §11.1 #4), with learners kept disjoint from voters (a node is
 /// one or the other, never both). Shared by group construction and snapshot
 /// install, which adopt a fresh membership set the same way.
 fn normalize_membership(
@@ -703,7 +703,7 @@ impl RaftState {
     }
 }
 
-/// One group's Raft instance on this node (spec §6.4.3). All state sits behind
+/// One group's Raft instance on this node (spec cluster §5.4.3). All state sits behind
 /// one mutex, mutated by the driver tick and the message handlers.
 pub(crate) struct RaftGroup {
     node: NodeId,
@@ -713,7 +713,7 @@ pub(crate) struct RaftGroup {
 }
 
 impl RaftGroup {
-    /// Build the group instance, reloading any persisted state (spec §6.4.3
+    /// Build the group instance, reloading any persisted state (spec cluster §5.4.3
     /// item 2). The election timer arms from `now` (base timeout, no jitter:
     /// the first tick draws no entropy, keeping the draw order deterministic).
     #[allow(clippy::too_many_arguments)] // one call site, `MultiRaft::create_group`
@@ -790,7 +790,7 @@ impl RaftGroup {
     }
 
     /// This group's current Raft term. A layer above (entity's per-shard
-    /// leader-election group, storage §5) uses it as the single-writer fencing token every
+    /// leader-election group, storage §6) uses it as the single-writer fencing token every
     /// per-entity append carries: one leader per term, monotonic across the quorum.
     pub(crate) fn term(&self) -> u64 {
         self.lock().term
@@ -805,7 +805,7 @@ impl RaftGroup {
     /// otherwise see only the post-snapshot tail and miss the compacted prefix
     /// entirely. Handing it this observation first rebuilds the projection from the
     /// snapshot, the leaderless counterpart of a leader-driven InstallSnapshot
-    /// (storage §8).
+    /// (storage §9).
     ///
     /// [`new`]: RaftGroup::new
     pub(crate) fn snapshot_observation(&self) -> Option<Committed> {
@@ -848,7 +848,7 @@ impl RaftGroup {
     }
 
     /// Persist term and vote: before any message that announces them
-    /// (spec §6.4.3 item 2). A caller that gets [`WalAck::Failed`] MUST NOT send the
+    /// (spec cluster §5.4.3 item 2). A caller that gets [`WalAck::Failed`] MUST NOT send the
     /// message it was about to send.
     fn persist_term(&self, state: &mut RaftState) -> WalAck {
         let ack = self.storage.save_term_and_vote(state.term, state.voted_for);
@@ -858,7 +858,7 @@ impl RaftGroup {
         ack
     }
 
-    /// Stop participating in consensus, permanently (spec §6.4.3 item 2).
+    /// Stop participating in consensus, permanently (spec cluster §5.4.3 item 2).
     ///
     /// The group steps down to a follower that never elects, never grants a vote, and
     /// never acknowledges an append. The node remains visible and answers with its
@@ -895,7 +895,7 @@ impl RaftGroup {
     }
 
     /// Re-arm the election timer: base timeout plus seeded jitter in
-    /// `[0, base)` (spec §6.4.3 item 7).
+    /// `[0, base)` (spec cluster §5.4.3 item 7).
     fn rearm_election<E: Entropy>(&self, state: &mut RaftState, now: Instant, entropy: &E) {
         let span = self.election_timeout.as_nanos() as u64;
         let jitter = Duration::from_nanos(entropy.next_u64() % span.max(1));
@@ -937,7 +937,7 @@ impl RaftGroup {
         (true, out)
     }
 
-    /// One inbound message, from the transport-level sender `from` (spec §6.4.3):
+    /// One inbound message, from the transport-level sender `from` (spec cluster §5.4.3):
     /// the engine's single receive seam. A message that names its own sender (a
     /// candidate, a leader) is trusted on that name, as the wire carries it; the
     /// replies are attributed to `from`.
@@ -1029,13 +1029,13 @@ impl RaftGroup {
         out
     }
 
-    /// The driver tick (spec §6.4.3): a follower/candidate whose election timer
+    /// The driver tick (spec cluster §5.4.3): a follower/candidate whose election timer
     /// fired starts an election; a leader replicates its log and heartbeats,
     /// advancing the commit index over quorum-matched, current-term entries.
     pub(crate) fn tick<E: Entropy>(&self, now: Instant, entropy: &E) -> RaftOutput {
         let mut out = RaftOutput::default();
         let mut state = self.lock();
-        // Only voters elect and lead (spec §6.4.3 item 2); a non-voter node is a
+        // Only voters elect and lead (spec cluster §5.4.3 item 2); a non-voter node is a
         // passive learner whose tick does nothing. A voter whose WAL has failed is
         // likewise inert: it must not start an election it cannot persist, and it must
         // not replicate as a leader whose log no longer reaches disk.
@@ -1054,7 +1054,7 @@ impl RaftGroup {
         out
     }
 
-    /// Begin an election (spec §6.4.3): bump the term, vote for self, persist,
+    /// Begin an election (spec cluster §5.4.3): bump the term, vote for self, persist,
     /// and solicit the other voters. A single-voter cluster wins immediately.
     fn start_election<E: Entropy>(
         &self,
@@ -1120,7 +1120,7 @@ impl RaftGroup {
         // a WAL that refuses it has already stepped the group down. Take the election
         // announcement back with it: the caller emits `LeaderElected` from `elected`,
         // and a node that reported leading and then replicated a log it cannot persist
-        // is the failure the poison policy exists to prevent (spec §6.4.3 item 2).
+        // is the failure the poison policy exists to prevent (spec cluster §5.4.3 item 2).
         if state.wal_poisoned {
             out.elected = None;
             return;
@@ -1177,7 +1177,7 @@ impl RaftGroup {
     }
 
     /// Compact the log up to `index` against the application's state-machine
-    /// `snapshot` (storage §8): discard every entry `≤ index` and remember the snapshot so
+    /// `snapshot` (storage §9): discard every entry `≤ index` and remember the snapshot so
     /// this node can ship it to a lagging peer. Purely local and deterministic:
     /// the caller supplies a snapshot of its applied prefix, so every replica
     /// produces an equivalent one without coordination. Ignores a stale or
@@ -1224,11 +1224,11 @@ impl RaftGroup {
         }
     }
 
-    /// Leader replication (spec §6.4.3 item 3): send each other voter the log
+    /// Leader replication (spec cluster §5.4.3 item 3): send each other voter the log
     /// suffix it still misses (a heartbeat when empty), then advance the commit
     /// index to the highest current-term entry a quorum has matched.
     fn replicate(&self, state: &mut RaftState, out: &mut RaftOutput) {
-        // Every other member, learners included (storage §3.1).
+        // Every other member, learners included (storage §4.1).
         let peers = state.replication_targets(self.node);
         for peer in peers {
             let next = *state.next.get(&peer).unwrap_or(&(state.last_index() + 1));
@@ -1262,7 +1262,7 @@ impl RaftGroup {
     /// committed its own `RemoveVoter` it must not vote itself over the commit
     /// line, or a non-voter leader could advance commit on a phantom self-vote
     /// with sub-quorum real replication, a minority evicting the majority (spec
-    /// §10 #22: a side lacking a quorum of voters commits none). Defense in
+    /// §13 #22: a side lacking a quorum of voters commits none). Defense in
     /// depth: the `tick` non-voter early-return already keeps such a leader dormant.
     fn advance_commit(&self, state: &mut RaftState) {
         for index in (state.commit + 1..=state.last_index()).rev() {
@@ -1286,7 +1286,7 @@ impl RaftGroup {
     }
 
     /// Hand newly committed application commands to the caller, applying
-    /// voter-set changes internally (spec §6.4.3 item 2). `Noop` and the voter
+    /// voter-set changes internally (spec cluster §5.4.3 item 2). `Noop` and the voter
     /// changes never reach the caller; only [`EntryPayload::App`] bytes do.
     ///
     /// A leader that commits its own `RemoveVoter` steps down here (Raft
@@ -1318,7 +1318,7 @@ impl RaftGroup {
                     state.next.remove(&node);
                     state.matched.remove(&node);
                     // A leader that just removed itself is no longer a voter and
-                    // must not keep leading (spec §6.4.3 item 2).
+                    // must not keep leading (spec cluster §5.4.3 item 2).
                     if node == self.node && state.role == Role::Leader {
                         let term = state.term;
                         self.become_follower(state, term, now, entropy);
@@ -1336,7 +1336,7 @@ impl RaftGroup {
         }
     }
 
-    /// Handle a vote request (spec §6.4.3): grant iff the candidate's term is
+    /// Handle a vote request (spec cluster §5.4.3): grant iff the candidate's term is
     /// current, we have not voted for another in it, and the candidate's log is
     /// at least as up-to-date as ours.
     ///
@@ -1424,7 +1424,7 @@ impl RaftGroup {
         out
     }
 
-    /// Handle an append/heartbeat (spec §6.4.3): adopt the leader, resolve log
+    /// Handle an append/heartbeat (spec cluster §5.4.3): adopt the leader, resolve log
     /// conflicts by truncate-then-append, and advance the commit index to the
     /// leader's. Any leader-mode node accepts appends: a non-voter is a
     /// learner replicating committed state.
@@ -1536,7 +1536,7 @@ impl RaftGroup {
         out
     }
 
-    /// Handle an install-snapshot from the leader (storage §8): adopt the leader,
+    /// Handle an install-snapshot from the leader (storage §9): adopt the leader,
     /// and if the snapshot advances us past our commit point, replace our state
     /// with it; set the log base to `(snapshot_index, snapshot_term)`, discard any
     /// log we held (a follower this far behind has no committed entries past the
@@ -1910,7 +1910,7 @@ mod tests {
         }
     }
 
-    /// The multi-raft framing property (spec §6.4.3): a node leading many groups
+    /// The multi-raft framing property (spec cluster §5.4.3): a node leading many groups
     /// emits one heartbeat *per group per follower*, which is what
     /// [`Frame::RaftHeartbeats`](crate::protocol::Frame::RaftHeartbeats) exists to collapse.
     ///
@@ -2208,7 +2208,7 @@ mod tests {
 
     /// A non-voting learner replicates the committed log just like a voter, but
     /// never elects or leads and never counts toward the quorum (entity's storage
-    /// replicas beyond the voter quorum, storage §3.1).
+    /// replicas beyond the voter quorum, storage §4.1).
     #[test]
     fn a_learner_replicates_committed_state_but_never_leads() {
         let voters = [NodeId::new(1), NodeId::new(2)];
@@ -2303,7 +2303,7 @@ mod tests {
         );
     }
 
-    /// Guard for spec §10 #22: once a leader commits its own `RemoveVoter` it is
+    /// Guard for spec §13 #22: once a leader commits its own `RemoveVoter` it is
     /// no longer a voter and MUST NOT count itself toward the commit quorum (see
     /// `advance_commit`). In the full engine the `tick` non-voter
     /// early-return keeps such a leader dormant, so this drives `advance_commit`
@@ -2401,7 +2401,7 @@ mod tests {
         assert_eq!(state.voters, vec![v2], "and is gone from the voter set");
     }
 
-    /// Compaction (storage §8): the voters commit a run of entries while a learner is
+    /// Compaction (storage §9): the voters commit a run of entries while a learner is
     /// partitioned, then the leader compacts its log against a snapshot. When the
     /// learner heals, its `next` has fallen below the compacted prefix, so the
     /// leader catches it up with one `RaftInstallSnapshot` instead of replaying the
@@ -2691,7 +2691,7 @@ mod tests {
         );
     }
 
-    // --- The WAL failure policy (spec §6.4.3 item 2) ------------------------------
+    // --- The WAL failure policy (spec cluster §5.4.3 item 2) ------------------------------
 
     /// A voter whose WAL fails mid-term stops voting rather than continuing without
     /// durability. The vote is the safety-critical one: a grant this node forgets

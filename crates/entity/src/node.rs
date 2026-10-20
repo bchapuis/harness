@@ -1,5 +1,5 @@
-//! The capabilities a **node** provides to every entity type it hosts (spec storage §2.2,
-//! facets §4.5, entity §10), as distinct from the per-type settings in [`EntityConfig`].
+//! The capabilities a **node** provides to every entity type it hosts (spec storage §3.2,
+//! facets §5.5, entity §11), as distinct from the per-type settings in [`EntityConfig`].
 //!
 //! Three things in this crate are scoped to the node rather than to an entity type:
 //! the blocking-I/O pool, which bounds *this node's* concurrent device work, the
@@ -41,7 +41,7 @@ pub(crate) struct NodeCapabilities {
 impl Default for NodeCapabilities {
     /// The documented defaults: blocking store I/O runs inline on the calling async
     /// worker, and measurements are discarded. Correct, and what the deterministic
-    /// simulation requires (§11); see `crate::blocking` for why the pool is a seam
+    /// simulation requires (§10); see `crate::blocking` for why the pool is a seam
     /// rather than a default.
     fn default() -> NodeCapabilities {
         NodeCapabilities {
@@ -52,19 +52,19 @@ impl Default for NodeCapabilities {
 }
 
 impl NodeCapabilities {
-    /// This node's blocking-I/O seam (storage §2.2).
+    /// This node's blocking-I/O seam (storage §3.2).
     pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::blocking::BlockingIo> {
         &self.io
     }
 
-    /// This node's metrics sink (§10).
+    /// This node's metrics sink (§3.4).
     pub(crate) fn metrics(&self) -> &Arc<dyn crate::metrics::EntityMetrics> {
         &self.metrics
     }
 }
 
 /// A node's entity hosting, carrying the capabilities every type it hosts shares
-/// (spec storage §2.2, facets §4.5, entity §10).
+/// (spec storage §3.2, facets §5.5, entity §11).
 ///
 /// Obtained from [`EntityExt::entity_node`](crate::EntityExt::entity_node),
 /// configured once, and then used in place of the `system.entities(..)` calls:
@@ -89,7 +89,7 @@ impl NodeCapabilities {
 pub struct EntityNode<S: EntitySystem> {
     system: S,
     capabilities: NodeCapabilities,
-    /// The per-shard alarm index (facets §4.5) wired into every type hosted from here on
+    /// The per-shard alarm index (facets §5.5) wired into every type hosted from here on
     /// whose facet set declares the `Alarm` facet.
     alarm_index: Option<Entities<AlarmIndex<S>>>,
     /// The shard map of every type hosted through this node, shared by every clone
@@ -109,15 +109,15 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// A production node over real storage under `data`: the durable entity store
-    /// every type it hosts shares (spec storage §2.2), the blocking-I/O pool, and the
-    /// operator metrics registry (§10), the three node-scoped choices a deployment
+    /// every type it hosts shares (spec storage §3.2), the blocking-I/O pool, and the
+    /// operator metrics registry (§3.4), the three node-scoped choices a deployment
     /// otherwise makes one by one. Returns the store factory beside the node because
     /// hosting is per type ([`EntityConfig::entity_store`]) while the store is per
     /// node: its factory caches per `(type, node)`, so each type hosted on the node
     /// has one on-disk store of its own, keyed by shard and entity, and the fence of
-    /// one type never touches another's shards (storage §5).
+    /// one type never touches another's shards (storage §6).
     ///
-    /// The store stamps the codec's name and refuses to open under another (storage §2.2),
+    /// The store stamps the codec's name and refuses to open under another (storage §3.2),
     /// and the codec is read off `system`, so the stamp cannot name a value other
     /// than the one the messages are encoded with.
     ///
@@ -139,7 +139,7 @@ impl<S: EntitySystem> EntityNode<S> {
         (node, store)
     }
 
-    /// Where this node's blocking store I/O runs (spec storage §2.2).
+    /// Where this node's blocking store I/O runs (spec storage §3.2).
     ///
     /// Without it every fsync runs on the async worker that is also driving this
     /// node's Raft heartbeats and its other shards' quorum waits, so a slow device
@@ -152,7 +152,7 @@ impl<S: EntitySystem> EntityNode<S> {
         self
     }
 
-    /// Where this node reports its operator-facing measurements (spec §10).
+    /// Where this node reports its operator-facing measurements (spec §3.4).
     ///
     /// Distinct from the event stream, which is the checker's interface: see
     /// `crate::metrics` for why both exist.
@@ -163,7 +163,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// The per-shard alarm index this node's alarmed entities fire through (spec
-    /// facets §4.5): host one [`AlarmIndex`] type and hand its handle here, before hosting
+    /// facets §5.5): host one [`AlarmIndex`] type and hand its handle here, before hosting
     /// the types that alarm.
     ///
     /// Wired into exactly the types hosted afterwards whose facet set declares the
@@ -190,7 +190,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// Host entities of type `G` under an explicit runtime **type name** (spec
-    /// §4.1), with a caller-supplied **factory** for each activation's behavior.
+    /// §5.1), with a caller-supplied **factory** for each activation's behavior.
     ///
     /// Two extension points over [`entities`](EntityNode::entities), both for one
     /// Rust entity that must be **many** entity types at runtime:
@@ -198,7 +198,7 @@ impl<S: EntitySystem> EntityNode<S> {
     /// - `entity_type` overrides `G::ENTITY_TYPE`, so the same `G` hosts under
     ///   several names: distinct gateways, shard maps, and consensus groups. It
     ///   MUST be stable cluster-wide and across runs, exactly as `G::ENTITY_TYPE`
-    ///   must be (§4.1); a `&'static str` makes that lifetime explicit.
+    ///   must be (§5.1); a `&'static str` makes that lifetime explicit.
     /// - `factory` replaces `G::default`, so the runtime can inject per-node seam
     ///   handles into each fresh activation (the entity needs no `Default`).
     pub fn entities_named<G>(
@@ -226,7 +226,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// Hand every shard this node leads, across every type hosted through it, to
-    /// another of that shard's replicas before the node departs (spec storage §5.3),
+    /// another of that shard's replicas before the node departs (spec storage §6.3),
     /// returning how many were still led when the attempt gave up: `0` when they all
     /// moved.
     ///

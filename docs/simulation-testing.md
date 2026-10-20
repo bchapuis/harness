@@ -1,20 +1,20 @@
 # Simulation testing
 
-**Scope:** how the framework and everything above it is verified: what the simulator varies, the shapes a test takes, and the practice around seeds, the corpus, and assertions. The [actor specification](distributed-actor-spec.md) states what must hold (§2.7 events, §2.12.2 determinism, §10 invariants); `actor-simulation` is the mechanism, and its rustdoc is the API manual, with examples. Three principles govern the practice:
+**Scope:** how the framework and everything above it is verified: what the simulator varies, the shapes a test takes, and the practice around seeds, the corpus, and assertions. The [actor specification](distributed-actor-spec.md) states what must hold (§3.6 events, §11 determinism, §13 invariants); `actor-simulation` is the mechanism, and its rustdoc is the API manual, with examples. Three principles govern the practice:
 
-- **Determinism:** every failure replays from a `(workload, seed)` pair alone (§2.12.2). One seed drives time, randomness, scheduling, and the run's sampled fault configuration.
-- **Specification:** assert the catalogued invariants over the §2.7 event stream, not a pile of example outputs.
+- **Determinism:** every failure replays from a `(workload, seed)` pair alone (§11). One seed drives time, randomness, scheduling, and the run's sampled fault configuration.
+- **Specification:** assert the catalogued invariants over the §3.6 event stream, not a pile of example outputs.
 - **Fault injection:** bugs hide in the failure paths, so inject faults under seed control and prove the injection fired.
 
 ## The simulator is owned, not imported
 
-All nondeterminism passes through `Clock`, `Entropy`, `Spawner` (§2.12.1), the `Transport` (§2.13), and the registry client (§6.4.2), so a simulation swaps implementations and runs the real system code, codec included. A generic simulation crate would test a model of the system instead. The one external test tool is `trybuild`, for invariant #20. Data-race tooling adds little: the workspace forbids `unsafe_code`, and the scheduler explores interleavings deterministically.
+All nondeterminism passes through `Clock`, `Entropy`, `Spawner` (§11.1), the `Transport` (cluster §4), and the registry client (cluster §5.4.2), so a simulation swaps implementations and runs the real system code, codec included. A generic simulation crate would test a model of the system instead. The one external test tool is `trybuild`, for invariant #20. Data-race tooling adds little: the workspace forbids `unsafe_code`, and the scheduler explores interleavings deterministically.
 
 ## What a run varies
 
 From its seed, each run samples a random subset of faults at random intensities, and a run with no faults must still pass:
 
-- **Time** is logical and advances only when nothing is ready (§2.12.2), so timeouts cost no wall-clock time.
+- **Time** is logical and advances only when nothing is ready (§11), so timeouts cost no wall-clock time.
 - **Randomness** is one seeded stream; fault gates draw from it but exist only in the simulator.
 - **Scheduling** picks among ready tasks at random, so interleaving is a fault dimension, and a single-node run draws its mailbox capacity, so backpressure is one too.
 - **The network** drops, duplicates, delays, and reorders frames, and a nemesis adds symmetric and one-way partitions, isolation crashes, bounded freezes, and heals. The nemesis heals after its last round, so a run's liveness is judged once its partitions and crashes have ceased, the precondition every liveness claim states; the seeded loss, duplication, and delay stay on for the whole run.
@@ -46,7 +46,7 @@ An invariant sweep that also asserts its faults fired, from the `FaultStats` tha
 
 ### 4. Reproducibility sweep
 
-The determinism contract itself (§2.12.2): run each seed twice and demand byte-identical event streams (`replay_cluster_swarm`). Everything else rests on it; a wall-clock read, an OS thread, an unseeded RNG, or hash-map iteration order anywhere breaks it.
+The determinism contract itself (§11): run each seed twice and demand byte-identical event streams (`replay_cluster_swarm`). Everything else rests on it; a wall-clock read, an OS thread, an unseeded RNG, or hash-map iteration order anywhere breaks it.
 
 **Escape hatch:** a narrative too specific for a workload can still sweep under a name with `scenario_sweep`. Prefer a workload where one fits: it also buys invariant checking and reproducibility.
 
@@ -56,7 +56,7 @@ Invariant and coverage sweeps live in files named `*swarm.rs`, reproducibility s
 
 ## Seeds: sizing, runs, and the corpus
 
-A call site declares a cost class (`sweep_seeds`, `slow_seeds` for seconds per seed, `coverage_seeds` for a coverage claim that never narrows), and the run decides the width: a local run takes a few seeds, CI takes the declared width from seed 0 (regression), and a soak takes many from a fresh base (discovery). Sizing never reads a clock, because the seeds that ran must not depend on the machine (§2.12.2). Plain `cargo nextest run` runs no sweep; `--profile ci` runs them all. The environment knobs are documented in `actor-simulation`.
+A call site declares a cost class (`sweep_seeds`, `slow_seeds` for seconds per seed, `coverage_seeds` for a coverage claim that never narrows), and the run decides the width: a local run takes a few seeds, CI takes the declared width from seed 0 (regression), and a soak takes many from a fresh base (discovery). Sizing never reads a clock, because the seeds that ran must not depend on the machine (§11). Plain `cargo nextest run` runs no sweep; `--profile ci` runs them all. The environment knobs are documented in `actor-simulation`.
 
 Failing seeds go in `corpus.txt`, keyed by workload name, and replay on every run of that workload, whatever the sizing; corpus seeds are absolute. A corpus seed guards a bug only while it drives the code down the same path, and any change to how much entropy something draws re-randomizes it. So the seed is the discovery; once the bug is understood, write the scenario test that reproduces its shape and keep the corpus line as a backstop.
 
@@ -66,7 +66,7 @@ Failing seeds go in `corpus.txt`, keyed by workload name, and replay on every ru
 
 **A workload outlives its runs:** every seed of a sweep drives the same workload value, so a field is sweep-scoped. Tallies ("did this ever happen") belong there; per-run expectations ("what this run should find") belong inside the drive. The tell of getting it wrong: every seed fails except the first.
 
-**What counts as an acknowledgement:** a no-op journals nothing, so its reply proves nothing durable. A read is not a probe: entity reads are read-your-leader, not linearizable under partition (entity §6), so observe committed state with a trivial write. A mutating command needs an idempotency key, because retries and the duplication fault deliver it twice (§4).
+**What counts as an acknowledgement:** a no-op journals nothing, so its reply proves nothing durable. A read is not a probe: entity reads are read-your-leader, not linearizable under partition (entity §7), so observe committed state with a trivial write. A mutating command needs an idempotency key, because retries and the duplication fault deliver it twice (§8.1).
 
 **Adding a sweep:** name the workload uniquely across the workspace, pair its invariant and reproducibility sweeps, and size it. A claim about what the workload drives can ride the invariant sweep if the workload makes it deterministic; a claim about what the nemesis draws needs `coverage_seeds`. A constant-valued fixture cannot say which write won, so make each run's effect distinct, and pace rounds by the clock, so one refused call cannot starve the budget.
 
@@ -76,10 +76,10 @@ An invariant lives with the contract it is a claim about: the framework's in `ac
 
 ## Invariants to assert
 
-Assert the catalogues; do not re-derive them: the actor core (§10, #1–#22), the cluster utilities (U1–U2), the wal log (L1–L4, catalogued in its crate docs), the entity (E1–E21, plus the facet contract F1–F4), the workflow (W1–W7), the agent (A1–A7), the sandbox (S1–S5), and the machine (M1–M6). Format compatibility (V1–V3) has no Rust copy; each format's tests hold its stamp to it. Per component, write codec roundtrips, duplicate-tolerance tests for retriable operations, reference-model tests for stateful actors, sweeps under faults, node-crash tests of the cascade (§5.1), compile-fail tests, reproducibility checks, and coverage assertions.
+Assert the catalogues; do not re-derive them: the actor core (§13, #1–#22), the cluster utilities (U1–U2), the wal log (L1–L4, catalogued in its crate docs), the entity (E1–E21, plus the facet contract F1–F4), the workflow (W1–W7), the agent (A1–A7), the sandbox (S1–S5), and the machine (M1–M6). Format compatibility (V1–V3) has no Rust copy; each format's tests hold its stamp to it. Per component, write codec roundtrips, duplicate-tolerance tests for retriable operations, reference-model tests for stateful actors, sweeps under faults, node-crash tests of the cascade (cluster §7), compile-fail tests, reproducibility checks, and coverage assertions.
 
 ## Where the sweeps do not yet reach
 
-- **No sweep for `agent-sandbox`, `agent-gateway`, or `machine-frontdoor`:** the sandbox states a fault model a workload could inject (sandbox §5.3); the gateway and the front door state none, and a sweep whose faults are not the seam's faults only looks like coverage. Define the faults first.
+- **No sweep for `agent-sandbox`, `agent-gateway`, or `machine-frontdoor`:** the sandbox states a fault model a workload could inject (sandbox §6.3); the gateway and the front door state none, and a sweep whose faults are not the seam's faults only looks like coverage. Define the faults first.
 - **No fuzz target** covers the production transport's framing and the codec.
 - **No `loom` model-check** of the executor; the seeded scheduler is the substitute.

@@ -1,5 +1,5 @@
 //! Record subscriptions under faults, on the clustered `Quorum` journal
-//! (entity §6.3, invariant **E16**), under deterministic simulation (§11).
+//! (entity §7.3, invariant **E16**), under deterministic simulation (§10).
 //!
 //! A subscriber reconciles by `Seq`: it rides an entity record subscription and
 //! backfills from the journal on any gap or after the stream goes dead. The
@@ -189,7 +189,7 @@ fn subscription_survives_a_leader_crash_mid_stream() {
 
 #[test]
 fn hibernation_closes_the_subscribers_stream() {
-    // §6.3: when the host drops its sink set, here by hibernating (§7), a
+    // §7.3: when the host drops its sink set, here by hibernating (§8), a
     // dropped sink *observes its stream close* and re-subscribes. The close must
     // reach the sink on the subscriber's node: dropping the host's end alone
     // would leave the stream open and silent, and a subscriber waiting on it
@@ -241,7 +241,7 @@ fn hibernation_closes_the_subscribers_stream() {
     assert_eq!(
         outcome,
         Stream::Closed,
-        "the subscriber's stream must end when the host hibernates (§6.3), \
+        "the subscriber's stream must end when the host hibernates (§7.3), \
          not go silent"
     );
 }

@@ -1,4 +1,4 @@
-//! Durable workflows under the cluster fault swarm (facets §4.6).
+//! Durable workflows under the cluster fault swarm (facets §5.6).
 //!
 //! `steps.rs` asserts the steps facet's properties through *scripted*
 //! scenarios on one node. This file applies the one that matters most the V&V way:
@@ -8,7 +8,7 @@
 //! **The property is that the memo is write-once.** It is *not* "the effect ran
 //! once": [`entity::facet::LaunchGuard`] is per-activation and never journaled, so a
 //! re-activation legitimately re-launches an unresolved step and the effect may
-//! run many times (facets §4.6). What must hold is that `complete_step` records only a
+//! run many times (facets §5.6). What must hold is that `complete_step` records only a
 //! step that is not already done, so the **first committed result wins**, and every
 //! later drive, re-activation and failover resolves from it.
 //!
@@ -179,7 +179,7 @@ impl Invariant for MemoWriteOnce {
             .collect();
         if !changed.is_empty() {
             return Err(format!(
-                "a committed step memo changed after the fact (facets §4.6): {changed:?}; \
+                "a committed step memo changed after the fact (facets §5.6): {changed:?}; \
                  `complete_step` must record only a step that is not already done, so \
                  every read after the first commit resolves to that first result",
             ));
@@ -249,7 +249,7 @@ impl ClusterWorkload for StepsSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (storage §6); every node is a control voter so the map group can form.
+        // (storage §7); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -409,7 +409,7 @@ fn the_steps_swarm_observes_a_memo_something_tried_to_overwrite() {
     );
 }
 
-/// The determinism contract over this workload (actor §2.12.2 #1): the same seed
+/// The determinism contract over this workload (actor §11 #1): the same seed
 /// twice, byte-identical event streams. It is what makes the launch ordinals
 /// meaningful: a step value that varied run to run would be nondeterminism the
 /// check itself introduced.

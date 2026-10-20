@@ -86,8 +86,8 @@ A leader election *does* happen for an object, but only on **migration, eviction
 The lesson for the replicated-journal / "Raft journal groups" idea is exactly this decomposition:
 
 - **Do not put all entities on one Raft group.** Use **one journal group per entity** (or per small shard of entities). The memory note "replicated Journal (Raft journal groups)" is already plural; keep it that way and resist any temptation to collapse to a single cluster-wide log.
-- **Within a single-activation entity you do not need consensus to order writes**, only to make them durable. The entity's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §3.3). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
-- **Keep placement off the write path.** Single-activation is a control-plane lease (your leader-based or registry-based modes, actor §6.4.2/§6.4.3), consulted on activation and migration, not on every message. Leader election for a journal group should be a rare reconfiguration, triggered by failure/migration, never by ordinary traffic.
+- **Within a single-activation entity you do not need consensus to order writes**, only to make them durable. The entity's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §6). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
+- **Keep placement off the write path.** Single-activation is a control-plane lease (your leader-based or registry-based modes, cluster §5.4.2/§5.4.3), consulted on activation and migration, not on every message. Leader election for a journal group should be a rare reconfiguration, triggered by failure/migration, never by ordinary traffic.
 - **A durability barrier on the reply, not a consensus round.** Map the output gate onto `ReplyHandle::send` (§4.5): hold the reply until the journal entry is quorum-acked. The handler stays naive and sequential.
 
 In short: Raft is a bottleneck only when it is one big shared log doing ordering-and-durability for everything. DO avoids both halves of that: it shards to per-object groups, and it deletes the ordering-agreement cost by having a single writer. Adopt both moves and the journal stops being a global chokepoint.
@@ -117,7 +117,7 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 
 | DO property | In the actor spec today | Gap to close for an entity |
 |---|---|---|
-| Single instance per name | `ActorId` = node + path + incarnation; explicit `spawn` | **Virtual activation**: address by stable name, activate on first message, single-activation lease. Lives in the leader-based control plane (actor §6.4.3 already reserves the log for "singleton placement"). |
+| Single instance per name | `ActorId` = node + path + incarnation; explicit `spawn` | **Virtual activation**: address by stable name, activate on first message, single-activation lease. Lives in the leader-based control plane (cluster §5.4.3 already reserves the log for "singleton placement"). |
 | Colocated durable storage | actors are in-memory only | **A per-actor journal seam**: load-on-activate, persist-on-change. |
 | Output gate (durable before reply) | replies are synchronous, no durability barrier | Hold the reply in `ReplyHandle::send` (§4.5) until the journal entry is quorum-acked. |
 | Input gate (no reentrancy across awaits) | serial executor (§6) | Mostly present; extend gating to cover outstanding storage ops. |
@@ -127,7 +127,7 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 
 Framing: **an entity is your actor plus a name-based virtual identity, a per-actor journal seam, and a durability barrier on the reply path.** Everything else you already have.
 
-One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee: during migration or partition the object can be briefly unreachable. The gossip-based mode (actor §6.4.4) chooses the opposite (AP). So "entity" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
+One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee: during migration or partition the object can be briefly unreachable. The gossip-based mode (cluster §5.4.4) chooses the opposite (AP). So "entity" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
 
 ---
 

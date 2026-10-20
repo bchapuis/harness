@@ -1,18 +1,18 @@
-//! The production [`Model`](agent::Model) seam (agent spec §2.1, §2.2): the Anthropic
+//! The production [`Model`](agent::Model) seam (agent spec §3.1, §3.2): the Anthropic
 //! Messages API client.
 //!
 //! This crate is the single place the Messages API protocol exists: the
 //! request and response JSON, the transcript encoding, and the error
 //! taxonomy. Everything that is not protocol (the socket, the key, the
-//! `Clock`/`Entropy` seams, the bounded retry engine, §2.1) is the
+//! `Clock`/`Entropy` seams, the bounded retry engine, §3.1) is the
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
 //! The socket is a seam: [`HttpPost`](agent::http::HttpPost) is the one operation the client needs
 //! from its host, POST these bytes to this path with these headers (the same
-//! move the core makes with `Transport`, core spec §2.13), supplied once by the
+//! move the core makes with `Transport`, cluster spec §4), supplied once by the
 //! deployment over its HTTP stack of choice. The simulator's scripted model
-//! replaces this crate entirely (§2.2). The seam's contract is specified in
+//! replaces this crate entirely (§3.2). The seam's contract is specified in
 //! `docs/agent-spec.md`.
 
 use agent::Entry;
@@ -62,7 +62,7 @@ impl Protocol for Messages {
     }
 }
 
-/// The Anthropic Messages API model (agent spec §2.1): the shared shell
+/// The Anthropic Messages API model (agent spec §3.1): the shared shell
 /// bound to this crate's protocol.
 pub type AnthropicModel<C, E> = ProtocolModel<Messages, C, E>;
 
@@ -114,7 +114,7 @@ fn encode_request(req: &ModelRequest) -> Value {
                     }),
                 );
             }
-            // The workspace-loss notice (§4.4): it answers no CallId, so it
+            // The workspace-loss notice (§5.4): it answers no CallId, so it
             // enters as input content the agent runtime authors; the encoding's
             // analogue of a user message.
             Entry::WorkspaceReset => push(
@@ -152,7 +152,7 @@ fn encode_request(req: &ModelRequest) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Response decoding and the error taxonomy (§2.1)
+// Response decoding and the error taxonomy (§3.1)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -194,7 +194,7 @@ struct ApiErrorBody {
     message: String,
 }
 
-/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§2.1).
+/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§3.1).
 fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
     if response.status == 200 {
         let parsed: ApiResponse = serde_json::from_slice(&response.body)
@@ -232,7 +232,7 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
         (529, _) | (_, "overloaded_error") => ModelError::Overloaded,
         // The API reports an over-long prompt as an invalid request; the agent
         // runtime distinguishes it because the run must fail explicitly on it
-        // (§1.1, §2.1).
+        // (§1.1, §3.1).
         (400, _) if detail.message.contains("prompt is too long") => ModelError::ContextOverflow,
         (400, _) | (_, "invalid_request_error") => ModelError::InvalidRequest(detail.message),
         _ => ModelError::Api(format!("{}: {}", detail.kind, detail.message)),

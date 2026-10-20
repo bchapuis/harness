@@ -36,7 +36,7 @@ use actor_simulation::run_cluster_swarm_coverage;
 use serde::Deserialize;
 use serde::Serialize;
 
-// --- §10: fault-injection coverage across a seed sweep ---------------------
+// --- §13: fault-injection coverage across a seed sweep ---------------------
 //
 // If a future change to the fault sampling or the network silently stopped
 // injecting (say) duplication, these tests go red even though no invariant was
@@ -162,7 +162,7 @@ fn the_cluster_swarm_actually_exercises_every_fault_type() {
     );
 }
 
-/// The same chatter under the **registry-based** control plane (spec §6.4.2):
+/// The same chatter under the **registry-based** control plane (spec cluster §5.4.2):
 /// proves the registry-specific faults (outage windows opened by the nemesis,
 /// stale snapshots served by the seeded policy) actually fired across the
 /// sweep, on top of the transport faults (docs/simulation-testing.md).
@@ -250,7 +250,7 @@ fn the_registry_swarm_actually_exercises_registry_faults() {
     );
 }
 
-// --- Cluster utilities under the full fault space (utilities spec §2.1–§2.3) ------
+// --- Cluster utilities under the full fault space (utilities spec §4.1–§4.2) ------
 
 /// The singleton's handoff message; delivered locally by the manager, so it
 /// needs no `register` entry.

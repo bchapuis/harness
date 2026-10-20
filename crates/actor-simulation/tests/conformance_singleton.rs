@@ -1,8 +1,8 @@
-//! Conformance: cluster singleton (utilities spec §2.3, invariant U2).
+//! Conformance: cluster singleton (utilities spec §4.2, invariant U2).
 //!
 //! The per-node half of U2 (activations on one node never overlap) is checked
 //! continuously by the `singleton-at-most-one-per-node` checker on every swarm
-//! run; these scenario tests pin the rest of §2.8: exactly-one on a converged
+//! run; these scenario tests pin the rest of §3.3: exactly-one on a converged
 //! cluster, handoff on drain, re-activation after an anchor crash or an
 //! instance death, dual activation across a partition being *resolved* on heal,
 //! and the proxy's fail-fast behavior during gaps.
@@ -35,7 +35,7 @@ const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 
 /// Host the singleton on `node`: same name, factory, and stop message on every
-/// hosting node, per utilities spec §2.3 item 1.
+/// hosting node, per utilities spec §4.2 item 1.
 fn host(node: &SimNode) -> actor_cluster::SingletonProxy<Greeter<SimNode>> {
     node.singleton(NAME, || Greeter::new("Hello"), Stop)
 }
@@ -71,7 +71,7 @@ fn open_activations(recorder: &Recorder) -> Vec<ActorId> {
 
 #[test]
 fn a_converged_cluster_activates_exactly_one_instance() {
-    // §2.8 items 1 and 3: one anchor, one activation; every proxy resolves it and
+    // §3.3 items 1 and 3: one anchor, one activation; every proxy resolves it and
     // can call it, wherever it lives.
     let sim = Simulation::new(51);
     let recorder = Recorder::new();
@@ -118,7 +118,7 @@ fn a_converged_cluster_activates_exactly_one_instance() {
 
 #[test]
 fn an_anchor_crash_re_activates_on_a_new_anchor() {
-    // §2.8 item 1 (anchor follows the serving set) and the re-activation half of
+    // §3.3 item 1 (anchor follows the serving set) and the re-activation half of
     // U2: when the anchor is confirmed unreachable, a survivor's view stops
     // naming it and the new anchor activates.
     let sim = Simulation::new(53);
@@ -161,7 +161,7 @@ fn an_anchor_crash_re_activates_on_a_new_anchor() {
 
 #[test]
 fn draining_the_anchor_hands_off_gracefully() {
-    // §2.8 item 2: the cordoned anchor leaves the serving set, its manager
+    // §3.3 item 2: the cordoned anchor leaves the serving set, its manager
     // delivers the stop message, the instance terminates (a paired
     // SingletonStopped), and the new anchor activates.
     let sim = Simulation::new(59);
@@ -197,7 +197,7 @@ fn draining_the_anchor_hands_off_gracefully() {
 
 #[test]
 fn a_partition_may_dual_activate_but_heals_to_exactly_one() {
-    // §2.8 item 3, honesty: divergence MAY run two instances; convergence MUST
+    // §3.3 item 3, honesty: divergence MAY run two instances; convergence MUST
     // stop the surplus. Conservative downing, so the partition alone downs
     // nobody and both sides survive to be reconciled.
     let sim = Simulation::new(61);
@@ -248,7 +248,7 @@ fn a_partition_may_dual_activate_but_heals_to_exactly_one() {
 
 #[test]
 fn an_instance_death_re_activates_while_the_anchor_is_unchanged() {
-    // §2.8 item 4, liveness: the instance stops by its own hand; the manager
+    // §3.3 item 4, liveness: the instance stops by its own hand; the manager
     // observes the termination and re-activates on the next tick.
     let sim = Simulation::new(67);
     let recorder = Recorder::new();
@@ -280,7 +280,7 @@ fn an_instance_death_re_activates_while_the_anchor_is_unchanged() {
 
 #[test]
 fn a_proxy_with_no_instance_fails_fast() {
-    // §2.8 item 5: a gap is an immediate DeadLetter, never a buffer.
+    // §3.3 item 5: a gap is an immediate DeadLetter, never a buffer.
     let (sim, net) = support::cluster(71, None);
     let node = net.join(A);
     // A client-only proxy; nobody hosts, so the listing stays empty.

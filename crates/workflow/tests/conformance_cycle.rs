@@ -1,4 +1,4 @@
-//! The workflow cycle end to end (workflow spec §3, §5, §6): W1, W2, W4, W7.
+//! The workflow cycle end to end (workflow spec §4, §6, §7): W1, W2, W4, W7.
 //!
 //! Every test here runs the **real entity host, gateway, and journal** under one
 //! seed: the workflow cycle is the only new code on the simulated path. The
@@ -79,7 +79,7 @@ fn the_desired_set_dispatches_every_task_and_the_entity_finishes() {
 fn nothing_launches_before_the_record_that_wanted_it_commits() {
     // W4, intent before effect. Not enforced by a check: a tick reads
     // *committed* state, so an effect whose intent has not committed is not in
-    // `pending(state)` and there is nothing to launch (§5). The stream shows it
+    // `pending(state)` and there is nothing to launch (§6). The stream shows it
     // per key: every `Launched` follows the `Committed` that admitted *its own*
     // key. That takes two requests to say. Under one batch the claim degrades to
     // "some launch followed some commit", which a launch racing its own record
@@ -190,7 +190,7 @@ fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
     );
     assert!(
         announced_quiescence(&recorder.events()),
-        "and must have announced quiescence first (§2.8)"
+        "and must have announced quiescence first (§10)"
     );
 
     // A second request on the re-activated entity: the fold carries the first
@@ -236,7 +236,7 @@ fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
 
 #[test]
 fn a_failing_effect_is_a_value_and_the_run_still_finishes() {
-    // §4.2: a failing effect does not fail the entity. The consumer folds the
+    // §5.2: a failing effect does not fail the entity. The consumer folds the
     // failure as an answer, the key leaves the desired set, and the entity
     // reaches quiescence exactly as it would on success.
     let sim = Simulation::new(23);
@@ -272,14 +272,14 @@ fn a_failing_effect_is_a_value_and_the_run_still_finishes() {
     assert!(
         matches!(&done[&2], Answer::Failed(why) if why.contains("panicked")),
         "a panic inside `perform` is caught at the task boundary and settled \
-         as Failed (§4.2), never left as a lost claim: {:?}",
+         as Failed (§5.2), never left as a lost claim: {:?}",
         done[&2]
     );
 }
 
 #[test]
 fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
-    // The entry point §3.2 item 3 exists for exactly this. A settle that returns
+    // The entry point §4.2 item 3 exists for exactly this. A settle that returns
     // no records commits nothing, so nothing re-enters the cycle through entry
     // point 1; without a timer-driven drive the key would be stranded and W2
     // would not hold.
@@ -304,7 +304,7 @@ fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
     assert!(
         runs > 1,
         "a key whose settle committed nothing must be relaunched by the backoff \
-         timer; it ran {runs} time(s), so nothing re-entered the cycle (W2, §3.2 item 3)"
+         timer; it ran {runs} time(s), so nothing re-entered the cycle (W2, §4.2 item 3)"
     );
 
     // And every one of those launches is a distinct claim, each closed by its
@@ -328,10 +328,10 @@ fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
 
 #[test]
 fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
-    // §6's at-rest clause. §3.4 imposes no attempt bound, so without it one
+    // §7's at-rest clause. §4.4 imposes no attempt bound, so without it one
     // permanently unproductive effect would veto eviction forever and pin an
     // activation whose only remaining work is a timer: strictly worse than what
-    // the agent runtime does (agent §7.2 item 3).
+    // the agent runtime does (agent §9.2 item 3).
     let sim = Simulation::new(31);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
@@ -352,7 +352,7 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     assert!(
         hibernated(&recorder.events()),
         "an entity whose only outstanding key has backed off to the cap must \
-         reach rest and hibernate (§6); pinning it forever is the bug this \
+         reach rest and hibernate (§7); pinning it forever is the bug this \
          clause exists to prevent"
     );
 
@@ -361,6 +361,6 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     assert_eq!(
         outstanding,
         vec![0],
-        "hibernating at rest gives up unattended progress, never the work (§6)"
+        "hibernating at rest gives up unattended progress, never the work (§7)"
     );
 }

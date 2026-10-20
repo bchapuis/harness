@@ -1,7 +1,7 @@
-//! Conformance: membership / SWIM (spec §6, §7); the observable reachability
+//! Conformance: membership / SWIM (spec cluster §5, §6); the observable reachability
 //! transitions, and that a conservative policy never downs across a long
 //! partition. Also covers SWIM failure detection and the node-down cascade under
-//! fault injection (spec §5.1), plus incarnation-based gossip dissemination and
+//! fault injection (spec cluster §7), plus incarnation-based gossip dissemination and
 //! a suspected node refuting a false suspicion by bumping its incarnation.
 
 mod support;
@@ -127,7 +127,7 @@ fn reachability_transitions_are_observable() {
     net.heal();
     sim.run_for(Duration::from_secs(1)); // A probes B again → reachable
 
-    // A's view of B walks Suspect → Unreachable → Reachable (spec §7).
+    // A's view of B walks Suspect → Unreachable → Reachable (spec cluster §6).
     let transitions: Vec<&str> = recorder
         .events()
         .iter()
@@ -171,7 +171,7 @@ const C: NodeId = NodeId::new(3);
 fn indirect_probing_keeps_a_lossy_but_reachable_peer_up() {
     // A's direct link to C is severed, but B can reach both. A probes C
     // indirectly via B, so a single bad link never makes A falsely suspect C
-    // (spec §7 #2). Contrast `gossip::a_suspected_node_refutes_a_false_suspicion`,
+    // (spec cluster §6 #2). Contrast `gossip::a_suspected_node_refutes_a_false_suspicion`,
     // which disables indirect probing so the suspicion forms.
     let sim = Simulation::new(5);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
@@ -193,9 +193,9 @@ fn indirect_probing_keeps_a_lossy_but_reachable_peer_up() {
 #[test]
 fn the_coordinator_role_falls_over_when_the_coordinator_leaves() {
     // Join/leave admission is covered in conformance_join.rs; here we pin the
-    // coordinator rule (spec §6.4.4 item 3): a deterministic role, not an
+    // coordinator rule (spec cluster §5.4.4 item 3): a deterministic role, not an
     // election (the lowest-address up, reachable member) that falls over when
-    // that node gracefully leaves (spec §6.3).
+    // that node gracefully leaves (spec cluster §5.3).
     let sim = Simulation::new(7);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
@@ -222,7 +222,7 @@ const D: NodeId = NodeId::new(4);
 
 #[test]
 fn the_coordinator_only_acts_on_a_stable_fully_reachable_view() {
-    // Spec §6.4.4 item 3: the coordinator transitions members only on a locally
+    // Spec cluster §5.4.4 item 3: the coordinator transitions members only on a locally
     // stable, fully-reachable view. While one member is unreachable, a fresh
     // joiner stays `Joining`; once the view heals and holds stable for the
     // window, the admission goes through.
@@ -262,7 +262,7 @@ fn the_coordinator_only_acts_on_a_stable_fully_reachable_view() {
 
 #[test]
 fn downing_is_exempt_from_the_stability_gate() {
-    // The carved-out exception (spec §6.4.4 items 3–4): applying the downing
+    // The carved-out exception (spec cluster §5.4.4 items 3–4): applying the downing
     // policy to an unreachable member cannot be gated on full reachability;
     // the node being downed is unreachable by definition. The coordinator downs
     // it even though its view is not fully reachable.

@@ -1,4 +1,4 @@
-//! `EntityRef`, the `Entities` handle, and the system extension (spec §2.2, §4.4).
+//! `EntityRef`, the `Entities` handle, and the system extension (spec §3.2, §5.4).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ use crate::system::ShardId;
 const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the client-side redirect waits between resolution attempts while a
-/// shard has no reachable leader (§4.4). Short relative to an election timeout, so
+/// shard has no reachable leader (§5.4). Short relative to an election timeout, so
 /// convergence is observed promptly.
 const RESOLVE_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -70,27 +70,27 @@ const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Floor on the records one [`EntityRef::events`] page scans, whatever few
 /// events the caller still wants: the wire `limit` bounds records *scanned*
-/// (facet records among them are skipped, facets §3), so an unfloored want of one
+/// (facet records among them are skipped, facets §4), so an unfloored want of one
 /// or two events would cross a dense facet run one record per round trip and
 /// exhaust the read's one deadline. Events scanned past the caller's `limit`
 /// are dropped client-side, so the floor never overshoots the API contract.
 const EVENT_SCAN_FLOOR: usize = 256;
 
 /// The cached handles, in two generations so the cache stays **bounded** without an
-/// intrusive recency list (spec §4.4).
+/// intrusive recency list (spec §5.4).
 ///
 /// An `EntityRef` is handed out per name, and the gateway is one long-lived process
 /// fronting every tenant, so an unbounded map grows with the number of *distinct names
 /// the process has ever addressed*: unbounded in exactly the deployment that is scaled
 /// horizontally and expected to stay up. Most of what accumulates is dead weight: an
-/// entity hibernates after `idle_after` (§7) and its host stops, but the handle to it
+/// entity hibernates after `idle_after` (§8) and its host stops, but the handle to it
 /// lingers until some later call fails against it.
 ///
 /// A hit is served from either generation and promotes into `hot`; when `hot` fills,
 /// it becomes `cold` and a fresh `hot` starts, dropping whatever `cold` held. That
 /// keeps the whole structure to `2 × capacity` entries with O(1) work per operation
 /// and no per-entry bookkeeping. It approximates LRU rather than implementing it,
-/// because a miss is not an error: it costs one gateway round-trip, the path §4.4
+/// because a miss is not an error: it costs one gateway round-trip, the path §5.4
 /// specifies anyway.
 struct Generations<V: Clone> {
     hot: HashMap<EntityName, V>,
@@ -155,14 +155,14 @@ impl<V: Clone> Generations<V> {
 }
 
 /// A node-local cache of resolved host handles, shared by every [`EntityRef`] a
-/// [`Entities`] hands out (spec §4.4). A cache hit lets a call go **straight to the
+/// [`Entities`] hands out (spec §5.4). A cache hit lets a call go **straight to the
 /// host actor**, skipping the serial gateway on the steady-state hot path.
 ///
 /// A cached handle is returned only after a cheap, local check that its node still
 /// leads the entity's shard ([`HostCache::get`]). This is the pre-send guard that
 /// keeps a cache hit from dispatching to a **deposed** leader: a write to a crashed
 /// leader can time out, and a timeout is not safe to auto-retry (the command may
-/// have committed, at-most-once, §5, §1.1).
+/// have committed, at-most-once, §6, §1.1).
 ///
 /// Bounded by [`Generations`], so a long-lived process that addresses many distinct
 /// names does not grow one entry per name for its whole lifetime.
@@ -190,7 +190,7 @@ pub(crate) struct HostCache<G: Entity> {
     /// bootstraps. `1` on a routing-only client, where no answer depends on the
     /// shard a name resolves to (see [`EntityExt::entities_client`]).
     shards: usize,
-    /// The committed partition (§4.1), the authority on name→shard once ranges
+    /// The committed partition (§5.1), the authority on name→shard once ranges
     /// have committed (a split/merge moves names between shards).
     shard_map: Arc<dyn ShardMapSource>,
     hosts: Mutex<Generations<ActorRef<Host<G>>>>,
@@ -214,7 +214,7 @@ impl<G: Entity> HostCache<G> {
     }
 
     /// The shard `name` maps to: the map-first, founding-fallback resolution
-    /// (§4.1) behind one method, so no caller re-assembles its inputs.
+    /// (§5.1) behind one method, so no caller re-assembles its inputs.
     pub(crate) fn shard_of(&self, name: &EntityName) -> ShardId {
         resolve_shard(
             self.shard_map.as_ref(),
@@ -226,7 +226,7 @@ impl<G: Entity> HostCache<G> {
 
     /// A cached host for `name`. On a node that **replicates** the name's shard the
     /// current leader is known locally, so a handle that no longer sits on it is
-    /// proactively dropped (§4.4). A node that does **not** replicate the shard
+    /// proactively dropped (§5.4). A node that does **not** replicate the shard
     /// cannot know the leader, so it returns the cached handle and relies on
     /// reactive invalidation (a `NotLeader`/`DeadLetter`/`Unreachable` outcome drops
     /// it and re-resolves). The leadership read is a local lock read, off the
@@ -274,7 +274,7 @@ impl<G: Entity> HostCache<G> {
     }
 }
 
-/// The only handle to an entity (spec §2.2): it carries the [`EntityName`] and a
+/// The only handle to an entity (spec §3.2): it carries the [`EntityName`] and a
 /// handle to the entity type's gateway, and **never** grants access to state.
 ///
 /// The `G: EntityHandler<M>` bound on `ask`/`tell` proves at compile time that the
@@ -282,16 +282,16 @@ impl<G: Entity> HostCache<G> {
 ///
 /// It also carries an optional, **non-serialized** [`HostCache`] (present when
 /// obtained from an [`Entities`] on this node): repeated calls hit the cache and go
-/// straight to the host, off the gateway (§4.4). An `EntityRef` rebuilt from the
+/// straight to the host, off the gateway (§5.4). An `EntityRef` rebuilt from the
 /// wire, or a self-reference from [`EntityCtx`](crate::EntityCtx), has no cache and
 /// resolves through the gateway each call: correct, just not cached.
 ///
-/// The system handle drives the **client-side bounded redirect** (§4.4 step 4):
+/// The system handle drives the **client-side bounded redirect** (§5.4 step 4):
 /// it follows `NotLeader(hint)` toward the shard's leader until the caller's
 /// deadline expires. Never serialized; a wire-arrived ref recovers it from its
-/// decoded `gateway` handle, which rebinds to the local system on decode (core §2.10).
+/// decoded `gateway` handle, which rebinds to the local system on decode (core §7).
 pub struct EntityRef<G: Entity> {
-    /// The runtime type name (spec §4.1) this ref routes under, used to look up
+    /// The runtime type name (spec §5.1) this ref routes under, used to look up
     /// the leader's gateway in the receptionist. A ref decoded off the wire
     /// recovers it as `G::ENTITY_TYPE` (see the `Deserialize` note).
     entity_type: &'static str,
@@ -302,7 +302,7 @@ pub struct EntityRef<G: Entity> {
 }
 
 // `EntityRef` travels as just its name and gateway id (the gateway rebinds on
-// decode, core §2.10); the system handle and host cache are reconstructed locally.
+// decode, core §7); the system handle and host cache are reconstructed locally.
 impl<G: Entity> Serialize for EntityRef<G> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (&self.name, &self.gateway).serialize(serializer)
@@ -310,7 +310,7 @@ impl<G: Entity> Serialize for EntityRef<G> {
 }
 
 // Decoding recovers the local system from the rebound gateway ref, so a ref
-// embedded in a message is usable on the node that receives it (core §2.10).
+// embedded in a message is usable on the node that receives it (core §7).
 // `entity_type` recovers as `G::ENTITY_TYPE`: the receptionist `Key` needs a
 // `&'static str` and the wire carries only the name's owned string, so this is the
 // one path that cannot honor a runtime type name. A type hosted under
@@ -366,12 +366,12 @@ impl<G: Entity> EntityRef<G> {
     }
 
     /// Send a command and await its reply, held until the command's events are
-    /// durable (the output gate, §5). The `G: EntityHandler<M>` bound makes an
+    /// durable (the output gate, §6). The `G: EntityHandler<M>` bound makes an
     /// invalid call a compile error (**E10**).
     ///
     /// `M: Clone` so the runtime can re-issue the command if the first attempt
-    /// hits a stale cached host: one that hibernated (§7) or whose leader moved
-    /// (storage §5). The command did not commit in that case (§5), so re-issuing is safe.
+    /// hits a stale cached host: one that hibernated (§8) or whose leader moved
+    /// (storage §6). The command did not commit in that case (§6), so re-issuing is safe.
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, EntityError>
     where
         G: EntityHandler<M>,
@@ -389,7 +389,7 @@ impl<G: Entity> EntityRef<G> {
         self.dispatch(msg, within).await
     }
 
-    /// Fire-and-forget (spec §5): returns once the host accepts the command, not
+    /// Fire-and-forget (spec §6): returns once the host accepts the command, not
     /// after the commit, so it reports only enqueue-time failures and never
     /// `Unavailable`. At-most-once: callers make it idempotent where it matters.
     pub async fn tell<M>(&self, msg: M) -> Result<(), EntityError>
@@ -399,7 +399,7 @@ impl<G: Entity> EntityRef<G> {
     {
         // Only a `DeadLetter` is re-enqueued; an ambiguous failure is surfaced, not
         // retried, since a re-enqueue could double-apply (§1.1). Fire-and-forget
-        // never reports `Unavailable` (§5), so the budget is left unguarded.
+        // never reports `Unavailable` (§6), so the budget is left unguarded.
         let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
         let retry = msg.clone();
         self.resolve_twice(
@@ -415,12 +415,12 @@ impl<G: Entity> EntityRef<G> {
         .await
     }
 
-    /// Subscribe to the entity's committed records (spec §6.3), returning the
+    /// Subscribe to the entity's committed records (spec §7.3), returning the
     /// committed `head` with the live stream. A framework built-in, available for
     /// every entity type without an `EntityHandler` bound: the push analogue of
     /// `load`/`head`.
     ///
-    /// Delivery is best-effort; the caller MUST reconcile by `Seq` (§6.3,
+    /// Delivery is best-effort; the caller MUST reconcile by `Seq` (§7.3,
     /// **E16**): backfill `from`..`head` by reading the journal, then on each
     /// batch close any gap and ignore anything already seen. When the stream
     /// closes (a move, a lag-drop, or hibernation) re-subscribe and backfill
@@ -452,7 +452,7 @@ impl<G: Entity> EntityRef<G> {
         }
     }
 
-    /// Follow the entity's committed events after `from` live (spec §6.3): a
+    /// Follow the entity's committed events after `from` live (spec §7.3): a
     /// [`Follower`] whose [`next`](Follower::next) yields them in exact `Seq`
     /// order, reconciling the [`subscribe`](Self::subscribe) push against
     /// [`events`](Self::events) reads so the caller need not. Caller-driven
@@ -463,21 +463,21 @@ impl<G: Entity> EntityRef<G> {
 
     /// Up to `limit` of the entity's committed events after `from` (exclusive),
     /// decoded, in ascending `Seq` order, the load-path form of the
-    /// subscription's event projection (§6.3), served by the shard leader's
+    /// subscription's event projection (§7.3), served by the shard leader's
     /// **gateway** straight from the journal,
-    /// **without get-or-activating the entity** (§6): polling a hibernated
-    /// entity leaves it hibernated (§7). A framework built-in like
+    /// **without get-or-activating the entity** (§7): polling a hibernated
+    /// entity leaves it hibernated (§8). A framework built-in like
     /// [`subscribe`](Self::subscribe), available for every entity type with no
     /// `EntityHandler` bound.
     ///
-    /// The returned `Seq`s are the journal's real slots: facet records (facets §3)
+    /// The returned `Seq`s are the journal's real slots: facet records (facets §4)
     /// occupy interleaved ones, so consecutive events need not carry consecutive
     /// `Seq`s. Fewer than `limit` events come back only at the head, so an empty
     /// result means no event follows `from` **that the journal still holds**:
     /// the returned [`EventHistory`]'s `base` reports how far compaction has
-    /// truncated the log (storage §8), and a `from` below it asked for events the
+    /// truncated the log (storage §9), and a `from` below it asked for events the
     /// entity's snapshot has subsumed. Page by re-asking from the last `Seq`
-    /// returned. Read-your-leader like any read (§6). A failed or corrupt
+    /// returned. Read-your-leader like any read (§7). A failed or corrupt
     /// journal read surfaces as [`EntityError::Unavailable`]: transient; a read
     /// commits nothing, so re-asking is always safe.
     pub async fn events(
@@ -512,7 +512,7 @@ impl<G: Entity> EntityRef<G> {
             let page: EventPage = match reply {
                 ReadReply::Page(page) => page,
                 // The gateway is establishing the entity's committed-head floor
-                // (§6): back off and re-ask, bounded by the one deadline.
+                // (§7): back off and re-ask, bounded by the one deadline.
                 ReadReply::Warming => {
                     if deadline.duration_since(self.system.now()).is_zero() {
                         return Err(EntityError::Unavailable(
@@ -546,7 +546,7 @@ impl<G: Entity> EntityRef<G> {
         Ok(EventHistory { base, events })
     }
 
-    /// Resolve the name to its live host (§4.4). With `use_cache`, a cached handle
+    /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle
     /// is returned without touching the gateway (the steady-state fast path);
     /// otherwise the [`gateway_ask`](Self::gateway_ask) redirect engine drives
     /// [`Activate`] to the leader's gateway and the returned handle is cached.
@@ -569,7 +569,7 @@ impl<G: Entity> EntityRef<G> {
         Ok(host)
     }
 
-    /// The **client-side bounded redirect** (§4.4 step 4), generic over the
+    /// The **client-side bounded redirect** (§5.4 step 4), generic over the
     /// gateway request: the single-shot gateway answers `Ok` if its node leads the
     /// shard, else `NotLeader(hint)`, which this follows to that node's gateway,
     /// backing off while the shard elects, until the leader answers or `deadline`
@@ -584,7 +584,7 @@ impl<G: Entity> EntityRef<G> {
     /// several requests (a paging read, [`events`](Self::events)) keeps the
     /// found leader across them. Bounded by the **caller's** `deadline`, not a
     /// per-attempt window, so a dispatch that resolves, fails, and re-resolves
-    /// still returns within the one budget (§4.4). Safe for the gateway's whole
+    /// still returns within the one budget (§5.4). Safe for the gateway's whole
     /// surface: an `Activate` commits nothing and a read commits nothing, so
     /// re-asking after a transport failure cannot double-apply (§1.1).
     async fn gateway_ask<M, T>(
@@ -627,11 +627,11 @@ impl<G: Entity> EntityRef<G> {
             }
             self.system.sleep(RESOLVE_BACKOFF).await;
         }
-        // Deadline or attempt bound exhausted: surface the last hint seen (§9).
+        // Deadline or attempt bound exhausted: surface the last hint seen (§3.2).
         Err(EntityError::NotLeader(hint))
     }
 
-    /// Every gateway discovered for this entity type (§4.3), one per node.
+    /// Every gateway discovered for this entity type (§5.3), one per node.
     fn gateways(&self) -> Vec<ActorRef<Gateway<G>>> {
         self.system
             .receptionist()
@@ -639,7 +639,7 @@ impl<G: Entity> EntityRef<G> {
             .into_vec()
     }
 
-    /// The gateway registered on `node`, if discovered in the receptionist (§4.3).
+    /// The gateway registered on `node`, if discovered in the receptionist (§5.3).
     fn gateway_on(&self, node: NodeId) -> Option<ActorRef<Gateway<G>>> {
         self.gateways()
             .into_iter()
@@ -647,7 +647,7 @@ impl<G: Entity> EntityRef<G> {
     }
 
     /// A discovered gateway on any node but `failed`: used to escape a dead
-    /// target (§4.4) without re-selecting the very gateway that just timed out,
+    /// target (§5.4) without re-selecting the very gateway that just timed out,
     /// whose registration may outlive the crash until the membership prunes it.
     fn gateway_excluding(&self, failed: NodeId) -> Option<ActorRef<Gateway<G>>> {
         let gateways = self.gateways();
@@ -664,11 +664,11 @@ impl<G: Entity> EntityRef<G> {
         }
     }
 
-    /// Resolve the host and send the typed command, held until durable (§5). The
+    /// Resolve the host and send the typed command, held until durable (§6). The
     /// first attempt prefers the cache; if that host turns out unusable, the cache
     /// entry is dropped and the command re-issued, but **only when the first
-    /// attempt provably did not run** (a `NotLeader`, which never commits, storage §5; or a
-    /// `DeadLetter` from a hibernated host, §7). An ambiguous transport failure is
+    /// attempt provably did not run** (a `NotLeader`, which never commits, storage §6; or a
+    /// `DeadLetter` from a hibernated host, §8). An ambiguous transport failure is
     /// surfaced, never auto-retried (see [`is_retriable`]).
     async fn dispatch<M>(&self, msg: M, within: Duration) -> Result<M::Reply, EntityError>
     where
@@ -688,11 +688,11 @@ impl<G: Entity> EntityRef<G> {
                 match host.ask_timeout(RunTyped(msg), remaining).await {
                     // The host's reply is itself `Result<M::Reply, EntityError>`.
                     Ok(Ok(reply)) => Attempt::Done(Ok(reply)),
-                    // Leadership moved off the cached host (storage §5): refresh and retry.
+                    // Leadership moved off the cached host (storage §6): refresh and retry.
                     Ok(Err(EntityError::NotLeader(_))) => Attempt::Retry,
                     // A genuine durability outcome (quorum loss / unhandled): terminal.
                     Ok(Err(other)) => Attempt::Done(Err(other)),
-                    // The command provably never reached a handler (§7): re-issue.
+                    // The command provably never reached a handler (§8): re-issue.
                     Err(call) if is_retriable(&call) => Attempt::Retry,
                     // Ambiguous or terminal: never auto-retry a command that may
                     // have committed (§1.1).
@@ -713,14 +713,14 @@ impl<G: Entity> EntityRef<G> {
     /// The two-attempt resolve-retry both [`tell`](Self::tell) and
     /// [`dispatch`](Self::dispatch) layer over the [`resolve`](Self::resolve)
     /// redirect engine. Resolve cache-preferring and run `first` under the single
-    /// `deadline`; on [`Attempt::Retry`]: the command provably never ran (storage §5,
-    /// entity §7); drop the stale cache entry, resolve cache-bypassing, and run `again`,
+    /// `deadline`; on [`Attempt::Retry`]: the command provably never ran (storage §6,
+    /// entity §8); drop the stale cache entry, resolve cache-bypassing, and run `again`,
     /// which is terminal. Never a third attempt, so an effectful command that may
     /// have committed is surfaced, never re-issued (at-most-once, §1.1).
     ///
     /// `guard_budget` returns [`Unavailable`](EntityError::Unavailable) when the
     /// deadline is spent before the retry; fire-and-forget must never report
-    /// `Unavailable` (§5), so it passes `false`.
+    /// `Unavailable` (§6), so it passes `false`.
     async fn resolve_twice<T>(
         &self,
         deadline: actor_core::Instant,
@@ -753,8 +753,8 @@ enum Attempt<T> {
 
 /// Whether a transport failure proves the command **never ran**, so re-issuing it
 /// against a fresh resolution cannot double-apply (at-most-once, §1.1; reply-iff-
-/// durable, §5/E5). Only `DeadLetter` qualifies: the cached host had hibernated
-/// and stopped, so the command dead-lettered without reaching a handler (the §7
+/// durable, §6/E5). Only `DeadLetter` qualifies: the cached host had hibernated
+/// and stopped, so the command dead-lettered without reaching a handler (the §8
 /// eviction race). `Unreachable`/`Timeout` are **ambiguous** (the command may
 /// have committed on a leader that then crashed before replying), so they are NOT
 /// auto-retried for an effectful command; they surface to the caller, who makes
@@ -763,12 +763,12 @@ fn is_retriable(call: &CallError) -> bool {
     matches!(call, CallError::DeadLetter)
 }
 
-/// A handle to a hosted entity type (spec §4.4): address an entity by key and
+/// A handle to a hosted entity type (spec §5.4): address an entity by key and
 /// `ask`/`tell` it. Obtained from [`EntityExt::entities`].
 pub struct Entities<G: Entity> {
     gateway: ActorRef<Gateway<G>>,
-    /// The shared routing state (§4.4): the system handle, the runtime type name
-    /// (spec §4.1, `G::ENTITY_TYPE` unless
+    /// The shared routing state (§5.4): the system handle, the runtime type name
+    /// (spec §5.1, `G::ENTITY_TYPE` unless
     /// [`entities_named`](crate::cluster::EntityNode::entities_named) overrode it), the founding
     /// shard count, and the shard map; read through the cache rather than kept
     /// as copies here, so name resolution has one set of inputs.
@@ -785,9 +785,9 @@ impl<G: Entity> Clone for Entities<G> {
 }
 
 impl<G: Entity> Entities<G> {
-    /// Address an entity of this type by key (spec §4.1): an [`EntityRef`] with
+    /// Address an entity of this type by key (spec §5.1): an [`EntityRef`] with
     /// no activation yet; the first message activates it. The ref shares this
-    /// handle's host cache (§4.4).
+    /// handle's host cache (§5.4).
     pub fn entity(&self, key: impl Into<String>) -> EntityRef<G> {
         EntityRef::new(
             self.cache.entity_type,
@@ -799,7 +799,7 @@ impl<G: Entity> Entities<G> {
     }
 
     /// The node that currently leads the shard an entity key maps to, where that
-    /// entity activates (§4.2), or `None` while the shard elects and on a node
+    /// entity activates (§5.2), or `None` while the shard elects and on a node
     /// outside the shard's group (as a clustered routing-only client always is). A
     /// routing observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
@@ -807,7 +807,7 @@ impl<G: Entity> Entities<G> {
         self.cache.system.shard_leader(self.cache.shard_of(&name))
     }
 
-    /// Whether a live host handle is currently cached for `key` (spec §4.4). An
+    /// Whether a live host handle is currently cached for `key` (spec §5.4). An
     /// observability detail, not a statement about the entity's activation on its
     /// leader.
     pub fn is_cached(&self, key: impl Into<String>) -> bool {
@@ -815,7 +815,7 @@ impl<G: Entity> Entities<G> {
             .contains(&EntityName::new(self.cache.entity_type, key))
     }
 
-    /// Request a split of shard `index` at its range midpoint (spec storage §7): the
+    /// Request a split of shard `index` at its range midpoint (spec storage §8): the
     /// admin/test seam over [`ShardMapSource::request_split`]. Best-effort and
     /// asynchronous: a shard that is unknown, mid-migration, mid-split, or a
     /// single-point range is silently skipped, and the committed flip is
@@ -825,7 +825,7 @@ impl<G: Entity> Entities<G> {
         self.cache.shard_map.request_split(index);
     }
 
-    /// Request a merge of shard `left` with its right neighbour (spec storage §7):
+    /// Request a merge of shard `left` with its right neighbour (spec storage §8):
     /// the mirror of [`split_shard`](Entities::split_shard), reclaiming a
     /// leader-election group (E7) when two adjacent ranges are cold. Best-effort
     /// and asynchronous on the same terms; unknown, non-adjacent, or busy shards
@@ -835,7 +835,7 @@ impl<G: Entity> Entities<G> {
         self.cache.shard_map.request_merge(left);
     }
 
-    /// The nodes that replicate the shard an entity key maps to (spec storage §6): the
+    /// The nodes that replicate the shard an entity key maps to (spec storage §7): the
     /// only nodes that hold its data and can lead it. Read live from the
     /// consensus-agreed shard map, so it reflects the latest committed allocation,
     /// not a `entities()`-time snapshot. Empty on a routing-only client, which holds
@@ -847,12 +847,12 @@ impl<G: Entity> Entities<G> {
     }
 }
 
-/// Host entities of a type on a system (spec §4.3). Implemented for every
+/// Host entities of a type on a system (spec §5.3). Implemented for every
 /// [`EntitySystem`], so `system.entities::<G>(config)` starts the gateway and
 /// returns an [`Entities`] handle.
 pub trait EntityExt: EntitySystem {
     /// This node's entity hosting, carrying the capabilities every type it hosts
-    /// shares (spec storage §2.2, facets §4.5, entity §10): the blocking-I/O pool, the metrics registry,
+    /// shares (spec storage §3.2, facets §5.5, entity §3.4): the blocking-I/O pool, the metrics registry,
     /// and the alarm index.
     ///
     /// All three are properties of the *node*, not of an entity type, so a deployment
@@ -870,7 +870,7 @@ pub trait EntityExt: EntitySystem {
     }
 
     /// Start hosting entities of type `G` under its own `G::ENTITY_TYPE` (spec
-    /// §4.3): spawn the type's gateway and return the handle. Each
+    /// §5.3): spawn the type's gateway and return the handle. Each
     /// activation's behavior is built by `G::default`. The common case: one Rust
     /// type, one entity type. An explicit runtime type name or activation factory
     /// is the node's form, [`EntityNode::entities_named`](crate::cluster::EntityNode::entities_named).
@@ -884,7 +884,7 @@ pub trait EntityExt: EntitySystem {
     /// Address entities of type `G` as a routing-only **client**: it hosts
     /// **nothing**, no gateway, replica store, or shard-map group is started. The
     /// handle routes through a *host's* gateway, discovered in the receptionist
-    /// (§4.3) and seeded here; `EntityRef`'s bounded redirect re-discovers a live
+    /// (§5.3) and seeded here; `EntityRef`'s bounded redirect re-discovers a live
     /// gateway on failover, so the seed only has to be reachable once.
     ///
     /// Returns `None` until at least one host's gateway for `entity_type` has
@@ -892,7 +892,7 @@ pub trait EntityExt: EntitySystem {
     /// node waits for its peers before serving. The client needs no shard count:
     /// a node that replicates none of the type's shards can never know a shard's
     /// leader, so every name it has not cached resolves through a host's gateway,
-    /// which maps it from its own committed partition (§4.4).
+    /// which maps it from its own committed partition (§5.4).
     fn entities_client<G>(&self, entity_type: &'static str) -> Option<Entities<G>>
     where
         G: Entity<System = Self>,
@@ -925,17 +925,17 @@ pub trait EntityExt: EntitySystem {
 
 impl<T: EntitySystem> EntityExt for T {}
 
-/// How often the alarm driver sweeps the shards it leads (spec facets §4.5). The exact
+/// How often the alarm driver sweeps the shards it leads (spec facets §5.5). The exact
 /// deadline is honoured by the entity's own in-activation timer once re-activated;
 /// this cadence bounds only the *re-activation* latency after a failover.
 const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Build the node-local hosting for an entity type (spec §4.3, storage §2.2): the
+/// Build the node-local hosting for an entity type (spec §5.3, storage §3.2): the
 /// durable store, replica store, shard map, and gateway, plus the type's alarm
-/// driver (facets §4.5, the callerless-activation seam) when the node has an
+/// driver (facets §5.5, the callerless-activation seam) when the node has an
 /// `alarm_index` and the type declares the [`Alarm`](crate::alarm::Alarm) facet.
 /// The one constructor behind every [`EntityNode`](crate::node::EntityNode) hosting
-/// method, which keeps the returned shard map for its leadership handoff (storage §5.3).
+/// method, which keeps the returned shard map for its leadership handoff (storage §6.3).
 pub(crate) fn build_entities<S, G>(
     system: &S,
     entity_type: &'static str,
@@ -953,18 +953,18 @@ where
     let alarm_index = alarm_index.filter(|_| crate::alarm::declares_alarm::<G>());
     let shards = config.shards.max(1);
     let replicas = config.replication_factor.max(1);
-    // This node's durable entity store (storage §2.2): the injected factory if a deployment
+    // This node's durable entity store (storage §3.2): the injected factory if a deployment
     // supplied one (so records survive a restart), else a fresh ephemeral in-memory
     // store. The replica-store actor makes it reachable from a shard leader's
-    // replicator (storage §4), registered under one key per type like the gateway (§4.3).
+    // replicator (storage §5), registered under one key per type like the gateway (§5.3).
     let store: Arc<dyn EntityStore> = match &config.entity_store {
         // Per `(entity_type, node)`, never per node alone: the store's fence is keyed by
         // shard index and holds this type's leader-election term, which another type's
-        // term would fence out of its own shards (storage §3.2, [`EntityStoreFactory`]).
+        // term would fence out of its own shards (storage §4.2, [`EntityStoreFactory`]).
         Some(factory) => factory(entity_type, system.node()),
         None => Arc::new(MemoryEntityStore::new()),
     };
-    // Every store write runs on the node's blocking pool (storage §2.2, `crate::blocking`).
+    // Every store write runs on the node's blocking pool (storage §3.2, `crate::blocking`).
     let store = NodeStore::new(store, Arc::clone(capabilities.blocking_io()));
     let replica_store = system.spawn(ReplicaStore::<S>::new(store.clone()));
     system
@@ -972,7 +972,7 @@ where
         .register(replica_store_key::<S>(entity_type), &replica_store);
     let transport: Arc<dyn ReplicaTransport> =
         Arc::new(ActorReplicaTransport::<S>::new(system.clone(), entity_type));
-    // Build the consensus-agreed shard map (storage §6): a per-type Raft group whose
+    // Build the consensus-agreed shard map (storage §7): a per-type Raft group whose
     // committed log is the allocation, so every node agrees on each shard's replica
     // set and only the replicas store it. Keyed by the runtime `entity_type`, so two
     // type names get separate maps.
@@ -1001,7 +1001,7 @@ where
         alarm_index.clone(),
     ));
     // Register this node's gateway under the type's well-known key so other nodes
-    // route activations to it (§4.3).
+    // route activations to it (§5.3).
     system
         .receptionist()
         .register(gateway_key::<G>(entity_type), &gateway);
@@ -1025,7 +1025,7 @@ where
     (handle, shard_map)
 }
 
-/// The per-type alarm driver (spec facets §4.5): the callerless-activation seam that makes a
+/// The per-type alarm driver (spec facets §5.5): the callerless-activation seam that makes a
 /// durable alarm fire across an entity's hibernation and a node failover, not only
 /// while it is resident.
 ///
@@ -1037,7 +1037,7 @@ where
 /// entity's alarm facet is the source of truth), so re-activating an entity whose alarm
 /// already cleared is harmless.
 ///
-/// A split or merge (storage §7) moves an entity's key range to another shard, leaving a
+/// A split or merge (storage §8) moves an entity's key range to another shard, leaving a
 /// stale entry in the old shard's index. Re-activating a due entity routes to its
 /// **live** owner, so the alarm still fires and the entity re-registers into its new
 /// shard's index there. The driver clears the stale entry in the old index only
@@ -1051,7 +1051,7 @@ where
     loop {
         system.sleep(ALARM_DRIVE_INTERVAL).await;
         let now = system.now().as_nanos();
-        // Sweep the committed partition's shards: a split/merge (storage §7) changes
+        // Sweep the committed partition's shards: a split/merge (storage §8) changes
         // the shard set, and each shard has its own index entity. While the map is
         // still bootstrapping, fall back to the founding indices.
         let mut indices = entities.cache.shard_map.shard_indices();
@@ -1084,7 +1084,7 @@ where
                     .subscribe(Seq::ZERO)
                     .await
                     .is_ok();
-                // If the entity has moved off this shard (storage §7), the re-activation
+                // If the entity has moved off this shard (storage §8), the re-activation
                 // above seeded its new shard's index, so clear the stale entry here,
                 // with a max head, so the clear always wins. Only after a
                 // successful re-activation, so a transient failure never orphans
@@ -1161,7 +1161,7 @@ mod tests {
 
     /// Invalidation must clear both generations: a handle left in the older one would
     /// come back on the next lookup, which is exactly the deposed-leader dispatch the
-    /// invalidation exists to prevent (§4.4).
+    /// invalidation exists to prevent (§5.4).
     #[test]
     fn removal_clears_both_generations() {
         let mut cache: Generations<u32> = Generations::new(1);

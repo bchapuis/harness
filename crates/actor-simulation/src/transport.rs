@@ -1,10 +1,10 @@
-//! The in-memory simulated network (spec §2.13, §2.12.2, §10).
+//! The in-memory simulated network (spec cluster §4, actor §11, §13).
 //!
 //! [`SimNetwork`] routes [`Frame`]s between [`ClusterSystem`] nodes running on
 //! one simulation, implementing the real [`Transport`] trait, so a simulated
 //! cluster runs the real routing, dispatch, codec, and failure detection with
 //! only the wire in-memory. It also injects faults under seed control (spec
-//! §10): a blocked directed pair drops frames, which the SWIM detector then
+//! §13): a blocked directed pair drops frames, which the SWIM detector then
 //! observes as unreachability.
 //!
 //! This module is the **wire**: routing, seeded loss/duplication/latency, and
@@ -68,7 +68,7 @@ pub(crate) struct NetInner {
     /// Directed pairs whose frames are dropped (partitions and crashes).
     pub(crate) blocked: BTreeSet<(NodeId, NodeId)>,
     /// Last scheduled delivery time per directed pair, kept strictly increasing
-    /// so per-pair FIFO survives latency jitter (spec §4, invariant #3).
+    /// so per-pair FIFO survives latency jitter (spec §8.1, invariant #3).
     pair_clock: BTreeMap<(NodeId, NodeId), Instant>,
 }
 
@@ -80,7 +80,7 @@ impl NetInner {
     }
 }
 
-/// An in-memory network shared by the nodes of one simulation (spec §2.12.2).
+/// An in-memory network shared by the nodes of one simulation (spec §11).
 ///
 /// Fields are `pub(crate)` because the sibling `cluster` module implements the
 /// lifecycle and nemesis half of this same type; nothing outside
@@ -102,7 +102,7 @@ pub struct SimNetwork {
     stats: Arc<FaultCounters>,
 }
 
-/// The fixed minimum delivery latency applied to every frame (spec §2.12.2).
+/// The fixed minimum delivery latency applied to every frame (spec §11).
 /// **Not** a fault, and it draws no entropy: it exists so virtual time always
 /// advances on delivery. Without it, zero-latency delivery would complete
 /// synchronously at the current instant (`SimClock::sleep(0)` is immediately
@@ -150,7 +150,7 @@ impl SimNetwork {
         *self.faults.lock().expect("fault policy mutex poisoned")
     }
 
-    /// Run every node in **gossip-based** mode (spec §6.4.4): full SWIM failure
+    /// Run every node in **gossip-based** mode (spec cluster §5.4.4): full SWIM failure
     /// detection, with the coordinator driving the lifecycle and applying
     /// `downing`.
     pub fn with_gossip(mut self, swim: SwimConfig, downing: DowningPolicy) -> SimNetwork {
@@ -158,7 +158,7 @@ impl SimNetwork {
         self
     }
 
-    /// Run every node in **registry-based** mode (spec §6.4.2): the SWIM
+    /// Run every node in **registry-based** mode (spec cluster §5.4.2): the SWIM
     /// detector observes reachability, but the external registry behind
     /// `client` is the authority; every node syncs against it each
     /// `sync_interval`, and only a registry mutation declares `down`.
@@ -176,7 +176,7 @@ impl SimNetwork {
         self
     }
 
-    /// Run every node in **leader-based** mode (spec §6.4.3): the SWIM detector
+    /// Run every node in **leader-based** mode (spec cluster §5.4.3): the SWIM detector
     /// is the leader's sensor, membership transitions are quorum-committed Raft
     /// log entries, and `downing` is applied by the elected leader alone.
     pub fn with_leader(
@@ -194,26 +194,26 @@ impl SimNetwork {
     }
 
     /// Run every node in the given membership [`mode`](MembershipMode) (spec
-    /// §6.4): the general form of the per-mode builders, so a swarm can sweep
+    /// cluster §5.4): the general form of the per-mode builders, so a swarm can sweep
     /// one workload across all four control planes.
     pub fn with_mode(mut self, mode: MembershipMode) -> SimNetwork {
         self.mode = mode;
         self
     }
 
-    /// Gate inbound messages on every node with `authorizer` (spec §9).
+    /// Gate inbound messages on every node with `authorizer` (spec cluster §3.6).
     pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> SimNetwork {
         self.authorizer = Some(authorizer);
         self
     }
 
-    /// Route every node's events to `events` (spec §2.7).
+    /// Route every node's events to `events` (spec §3.6).
     pub fn with_events(mut self, events: Arc<dyn EventSink>) -> SimNetwork {
         self.events = events;
         self
     }
 
-    /// Set the per-actor bounded mailbox capacity on every node (spec §3.3). A
+    /// Set the per-actor bounded mailbox capacity on every node (spec §6). A
     /// small capacity makes backpressure: `MailboxFull` on the inbound remote
     /// path (invariant #5); observable in a test without flooding the default.
     pub fn with_mailbox_capacity(mut self, capacity: usize) -> SimNetwork {
@@ -256,13 +256,13 @@ impl SimNetwork {
         // not run otherwise.)
         let copies = if faults.active() {
             // Seeded loss (also models corruption / association loss): the node
-            // never sees the frame, so it cannot be wedged by it (spec §2.13 on framing).
+            // never sees the frame, so it cannot be wedged by it (spec cluster §4 on framing).
             if self.entropy.buggify(faults.drop_num, faults.drop_den) {
                 self.stats.record_dropped();
                 return Ok(());
             }
             // Seeded duplication (docs/simulation-testing.md): the framework tolerates it; the
-            // caller still sees a single outcome (§4).
+            // caller still sees a single outcome (§8.1).
             if self
                 .entropy
                 .buggify(faults.duplicate_num, faults.duplicate_den)
@@ -325,7 +325,7 @@ impl SimNetwork {
     }
 }
 
-/// A [`Transport`] handle bound to one node's outbound side (spec §2.13).
+/// A [`Transport`] handle bound to one node's outbound side (spec cluster §4).
 #[derive(Clone)]
 pub struct SimTransport {
     pub(crate) net: SimNetwork,

@@ -1,7 +1,7 @@
-//! Run-loop conformance (agent spec §3, §4.2, §3.3, §5.3): the happy path,
+//! Run-loop conformance (agent spec §4, §5.2, §4.3, §7.2): the happy path,
 //! the tool loop, write-ahead order, idempotent submission (A6), and serialized
 //! turns; each asserted against the journal, the single source of truth
-//! (§8.1), under the continuous harness checkers (§10).
+//! (§10.1), under the continuous harness checkers (§12).
 
 mod support;
 
@@ -84,17 +84,17 @@ fn a_final_message_completes_the_run() {
     );
     run_seed(&workload, 7).expect("invariants hold");
 
-    // The journal is the session (§3.1): audit the record order (§3.3).
+    // The journal is the session (§4.1): audit the record order (§4.3).
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec!["created", "turn", "started", "model", "ended"],
-        "write-ahead order (§3.3)"
+        "write-ahead order (§4.3)"
     );
 }
 
 #[test]
 fn a_turns_recorded_outcome_reads_back_by_turn_id() {
-    // §2.5: `outcome` answers from the fold, commits nothing, and knows only
+    // §3.4: `outcome` answers from the fold, commits nothing, and knows only
     // turns that ended.
     let model = Arc::new(ScriptedModel::steps(vec![Ok(final_message("the answer"))]));
     let workload = Scenario::new(
@@ -157,10 +157,10 @@ fn the_tool_loop_journals_intent_before_effect() {
         vec![
             "created", "turn", "started", "model", "tool", "model", "ended"
         ],
-        "intent precedes effect; outcome precedes the next step (§3.3)"
+        "intent precedes effect; outcome precedes the next step (§4.3)"
     );
-    // The workspace executed exactly the declared call (§2.4) and was released by
-    // the idle stop (§5.2, A7).
+    // The workspace executed exactly the declared call (§6.1) and was released by
+    // the idle stop (§7.1, A7).
     assert_eq!(stats.calls().len(), 1);
     assert_eq!(stats.opened(), 1);
     assert_eq!(stats.released(), 1);
@@ -182,12 +182,12 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
             Box::pin(async move {
                 let session = harness.session("echo", SessionId::new("s-3")).unwrap();
                 let turn = Turn::new(TurnId::new("t-1"), "go");
-                // Concurrent duplicate submissions attach to one run (§5.3).
+                // Concurrent duplicate submissions attach to one run (§7.2).
                 let (a, b) =
                     futures::join!(session.prompt(turn.clone()), session.prompt(turn.clone()));
                 assert_eq!(a.expect("call").expect("run").text(), "once");
                 assert_eq!(b.expect("call").expect("run").text(), "once");
-                // A later re-submission returns the recorded outcome (§5.3).
+                // A later re-submission returns the recorded outcome (§7.2).
                 let again = session
                     .prompt(turn.clone())
                     .await
@@ -195,7 +195,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
                     .expect("run");
                 assert_eq!(again.text(), "once");
                 // Same TurnId, different content: a caller bug, rejected without
-                // journaling (§5.3).
+                // journaling (§7.2).
                 let mismatch = session
                     .prompt(Turn::new(TurnId::new("t-1"), "different"))
                     .await;
@@ -221,7 +221,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
 
 #[test]
 fn a_resubmission_that_changes_the_budget_is_a_conflict() {
-    // §5.3: the turn-equality check covers the literal budget field, so a
+    // §7.2: the turn-equality check covers the literal budget field, so a
     // re-submitted TurnId with a different budget is a caller bug, not a
     // silent attach, and `None` is not `Some(default)`, so the rejection
     // never depends on the kind's current default.
@@ -256,7 +256,7 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
                         some_default,
                         Err(PromptError::Rejected(SubmitReject::ContentConflict { .. }))
                     ),
-                    "Some(default) is not None (§5.3)"
+                    "Some(default) is not None (§7.2)"
                 );
                 // An identical literal budget re-attaches and returns the
                 // recorded outcome; a changed one conflicts.
@@ -325,7 +325,7 @@ fn turns_are_serialized_by_the_journal() {
                 );
                 let a = a.expect("call").expect("run");
                 let b = b.expect("call").expect("run");
-                // Both ran; the journal's total order serialized them (§3.1).
+                // Both ran; the journal's total order serialized them (§4.1).
                 assert_eq!(a.text(), "first");
                 assert_eq!(b.text(), "second");
                 *sink.lock().unwrap() = tail_records(&session).await;
@@ -335,17 +335,17 @@ fn turns_are_serialized_by_the_journal() {
     );
     run_seed(&workload, 17).expect("invariants hold");
 
-    // Acceptance and start are distinct facts (§2.6): both `TurnSubmitted`s
+    // Acceptance and start are distinct facts (§7.2): both `TurnSubmitted`s
     // commit as they arrive (this seed acks both before either run begins),
     // while the runs themselves stay serialized; the second `TurnStarted`
-    // commits only after the first's terminal record (§3.2).
+    // commits only after the first's terminal record (§4.2).
     let records = records.lock().unwrap();
     assert_eq!(
         record_kinds(&records),
         vec![
             "created", "turn", "turn", "started", "model", "ended", "started", "model", "ended"
         ],
-        "acceptance interleaves; starts serialize (§3.2)"
+        "acceptance interleaves; starts serialize (§4.2)"
     );
     let started: Vec<_> = records
         .iter()
@@ -382,7 +382,7 @@ fn an_unknown_tool_is_a_transcript_value_not_a_run_failure() {
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
                     .expect("call")
-                    .expect("run never fails because a tool misbehaved (§4.2)");
+                    .expect("run never fails because a tool misbehaved (§5.2)");
                 assert_eq!(outcome.text(), "recovered");
                 flush(&system).await;
             })
@@ -390,7 +390,7 @@ fn an_unknown_tool_is_a_transcript_value_not_a_run_failure() {
     );
     run_seed(&workload, 19).expect("invariants hold");
 
-    // Both synthesized outcomes are journaled errors; nothing was executed (§4.2).
+    // Both synthesized outcomes are journaled errors; nothing was executed (§5.2).
     assert_eq!(stats.calls().len(), 0);
     assert_eq!(stats.opened(), 0);
 }

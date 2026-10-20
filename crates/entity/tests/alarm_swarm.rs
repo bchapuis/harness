@@ -1,10 +1,10 @@
-//! Alarms under the cluster fault swarm (facets §4.5, invariant **E21**).
+//! Alarms under the cluster fault swarm (facets §5.5, invariant **E21**).
 //!
 //! `alarm.rs` and `alarm_cluster.rs` assert at-most-once firing through *scripted*
 //! scenarios: a clean run, a cancel, a re-arm, one leader crash. This file
 //! applies the same property the V&V way: a [`ClusterWorkload`] swept across
 //! seeds while the nemesis injects partitions, crashes, pauses, heals, loss,
-//! duplication, and delay, with a [`Checker`] watching the §10 event stream live.
+//! duplication, and delay, with a [`Checker`] watching the §11 event stream live.
 //!
 //! **What makes E21 observable here.** Each entity is armed exactly once and
 //! receives no other mutating command for the rest of the run, so `TimerState`'s
@@ -201,7 +201,7 @@ fn config() -> EntityConfig {
         shards: SHARDS,
         // Long enough that an entity does not hibernate between its arm and its
         // deadline, though the pending-alarm veto would hold it resident anyway
-        // (facets §4.5).
+        // (facets §5.5).
         idle_after: Duration::from_secs(600),
         snapshot_every: 8,
         ..EntityConfig::default()
@@ -219,7 +219,7 @@ impl ClusterWorkload for AlarmSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (storage §6); every node is a control voter so the map group can form.
+        // (storage §7); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 

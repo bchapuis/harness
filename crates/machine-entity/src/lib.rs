@@ -1,8 +1,8 @@
 //! Persistent machines: a durable, name-addressed lightweight VM as an entity.
 //!
 //! A **machine** is an entity whose durable state is a raw disk (the rootfs, a
-//! disk facet, facets §4.4) and a synced `/workspace` (a workspace facet,
-//! facets §4.1), reached over SSH, and whose live guest is disposable.
+//! disk facet, facets §5.4) and a synced `/workspace` (a workspace facet,
+//! facets §5.1), reached over SSH, and whose live guest is disposable.
 //! Identity, the journal, the single-writer fence, placement, activation, idle
 //! hibernation, and failover are the entity's, unchanged. This crate is the
 //! entity half of the machine; the SSH front door is `machine-frontdoor`, the

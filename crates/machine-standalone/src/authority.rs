@@ -1,4 +1,4 @@
-//! The front door's entity-cluster half (machine §2.5), over a real
+//! The front door's entity-cluster half (machine §5.1), over a real
 //! `Entities<Machine>`.
 //!
 //! `machine-frontdoor` states the seam and ships fakes for its tests; this is
@@ -28,7 +28,7 @@ use russh::keys::PublicKey;
 /// The entity type this node hosts and this authority addresses.
 pub type NodeMachine = Machine<TcpCluster>;
 
-/// A [`MachineAuthority`] backed by the cluster (machine §2.5).
+/// A [`MachineAuthority`] backed by the cluster (machine §5.1).
 pub struct EntityAuthority {
     machines: Entities<NodeMachine>,
     /// The front-door actor holding these connections: the machine's
@@ -36,11 +36,11 @@ pub struct EntityAuthority {
     /// its attachments reaped (`Detached { FrontDoorLost }`).
     door: ActorId,
     /// This node, so [`attach`](EntityAuthority::attach) can refuse a machine
-    /// this node does not lead before journaling anything (machine §2.5).
+    /// this node does not lead before journaling anything (machine §5.1).
     node: NodeId,
     /// How long a front-door command waits. A machine mid-failover redirects
     /// within entity's bounded retry; past this the connection is refused
-    /// rather than hung, and the client reconnects (machine §5).
+    /// rather than hung, and the client reconnects (machine §7).
     timeout: Duration,
 }
 
@@ -91,7 +91,7 @@ impl MachineAuthority for EntityAuthority {
     }
 
     async fn attach(&self, machine: &EntityName, principal: &str) -> Result<u64, FrontDoorError> {
-        // The bridge is node-local (machine §2.5): a channel ends at a guest
+        // The bridge is node-local (machine §5.1): a channel ends at a guest
         // this node holds, so a door that does not lead the machine cannot
         // serve it whatever the entity replies. Refuse here, before the
         // `Attach` journals an attachment and boots a guest on the leader that
@@ -104,7 +104,7 @@ impl MachineAuthority for EntityAuthority {
         {
             return Err(FrontDoorError(format!(
                 "{machine}: led by {leader}, and a front door bridges only the machines its own \
-                 node leads (machine §7's cross-node relay is not built). Reconnect to that \
+                 node leads (status §11's cross-node relay is not built). Reconnect to that \
                  node's door."
             )));
         }
@@ -125,7 +125,7 @@ impl MachineAuthority for EntityAuthority {
 
     async fn detach(&self, machine: &EntityName, attachment: u64) {
         // Best-effort by contract: a lost detach is reconciled by the
-        // machine's death watch on this front door (machine §2.5).
+        // machine's death watch on this front door (machine §5.1).
         let _ = self
             .machines
             .entity(machine.key())
@@ -134,7 +134,7 @@ impl MachineAuthority for EntityAuthority {
     }
 }
 
-/// The front-door member itself (machine §2.5): an actor whose only job is to
+/// The front-door member itself (machine §5.1): an actor whose only job is to
 /// *exist*, so each attachment names something the machine can death-watch.
 /// The bytes flow through `serve_connection`, never through this mailbox.
 #[derive(Default)]

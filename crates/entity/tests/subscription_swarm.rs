@@ -1,4 +1,4 @@
-//! Record subscriptions under the cluster fault swarm (entity §6.3, §11,
+//! Record subscriptions under the cluster fault swarm (entity §7.3, §10,
 //! invariant **E16**).
 //!
 //! `tests/subscription_faults.rs` scripts the subscription fault cases one at a
@@ -230,7 +230,7 @@ impl ClusterWorkload for SubscriptionSwarm {
             // The sink may legitimately trail the head: it stopped on a deadline
             // while writes were still landing. What it did reconstruct must be an
             // exact prefix: every record it produced is the committed record at
-            // that slot, in order, with no gap or duplicate (§6.3, E16).
+            // that slot, in order, with no gap or duplicate (§7.3, E16).
             assert!(
                 reconstructed.len() <= committed.len(),
                 "the sink reconstructed {} records but only {} ever committed: \

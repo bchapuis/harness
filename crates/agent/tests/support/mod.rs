@@ -1,17 +1,17 @@
-//! Test support for the agent runtime conformance suite (agent spec §10, §9).
+//! Test support for the agent runtime conformance suite (agent spec §12, §1.2).
 //!
 //! The agent runtime adds **two** rows to the table entity already virtualizes
-//! (§2.2): the **scripted model** (a deterministic function of the request) and
+//! (§3.2): the **scripted model** (a deterministic function of the request) and
 //! the **scripted sandbox** (deterministic outcomes per call). The journal is
 //! the entity's, so the agent runtime tests drive the real entity host, gateway,
 //! and rehydration code under the same seed: a simulated agent run takes the
 //! real consensus path, with the agent's loop the only new code on it.
 //!
-//! Plus the continuous A-invariant checkers (§10) and the machine-readable
+//! Plus the continuous A-invariant checkers (§12) and the machine-readable
 //! [`a_catalogue`], guarded by the same drift-test pattern as the core and
 //! entity catalogues. Activation, deactivation, and the single-writer fence are
 //! observed through the **entity's** events (`Activated`/`Deactivated`, entity
-//! §10), not duplicated by the agent runtime.
+//! §11), not duplicated by the agent runtime.
 //!
 //! The faults the suites inject, on top of the core and entity ones:
 //! model latency, `RateLimited`/`Overloaded` bursts, `ContextOverflow`,
@@ -81,10 +81,10 @@ pub fn agent_on(
     Harness::cluster(system, &kinds, model, sandboxes)
 }
 
-/// Read a session's whole journal via `tail` (§8.2), paging from the last
+/// Read a session's whole journal via `tail` (§10.2), paging from the last
 /// `Seq` of each full page (one call is clamped to `TAIL_PAGE`): the journal
 /// is the entity's, so the transcript is read back through the gateway's
-/// journal read (entity §6), not a test-held store.
+/// journal read (entity §7), not a test-held store.
 pub async fn tail_records(session: &agent::SessionRef<SimSystem>) -> Vec<agent::Record> {
     let mut records = Vec::new();
     let mut from = entity::Seq::new(0);
@@ -99,7 +99,7 @@ pub async fn tail_records(session: &agent::SessionRef<SimSystem>) -> Vec<agent::
     }
 }
 
-/// A short label for a record body, for asserting write-ahead order (§3.3).
+/// A short label for a record body, for asserting write-ahead order (§4.3).
 pub fn record_kind(body: &agent::RecordBody) -> &'static str {
     match body {
         agent::RecordBody::SessionCreated { .. } => "created",
@@ -125,7 +125,7 @@ type ScenarioBody =
 type ModelFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn Model> + Send + Sync>;
 type SandboxFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn SandboxProvider> + Send + Sync>;
 
-/// A reusable single-run workload (§9): builds a harness on the simulation's
+/// A reusable single-run workload (§1.2): builds a harness on the simulation's
 /// `LocalSystem` with the given seams, runs `body`, and checks the agent runtime
 /// invariants over the run's event stream. The journal is the entity's; the seams
 /// come from factories so a seam that needs the run's clock (a `SlowModel`) is
@@ -201,12 +201,12 @@ impl actor_simulation::Workload for Scenario {
 }
 
 /// A kind config with an aggressive idle window, so a single test run exercises
-/// idle hibernation and sandbox release (§5.2, A7).
+/// idle hibernation and sandbox release (§7.1, A7).
 pub fn brisk_idle() -> entity::EntityConfig {
     entity::EntityConfig {
         idle_after: Duration::from_secs(1),
         // The agent's workspace facet materializes a real directory per entity
-        // (facets §4.1); a fresh tempdir per kind map keeps parallel tests
+        // (facets §5.1); a fresh tempdir per kind map keeps parallel tests
         // from sharing scratch paths. Kept (not dropped) so it outlives the
         // config; the OS reaps the temp tree.
         data_dir: Some(
@@ -219,13 +219,13 @@ pub fn brisk_idle() -> entity::EntityConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Scripted model (§2.2)
+// Scripted model (§3.2)
 // ---------------------------------------------------------------------------
 
 type ModelScript = Arc<dyn Fn(&ModelRequest) -> Result<ModelResponse, ModelError> + Send + Sync>;
 type SandboxScript = Arc<dyn Fn(&str, &Value) -> Result<Value, ToolError> + Send + Sync>;
 
-/// A deterministic model: a pure function of the request (§9).
+/// A deterministic model: a pure function of the request (§1.2).
 #[derive(Clone)]
 pub struct ScriptedModel {
     script: ModelScript,
@@ -294,7 +294,7 @@ pub fn tool_call(id: &str, name: &str, input: Value) -> ModelResponse {
 }
 
 /// A model that takes a fixed span of logical time per call, for cancel races
-/// (§7.2): the mailbox stays live during the call (§3.2), so a cancel lands at
+/// (§9.2): the mailbox stays live during the call (§4.2), so a cancel lands at
 /// message granularity.
 pub struct SlowModel {
     pub inner: Arc<dyn Model>,
@@ -396,7 +396,7 @@ impl Model for FaultyModel {
 }
 
 // ---------------------------------------------------------------------------
-// Scripted sandbox (§2.2)
+// Scripted sandbox (§3.2)
 // ---------------------------------------------------------------------------
 
 /// Observable provider activity, for A7 assertions.
@@ -451,7 +451,7 @@ impl ScriptedSandboxes {
     }
 
     /// Hold every open in flight for `delay` of virtual time. While an open is
-    /// in flight the activation launches nothing (§2.3), so this is how
+    /// in flight the activation launches nothing (§3.3), so this is how
     /// a test holds a journaled intent without its outcome across a crash.
     pub fn with_open_delay(mut self, clock: SimClock, delay: Duration) -> ScriptedSandboxes {
         self.open_delay = Some((clock, delay));
@@ -530,23 +530,23 @@ impl SandboxProvider for ScriptedSandboxes {
     }
 }
 
-// The continuous A-invariant checkers (§10) are *not* defined here: they are
+// The continuous A-invariant checkers (§12) are *not* defined here: they are
 // claims about the agent runtime's contract rather than scaffolding for one suite, so
 // they live in `agent::testing` behind the `testing` feature, shared by every
 // suite in this crate. Re-exported so call sites keep reading `support::…`.
 pub use agent::testing::agent_invariants;
 
 // ---------------------------------------------------------------------------
-// S4 journal audit (sandbox spec §6)
+// S4 journal audit (sandbox spec §7)
 // ---------------------------------------------------------------------------
 
-/// The S4 journal audit (sandbox spec §6 S4): within one session's journal,
+/// The S4 journal audit (sandbox spec §7 S4): within one session's journal,
 /// every executed tool outcome at a tier other than `Workspace` is preceded by a
 /// `TierAcquired` at that tier with no `WorkspaceReset` in between, and every
 /// acquired or executed tier lies within the kind's cap.
 ///
-/// Synthesized outcomes (an unknown name, malformed arguments, §4.2, or an
-/// orphaned call resolved as `Interrupted` on resume, §4.4) carry no effect and
+/// Synthesized outcomes (an unknown name, malformed arguments, §5.2, or an
+/// orphaned call resolved as `Interrupted` on resume, §5.4) carry no effect and
 /// are exempt.
 pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
     let cap = kind.tier_cap();
@@ -598,10 +598,10 @@ pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
 }
 
 // ---------------------------------------------------------------------------
-// The A catalogue (§10)
+// The A catalogue (§12)
 // ---------------------------------------------------------------------------
 
-/// The agent runtime invariant catalogue (agent spec §10): machine readable
+/// The agent runtime invariant catalogue (agent spec §12): machine readable
 /// alongside the conformance suite, guarded by the drift test in
 /// `conformance_catalogue.rs`. `invariant: n` reads as "An".
 pub fn a_catalogue() -> &'static [CatalogueEntry] {
@@ -611,7 +611,7 @@ pub fn a_catalogue() -> &'static [CatalogueEntry] {
 const A_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
-        spec: "agent §3.1, §5.4",
+        spec: "agent §4.1, §7.3",
         property: "Deterministic fold and resume: state is a pure fold of the journal; a session resumed from any committed prefix behaves identically to one that never stopped, given the same subsequent outcomes",
         verify: &[Verify::SimTest(
             "agent/tests/conformance_resume.rs, agent/tests/agent_swarm.rs",
@@ -619,7 +619,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 2,
-        spec: "agent §3.2, §5.4, §7",
+        spec: "agent §4.2, §7.3, §9",
         property: "Run termination: every RunStarted is followed by exactly one RunEnded; once faults cease and a caller re-contacts the session, no run remains pending past its budget's bound",
         verify: &[
             Verify::Checker("agent-run-discipline"),
@@ -628,7 +628,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 3,
-        spec: "agent §7.1",
+        spec: "agent §9.1",
         property: "Budget bound: no model call after exhaustion; output spend never exceeds the remainder at call time; own spend plus carve-outs never exceeds the budget at every tree level",
         verify: &[
             Verify::Checker("agent-run-discipline"),
@@ -637,7 +637,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 4,
-        spec: "agent §7.2",
+        spec: "agent §9.2",
         property: "Cancellation: after a cancel is journaled, the run and (once faults cease) every descendant run end Cancelled in bounded logical time, issuing no further model calls",
         verify: &[
             Verify::Checker("agent-run-discipline"),
@@ -646,7 +646,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 5,
-        spec: "agent §5.2, §5.4",
+        spec: "agent §7.1, §7.3",
         property: "Single autonomous activation: per-node activations never overlap; a converged healed cluster runs at most one activation per session; an addressed session activates within bounded logical time of contact",
         verify: &[
             Verify::Checker("agent-event-grammar"),
@@ -655,7 +655,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 6,
-        spec: "agent §5.3",
+        spec: "agent §7.2",
         property: "Idempotent submission: a re-submitted TurnId never starts a second run; it returns the recorded outcome or attaches to the live run",
         verify: &[
             Verify::Checker("agent-run-discipline"),
@@ -664,7 +664,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 7,
-        spec: "agent §2.3, §4.4",
+        spec: "agent §3.3, §5.4",
         property: "Effect containment: at most one live sandbox per activation, released on deactivation; sandboxed calls execute in their activation's sandbox; loss surfaces in the journal, never as silent corruption",
         verify: &[
             Verify::Checker("agent-event-grammar"),

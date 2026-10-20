@@ -1,7 +1,7 @@
-//! First-tick classification and policy resolution (workflow spec §4.3).
+//! First-tick classification and policy resolution (workflow spec §5.3).
 //!
 //! An effect's intent is journaled before it launches and its outcome after
-//! (§5). A crash or a migration between the two leaves the effect **orphaned**:
+//! (§6). A crash or a migration between the two leaves the effect **orphaned**:
 //! the journal says it was wanted, and nothing says whether it ran. Hibernation
 //! is not one of the causes: an activation holding a claim vetoes eviction (W7),
 //! so an effect in flight is never hibernated out from under.
@@ -40,9 +40,9 @@ use crate::Pending;
 ///
 /// The engine settles each as `Err(EffectError::Interrupted)` without launching
 /// anything. It does not settle them inline: the first tick cannot commit
-/// (entity journals only through the per-command protocol, entity §5), so each
+/// (entity journals only through the per-command protocol, entity §6), so each
 /// resolution rides the mailbox as a synthesized `Settled` and commits as an
-/// ordinary command (§3.2).
+/// ordinary command (§4.2).
 pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTreeSet<K> {
     desired
         .iter()
@@ -55,14 +55,14 @@ pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTree
 ///
 /// A panic inside the future [`Workflow::perform`](crate::Workflow::perform)
 /// returns is caught at the boundary of the task that runs it and settled as
-/// `Failed` (§4.2), so a consumer bug in one effect cannot take the activation
+/// `Failed` (§5.2), so a consumer bug in one effect cannot take the activation
 /// with it, and, which matters more, cannot leave a claimed key with no outcome,
 /// stranding the engine on a key it will never relaunch and never let rest. The
 /// synchronous call to `perform` runs on the command path before the launch and
 /// is not covered: a panic there is the handler's, like any other.
 ///
 /// `AssertUnwindSafe` is the honest annotation here: the future owns everything
-/// it touches (it is `'static` and holds no borrow of the entity, §2.4), and what
+/// it touches (it is `'static` and holds no borrow of the entity, §3.1), and what
 /// it might leave inconsistent on a panic is discarded with it.
 pub(crate) async fn catch<T, F>(fut: F) -> Result<T, String>
 where

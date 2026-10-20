@@ -10,7 +10,7 @@
 //! - [`exercised`]: coverage accounting for hibernation and process restarts,
 //!   shared by every `*_swarm.rs` with a hibernating variant.
 //! - [`log`]: the appendable `LogEntity` and the reference subscription
-//!   reconciler, shared by `subscription_faults.rs` (scripted §11 cases) and
+//!   reconciler, shared by `subscription_faults.rs` (scripted §10 cases) and
 //!   `subscription_swarm.rs` (the same object under the nemesis).
 //! - [`timer`]: the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and

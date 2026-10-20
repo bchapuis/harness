@@ -1,7 +1,7 @@
 //! Integration: a real two-node cluster talking over the TCP transport on
-//! loopback (spec §2.13). Remote `ask`/`tell` round-trip across the wire, an
+//! loopback (spec cluster §4). Remote `ask`/`tell` round-trip across the wire, an
 //! unreachable peer surfaces as `CallError::Unreachable` rather than hanging,
-//! and a node reaches a peer whose address it learns only by gossip (spec §6.3).
+//! and a node reaches a peer whose address it learns only by gossip (spec cluster §5.3).
 
 mod support;
 
@@ -72,7 +72,7 @@ async fn ask_to_an_unknown_peer_is_unreachable_not_a_hang() {
 
 #[tokio::test]
 async fn a_codec_disagreement_is_rejected_at_the_handshake() {
-    // Two ends that name different codecs must not associate (spec §2.11 #2, §2.14),
+    // Two ends that name different codecs must not associate (spec §3.4 #2, cluster §9.1),
     // even though both happen to encode JSON: the handshake compares codec names
     // before any traffic, so the call fails fast with Unreachable.
     let make = |name: &'static str| {

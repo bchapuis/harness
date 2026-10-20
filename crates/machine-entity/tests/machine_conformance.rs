@@ -1,4 +1,4 @@
-//! The machine's conformance narrative (machine spec §6): one seeded run
+//! The machine's conformance narrative (machine spec §9): one seeded run
 //! driving attach → mid-session crash → partition with a doomed session →
 //! failover → reconnect, asserting M1–M3 and M5 along the way, plus the disk
 //! facet's F2/F4 (rehydration reproduces the last committed capture).
@@ -306,7 +306,7 @@ impl ClusterWorkload for Narrative {
             assert!(reached, "the machine must be reachable after failover");
 
             // Detach so the machine runs its final capture and quiesces (an
-            // attached machine's alarm chains by design, machine §4).
+            // attached machine's alarm chains by design, machine §6).
             // `ask_timeout` re-resolves the leader on `NotLeader`, so one ref
             // suffices; poll Status until no attachment survives, then dwell
             // past the final capture so nothing is in flight at quiescence
@@ -341,7 +341,7 @@ impl ClusterWorkload for Narrative {
 
 #[test]
 fn the_machine_survives_the_attach_crash_partition_failover_reconnect_story() {
-    // machine §6: one seed drives the whole narrative; M1, M3, M5, and E6 hold
+    // machine §9: one seed drives the whole narrative; M1, M3, M5, and E6 hold
     // throughout, and the machine is reachable and provisioned at the end. The
     // swarm runner's nemesis faults the cluster underneath the story's own
     // partition, and its heals (one follows its last round) can clear that

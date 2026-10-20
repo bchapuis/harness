@@ -1,5 +1,5 @@
 //! The `CounterEntity` fixture: an event-sourced counter matching the
-//! linearizability `Counter` model (entity §11).
+//! linearizability `Counter` model (entity §10).
 //!
 //! Shared by `entities.rs` (single-node scenarios) and `entity_swarm.rs` (the
 //! sweeps), so the sweep exercises the *same* entity the scenarios specify.
@@ -81,6 +81,6 @@ impl EntityHandler<ReadCount> for CounterEntity {
         _msg: ReadCount,
         _ctx: &EntityCtx<Self>,
     ) -> (Vec<CounterEvent>, i64) {
-        (vec![], state.value) // read path: no events, commits nothing (§6)
+        (vec![], state.value) // read path: no events, commits nothing (§7)
     }
 }

@@ -1,5 +1,5 @@
-//! The HTTP seam shared by production model adapters (agent spec §2.1,
-//! §2.2): the one socket operation an adapter needs from its host, and the
+//! The HTTP seam shared by production model adapters (agent spec §3.1,
+//! §3.2): the one socket operation an adapter needs from its host, and the
 //! shared adapter shell that drives a protocol through the bounded retry
 //! engine.
 //!
@@ -8,10 +8,10 @@
 //! [`HttpPost`] over its HTTP stack of choice (hyper, reqwest, raw rustls) and
 //! the same value serves every adapter; [`ProtocolModel`] holds the socket, the
 //! key, the seams, and the retry policy for all of them. Backoff and jitter
-//! draw from the injected [`Clock`] and [`Entropy`] (§2.1), never the
+//! draw from the injected [`Clock`] and [`Entropy`] (§3.1), never the
 //! wall clock or an OS RNG, so a simulated run reproduces the schedule. A
 //! completion request is side-effect-free, so these internal retries do not
-//! violate the core no-transparent-retry rule (core spec §1.1, §3.2); a failure
+//! violate the core no-transparent-retry rule (core spec §1.1, §5); a failure
 //! that survives the policy surfaces as [`ModelError`] for the run to end on,
 //! never silently.
 
@@ -45,7 +45,7 @@ pub struct HttpError(pub String);
 /// The one operation an adapter needs from its host: POST `body` to `path`
 /// with `headers`, return the status and body. Implementations supply the
 /// socket and the base URL; the adapter supplies everything else (agent spec
-/// §2.2).
+/// §3.2).
 pub trait HttpPost: Send + Sync + 'static {
     fn post(
         &self,
@@ -56,13 +56,13 @@ pub trait HttpPost: Send + Sync + 'static {
 }
 
 /// Retry tuning: attempts and the backoff curve, timed by the injected
-/// [`Clock`] with jitter from the injected [`Entropy`] (§2.1). The
+/// [`Clock`] with jitter from the injected [`Entropy`] (§3.1). The
 /// shell's judgment, not the caller's: no adapter or deployment tunes it.
 const ATTEMPTS: u32 = 4;
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
-/// Which failures the bounded policy absorbs (§2.1): pressure and transport
+/// Which failures the bounded policy absorbs (§3.1): pressure and transport
 /// blips, never a request the API called malformed.
 fn retryable(error: &ModelError) -> bool {
     matches!(
@@ -82,7 +82,7 @@ fn backoff<E: Entropy + ?Sized>(entropy: &E, attempt: u32) -> Duration {
 
 /// A provider protocol: the wire-specific four an adapter crate owns; the
 /// path, the headers carrying the key, the request JSON, and the `classify`
-/// taxonomy mapping a completed exchange onto [`ModelError`] (§2.1). Which of
+/// taxonomy mapping a completed exchange onto [`ModelError`] (§3.2). Which of
 /// those errors retry is the shared shell's judgment, not the protocol's.
 pub trait Protocol: Send + Sync + 'static {
     /// The API path every completion posts to.
@@ -91,11 +91,11 @@ pub trait Protocol: Send + Sync + 'static {
     fn headers(api_key: &str) -> Vec<(String, String)>;
     /// Encode a [`ModelRequest`] as the protocol's wire JSON.
     fn encode(req: &ModelRequest) -> Value;
-    /// Map a completed HTTP exchange onto the [`ModelError`] taxonomy (§2.1).
+    /// Map a completed HTTP exchange onto the [`ModelError`] taxonomy (§3.1).
     fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError>;
 }
 
-/// The shared adapter shell (§2.1): the socket, the key, the injected seams,
+/// The shared adapter shell (§3.1): the socket, the key, the injected seams,
 /// and the retry policy, held once for every protocol. Each completion
 /// encodes through `P`, then drives the bounded policy: POST, classify,
 /// retry pressure and transport blips with capped exponential backoff. An
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn pressure_is_retried_with_backoff_and_a_hard_error_is_not() {
         // Rate limit, then overload, then success: absorbed by the policy
-        // (agent spec §2.1), each retry after a backoff on the logical clock.
+        // (agent spec §3.1), each retry after a backoff on the logical clock.
         let sim = Simulation::new(7);
         let http = ScriptedHttp::new(vec![429, 503, 200]);
         let started = sim.now();
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(http.calls(), 3);
         assert!(sim.now() > started, "the retries took logical time");
 
-        // A malformed request is the caller's bug: never retried (§2.1).
+        // A malformed request is the caller's bug: never retried (§3.1).
         let sim = Simulation::new(8);
         let http = ScriptedHttp::new(vec![400]);
         let outcome = sim.block_on(model(8, &sim, Arc::clone(&http)).complete(request()));

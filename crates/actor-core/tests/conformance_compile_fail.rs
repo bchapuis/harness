@@ -1,4 +1,4 @@
-//! Conformance invariant #20 (spec §2.2, §10, §2.12.2): an `ask`/`tell` of a
+//! Conformance invariant #20 (spec §3.2, §13, §11): an `ask`/`tell` of a
 //! message an actor has no `Handler` for MUST NOT compile.
 //!
 //! This is the type-safety invariant the simulator cannot check at runtime:

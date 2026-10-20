@@ -1,8 +1,8 @@
-//! The vsock transport (sandbox spec §4, mirrored by the guest agents):
+//! The vsock transport (sandbox spec §5, mirrored by the guest agents):
 //! Firecracker's host-side unix socket, the muxer's `CONNECT <port>\n` →
 //! `OK <port>\n` line handshake, then `u32` little-endian length-prefixed
 //! frames. Every receive is capped **before** it sizes anything: a frame
-//! header's claim never becomes a host allocation (the sandbox §4.2 stance).
+//! header's claim never becomes a host allocation (the sandbox §5.2 stance).
 
 use std::path::Path;
 
@@ -24,7 +24,7 @@ pub async fn connect(uds: &Path, port: u32) -> Result<UnixStream, std::io::Error
 /// The muxer handshake alone, over an already-connected stream: `CONNECT
 /// <port>` out, one `OK <port>` line back. Generic over the stream because the
 /// muxer's grammar is what a guest agent answers, not what carries it: the
-/// docker binding (machine §2.3) reaches the same agent through a relayed pipe
+/// docker binding (machine §3.2) reaches the same agent through a relayed pipe
 /// rather than a vsock socket, and must not fork the handshake to do it.
 pub async fn handshake<S>(stream: &mut S, port: u32) -> Result<(), std::io::Error>
 where

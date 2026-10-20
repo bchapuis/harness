@@ -1,5 +1,5 @@
-//! Per-key backoff (workflow spec §3.4), and the cap that puts a key **at rest**
-//! (§6).
+//! Per-key backoff (workflow spec §4.4), and the cap that puts a key **at rest**
+//! (§7).
 //!
 //! An effect whose settle returns no records, whether its outcome was an `Err` or
 //! an `Ok` the consumer had nothing to journal for, stays in the desired set and
@@ -23,20 +23,20 @@ use std::time::Duration;
 
 use actor_core::Instant;
 
-/// The first delay, doubled per consecutive unproductive settle (spec §3.4).
+/// The first delay, doubled per consecutive unproductive settle (spec §4.4).
 ///
 /// Chosen with [`CAP`] so a transient failure retries promptly and a permanent
-/// one stops holding the activation within one idle window (entity §7 puts
+/// one stops holding the activation within one idle window (entity §8 puts
 /// `idle_after` in minutes): four doublings from 500 ms reach the 8 s cap, at
 /// which point the key is at rest.
 const BASE: Duration = Duration::from_millis(500);
 
-/// The ceiling. A key delayed by the cap is **at rest** (§6): the engine stops
+/// The ceiling. A key delayed by the cap is **at rest** (§7): the engine stops
 /// treating it as work that must keep this activation resident.
 const CAP: Duration = Duration::from_secs(8);
 
 /// The delay after `failures` consecutive unproductive settles, before jitter:
-/// the core's capped exponential schedule (core §2.4), so the engine and the
+/// the core's capped exponential schedule (core §9), so the engine and the
 /// supervisor back off the same way. Saturates at [`CAP`] rather than
 /// overflowing: the engine has no attempt bound, so `failures` is unbounded by
 /// design.
@@ -56,12 +56,12 @@ fn delay(failures: u32) -> Duration {
 struct Entry {
     failures: u32,
     /// When the key may next be launched. Absent means the key is **at rest**
-    /// (§6): its delay reached the cap and no timer was armed.
+    /// (§7): its delay reached the cap and no timer was armed.
     until: Option<Instant>,
 }
 
 /// The per-key backoff table: ephemeral activation state, rebuilt from nothing
-/// on every activation (spec §3.4). The engine's own; a consumer sees nothing
+/// on every activation (spec §4.4). The engine's own; a consumer sees nothing
 /// of it.
 ///
 /// `K` is the consumer's [`Workflow::Key`](crate::Workflow::Key).
@@ -88,10 +88,10 @@ impl<K: Ord> Backoff<K> {
     /// keys spreads rather than resonating.
     ///
     /// **At the cap the engine arms no timer**, and that is the whole of the
-    /// at-rest rule (§6). Arming one anyway would be worse than useless: the
+    /// at-rest rule (§7). Arming one anyway would be worse than useless: the
     /// activation would become quiescent, hibernate, and then be woken by its own
     /// stale timer a moment later, churning instead of resting. Giving up the
-    /// timer is giving up *unattended* progress, which is exactly what §6 trades
+    /// timer is giving up *unattended* progress, which is exactly what §7 trades
     /// away: the debt is a fold, so a caller's next contact
     /// ([`wake`](Backoff::wake)) or the next activation re-derives and re-drives
     /// it.
@@ -135,7 +135,7 @@ impl<K: Ord> Backoff<K> {
     /// and *someone asking*. The agent runtime draws the same line: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session (on this same activation or a later one) re-launches the
-    /// send" (agent §7.2 item 3). A key at rest is waiting for exactly that
+    /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that
     /// message, so the count starts over when it arrives.
     pub fn wake(&mut self) {
         self.entries.retain(|_, e| e.until.is_some());
@@ -147,7 +147,7 @@ impl<K: Ord> Backoff<K> {
         self.entries.remove(key);
     }
 
-    /// Drop every key absent from the desired set: the engine's step 2 (§3.2),
+    /// Drop every key absent from the desired set: the engine's step 2 (§4.2),
     /// which bounds this table by the work outstanding rather than by the work
     /// ever done.
     pub fn retain_keys(&mut self, live: impl Fn(&K) -> bool) {
@@ -166,7 +166,7 @@ impl<K: Ord> Backoff<K> {
         }
     }
 
-    /// Whether `key` is **at rest** (§6): backed off to the cap, so the engine
+    /// Whether `key` is **at rest** (§7): backed off to the cap, so the engine
     /// has stopped arming a timer for it and it no longer holds the activation
     /// resident.
     ///
@@ -206,7 +206,7 @@ mod tests {
     fn a_key_is_not_at_rest_until_its_delay_reaches_the_cap() {
         let mut b: Backoff<u8> = Backoff::default();
         // The first failure waits out a short delay: the activation stays
-        // resident, because the retry is imminent (§6).
+        // resident, because the retry is imminent (§7).
         assert!(
             b.failed(1, t0(), 0).is_some(),
             "an early failure arms a timer"
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn at_the_cap_the_drive_arms_nothing_and_the_key_comes_to_rest() {
-        // The whole of the at-rest rule (§6): at the cap no timer is armed, so
+        // The whole of the at-rest rule (§7): at the cap no timer is armed, so
         // the activation is free to hibernate instead of churning.
         let mut b: Backoff<u8> = Backoff::default();
         let mut armed = 0;

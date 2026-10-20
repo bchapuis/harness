@@ -1,4 +1,4 @@
-//! Shard split under deterministic simulation (spec storage §7, invariant **E15**).
+//! Shard split under deterministic simulation (spec storage §8, invariant **E15**).
 //!
 //! A shard that grows too large or too hot splits: the parent keeps the low
 //! half of its key range in place, a fresh child shard takes the high half on
@@ -199,7 +199,7 @@ impl EntityHandler<ReadCount> for CounterEntity {
     }
 }
 
-/// Stores bulk bytes in its colocated blob area (storage §9): the split must move
+/// Stores bulk bytes in its colocated blob area (storage §10): the split must move
 /// the blob area with the entity.
 #[derive(Default)]
 struct BlobEntity;
@@ -276,7 +276,7 @@ impl EntityHandler<Fetch> for BlobEntity {
 // --- Harness (mirrors tests/clustered_entities.rs, plus a recorder) -------------
 
 /// A 3-node leader network with the recorder attached, so the shard events and
-/// per-commit shard stamps (§10) are observable for the E15 checker.
+/// per-commit shard stamps (§11) are observable for the E15 checker.
 fn recorded_net(sim: &Simulation) -> (SimNetwork, Recorder) {
     let recorder = Recorder::new();
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
@@ -417,7 +417,7 @@ where
 
 #[test]
 fn a_split_moves_entities_to_a_child_and_loses_no_write() {
-    // The storage §7 sequence: commit state across many entities of one shard,
+    // The storage §8 sequence: commit state across many entities of one shard,
     // split it, and prove every committed write survives (including compacted
     // entities whose prefix exists only in their snapshot), and that the same
     // pre-split refs (with their now-stale host caches) keep working against
@@ -644,7 +644,7 @@ fn a_crashed_parent_leader_re_drives_the_split() {
 
 #[test]
 fn the_size_trigger_splits_a_shard_that_grows_past_its_target() {
-    // storage §7 elasticity: with a `shard_target_bytes` the shard leader auto-splits
+    // storage §8 elasticity: with a `shard_target_bytes` the shard leader auto-splits
     // once its durable footprint grows past it, no explicit `split_shard` call.
     // Blob entities give a controllable size: 16 entities × a 512-byte blob ≈ 8 KiB
     // in one shard, past the 5 KiB target, so the trigger fires; each ≈4 KiB
@@ -702,7 +702,7 @@ fn the_size_trigger_splits_a_shard_that_grows_past_its_target() {
 
 #[test]
 fn blobs_move_with_their_entities_across_a_split() {
-    // storage §9 across storage §7: an entity's content-addressed blob area rides the split
+    // storage §10 across storage §8: an entity's content-addressed blob area rides the split
     // with it; after the flip, the owning side serves a verified read of every
     // pre-split blob.
     let sim = Simulation::new(31);
@@ -760,7 +760,7 @@ fn two_shard_config() -> EntityConfig {
 
 #[test]
 fn a_merge_folds_a_shard_into_its_neighbour_and_loses_no_write() {
-    // The storage §7 merge sequence: commit state across two adjacent founding shards,
+    // The storage §8 merge sequence: commit state across two adjacent founding shards,
     // merge shard 0 with its right neighbour (shard 1), and prove every committed
     // write survives under the extended left shard, which keeps serving; the
     // retired shard's group is gone (E7). The map changed exactly once.

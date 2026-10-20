@@ -1,4 +1,4 @@
-//! Invariant #20 (spec §2.2): `tell`-ing a message the actor has no `Handler`
+//! Invariant #20 (spec §3.2): `tell`-ing a message the actor has no `Handler`
 //! for MUST NOT compile. `Greeter` handles `Hello` but not `Goodbye`.
 
 use core::marker::PhantomData;

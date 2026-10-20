@@ -10,7 +10,7 @@ use std::time::Duration;
 /// Seed-controlled transport faults (docs/simulation-testing.md). All zero by default. Per-pair
 /// FIFO is preserved even under latency (#3); loss surfaces as
 /// `Timeout`/`Unreachable`; duplication is tolerated (the framework gives
-/// at-most-once *at the caller*, not exactly-once delivery, §4).
+/// at-most-once *at the caller*, not exactly-once delivery, §8.1).
 #[derive(Clone, Copy)]
 pub struct FaultPolicy {
     /// Probability `drop_num / drop_den` that a frame is lost.
@@ -43,7 +43,7 @@ impl FaultPolicy {
     }
 }
 
-// --- The external registry (spec §6.4.2) --------------------------------------
+// --- The external registry (spec cluster §5.4.2) --------------------------------------
 
 /// Seeded registry faults (docs/simulation-testing.md: a stalled, lagging, or unavailable
 /// registry sync). All draws come from the run's single

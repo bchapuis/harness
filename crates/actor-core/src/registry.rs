@@ -1,4 +1,4 @@
-//! The dispatch registry (spec §2.10).
+//! The dispatch registry (spec §7).
 //!
 //! An actor lists the messages it accepts over the network in
 //! [`Actor::register`]. Each `r.accept::<M>()` captures
@@ -8,9 +8,9 @@
 //! through a [`ReplyHandle`].
 //!
 //! The registry maps `manifest → dispatch entry` and is the **deserialization
-//! allowlist** (spec §2.11, §9): only listed message types are ever built from
+//! allowlist** (spec §3.4, §14): only listed message types are ever built from
 //! network bytes. A purely local actor overrides nothing: its default
-//! registration is empty and its messages flow by value (spec §3.2).
+//! registration is empty and its messages flow by value (spec §5).
 
 use std::collections::BTreeMap;
 
@@ -27,7 +27,7 @@ use crate::reply::ReplyHandle;
 
 /// A monomorphized dispatch entry for one `(actor type, message type)`: decode a
 /// payload and enqueue the handler on `mailbox`, routing the reply through
-/// `reply`. A plain `fn` pointer, no codegen, no captured state (spec §2.10).
+/// `reply`. A plain `fn` pointer, no codegen, no captured state (spec §7).
 pub type DispatchFn<A> = fn(
     codec: &dyn Codec,
     payload: &[u8],
@@ -38,7 +38,7 @@ pub type DispatchFn<A> = fn(
 /// The dispatch entry for `(A, M)`. Decodes `M` from `payload` with `codec`
 /// (rejecting bad input as `CallError::Serialization`), then enqueues it. Every
 /// failure path resolves `reply` before returning, so the caller sees the
-/// rejection as its own error (spec §5) rather than a cancelled channel.
+/// rejection as its own error (spec §8.2) rather than a cancelled channel.
 fn dispatch_entry<A, M>(
     codec: &dyn Codec,
     payload: &[u8],
@@ -60,7 +60,7 @@ where
     mailbox.enqueue_remote::<M>(msg, reply)
 }
 
-/// Maps a manifest to its dispatch entry for one actor type (spec §2.10). The
+/// Maps a manifest to its dispatch entry for one actor type (spec §7). The
 /// typed builder behind [`Actor::register`].
 pub struct HandlerRegistry<A: Actor> {
     entries: BTreeMap<Manifest, DispatchFn<A>>,
@@ -76,14 +76,14 @@ impl<A: Actor> Default for HandlerRegistry<A> {
 
 impl<A: Actor> HandlerRegistry<A> {
     /// Accept message type `M` over the network, capturing its dispatch entry
-    /// for `(A, M)` (spec §2.10).
+    /// for `(A, M)` (spec §7).
     ///
     /// [`Terminated`] is never accepted: a watcher receives it only as the
-    /// value its own node synthesizes from a `Terminated` frame (spec §2.5), so
+    /// value its own node synthesizes from a `Terminated` frame (spec §10), so
     /// listing it here would let any peer inject a termination into the
-    /// watcher from raw bytes (spec §9). The request is ignored rather than
+    /// watcher from raw bytes (spec §14). The request is ignored rather than
     /// refused so a registration derived from every `Handler<M>` impl stays
-    /// valid (spec §2.10).
+    /// valid (spec §7).
     pub fn accept<M>(&mut self)
     where
         A: Handler<M>,
@@ -99,7 +99,7 @@ impl<A: Actor> HandlerRegistry<A> {
     /// is not registered: the receive loop turns `None` into
     /// `CallError::Unhandled`. Takes `&str`, not [`Manifest`]: the claim is
     /// untrusted wire text, and this lookup is where it either matches a
-    /// declared identity or is refused (spec §2.11, §9).
+    /// declared identity or is refused (spec §3.4, §14).
     pub fn dispatch(&self, manifest: &str) -> Option<DispatchFn<A>> {
         self.entries.get(manifest).copied()
     }

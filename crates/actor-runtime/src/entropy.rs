@@ -1,4 +1,4 @@
-//! The production [`Entropy`]: an OS-seeded PRNG (spec §2.12.1).
+//! The production [`Entropy`]: an OS-seeded PRNG (spec §11.1).
 //!
 //! The stream is a [`ChaCha8Rng`] seeded once from the operating system, for
 //! peer selection, SWIM's `k`, and backoff jitter. It is not a CSPRNG interface

@@ -1,4 +1,4 @@
-//! The fixed-seed regression corpus (spec §2.12.2).
+//! The fixed-seed regression corpus (spec §11).
 //!
 //! A swarm sweep is a *sample* of the seed space, so a bug it once found is not
 //! one it keeps finding: widen the base, narrow the width, and the seed that

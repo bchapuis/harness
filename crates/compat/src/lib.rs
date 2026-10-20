@@ -1,4 +1,4 @@
-//! The format-stamp vocabulary (compatibility spec §2.1).
+//! The format-stamp vocabulary (compatibility spec §3).
 //!
 //! Every durable byte sequence in the tree, and every association, is produced by
 //! one build and consumed by another. At each such place one question decides
@@ -64,7 +64,7 @@ impl fmt::Display for Version {
 }
 
 /// One build's policy at one format: its stable dotted name and the single version
-/// this build reads and writes there (compatibility spec §2.1).
+/// this build reads and writes there (compatibility spec §3).
 ///
 /// The name travels in the same value as the version, so no refusal can be raised
 /// without it.
@@ -123,14 +123,17 @@ impl Format {
 }
 
 /// A magic-prefixed version stamp for bytes at rest, and the format that judges it
-/// (compatibility spec §2.1).
+/// (compatibility spec §3).
 ///
 /// The stamp sits **outside** the body's own encoding, because a positional format
 /// such as postcard cannot version itself: it has no field name to make optional
-/// and no discriminant to grow. Reading the version before any decoder runs is what
-/// lets a wrong-format input be refused instead of misparsed (**V2**). The magic
-/// travels with the format in one value, so a writer and a reader cannot disagree
-/// on it.
+/// and no discriminant to grow. So any change to such a body, an enum variant
+/// appended at the end included, is a new version (compatibility spec §3.3):
+/// without one, an older build reads the new body as damage, which a log's
+/// torn-tail rule drops silently, instead of refusing it by name. Reading the
+/// version before any decoder runs is what lets a wrong-format input be refused
+/// instead of misparsed (**V2**). The magic travels with the format in one value,
+/// so a writer and a reader cannot disagree on it.
 #[derive(Clone, Copy, Debug)]
 pub struct Stamp {
     magic: &'static [u8],

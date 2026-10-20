@@ -8,9 +8,10 @@ Six layers, each built only on the ones above it in this table.
 
 | Layer | Component | Crates | Contract |
 |---|---|---|---|
-| Substrate | Actors: messages, addressing, transport, membership, failure detection, consensus, supervision, discovery | `actor-core`, `actor-serialization`, `actor-cluster`, `actor-runtime` | [actor](distributed-actor-spec.md) |
+| Substrate | Actors: messages, references, the actor system, supervision, death watch, discovery, determinism | `actor-core`, `actor-serialization` | [actor](distributed-actor-spec.md) |
+| | The cluster: transport, membership, failure detection, consensus groups, authorization | `actor-cluster`, `actor-runtime` | [cluster](cluster-spec.md) |
 | | Cluster utilities: rendezvous placement, group routers, the cluster singleton | `actor-cluster` | [utilities](cluster-utilities-spec.md) |
-| | Deterministic simulation of every seam above | `actor-simulation` | [actor](distributed-actor-spec.md) §2.12.2 and [simulation-testing](simulation-testing.md) |
+| | Deterministic simulation of every seam above | `actor-simulation` | [actor](distributed-actor-spec.md) §11 and [simulation-testing](simulation-testing.md) |
 | Storage primitives | The framed, checksummed write-ahead log | `wal` | its crate docs |
 | | Format stamps and refusal by name | `compat` | [compatibility](compatibility-spec.md) |
 | Durable objects | Entities: the model, gates, activation, and lifecycle | `entity` | [entity](entity-spec.md) |
@@ -69,38 +70,38 @@ A **plug point** is a trait a deployment or consumer implements or chooses; a **
 
 | Seam | Owner | Implemented by | Used by | Kind | Contract |
 |---|---|---|---|---|---|
-| `Actor`, `Handler` | `actor-core` | every actor | the actor systems | plug point | actor §2.1 |
-| `ActorSystem` | `actor-core` | `LocalSystem`, `ClusterSystem`, the simulator's nodes | every layer above | plug point | actor §2.8 |
-| `Clock`, `Entropy`, `Spawner` | `actor-core` | `actor-runtime` (production), `actor-simulation` (simulation) | every layer above | plug point | actor §2.12 |
-| `Codec` | `actor-serialization` | JSON and postcard codecs | an actor system, chosen per system | plug point | actor §2.11 |
-| `Transport` | `actor-cluster` | TCP (`actor-runtime`), simulated (`actor-simulation`) | `ClusterSystem` | plug point | actor §2.13 |
-| `RegistryClient` | `actor-cluster` | an external registry's client | registry-based membership | plug point | actor §2.17 |
-| `RaftWAL` | `actor-cluster` | in-memory, file-backed (`actor-runtime`) | consensus groups | plug point | actor §2.18 |
-| `RaftConsensus` | `actor-cluster` | `ClusterSystem` | entity storage | boundary | actor §2.19 |
-| `Authorizer` | `actor-cluster` | a deployment's policy | the receive loop | plug point | actor §2.20 |
-| `EventSink` | `actor-core` | recorders, checkers, deployment sinks | every layer's events | plug point | actor §2.7 |
-| `Receptionist` | `actor-core` | each actor system | service discovery, routers | boundary | actor §2.6 |
-| `Router`, `SingletonProxy` | `actor-cluster` | `actor-cluster` | layers needing placement or one instance | boundary | utilities §2.2, §2.3 |
+| `Actor`, `Handler` | `actor-core` | every actor | the actor systems | plug point | actor §3.1 |
+| `ActorSystem` | `actor-core` | `LocalSystem`, `ClusterSystem`, the simulator's nodes | every layer above | plug point | actor §3.3 |
+| `Clock`, `Entropy`, `Spawner` | `actor-core` | `actor-runtime` (production), `actor-simulation` (simulation) | every layer above | plug point | actor §3.5 |
+| `Codec` | `actor-serialization` | JSON and postcard codecs | an actor system, chosen per system | plug point | actor §3.4 |
+| `Transport` | `actor-cluster` | TCP (`actor-runtime`), simulated (`actor-simulation`) | `ClusterSystem` | plug point | cluster §3.1 |
+| `RegistryClient` | `actor-cluster` | an external registry's client | registry-based membership | plug point | cluster §3.3 |
+| `RaftWAL` | `actor-cluster` | in-memory, file-backed (`actor-runtime`) | consensus groups | plug point | cluster §3.4 |
+| `RaftConsensus` | `actor-cluster` | `ClusterSystem` | entity storage | boundary | cluster §3.5 |
+| `Authorizer` | `actor-cluster` | a deployment's policy | the receive loop | plug point | cluster §3.6 |
+| `EventSink` | `actor-core` | recorders, checkers, deployment sinks | every layer's events | plug point | actor §3.6 |
+| `Receptionist` | `actor-core` | each actor system | service discovery, routers | boundary | actor §3.7 |
+| `Router`, `SingletonProxy` | `actor-cluster` | `actor-cluster` | layers needing placement or one instance | boundary | utilities §3.1, §3.2 |
 | `Wal` | `wal` | `wal` | file-backed entity stores and Raft logs | boundary | the `wal` crate |
-| `Format`, `Stamp` | `compat` | every persisted or wire format | each format's reader | convention | compatibility §2.1 |
-| `Entity`, `EntityHandler` | `entity` | agents, machines, workflows, the tenancy directory | the entity runtime | plug point | entity §2.1 |
-| `EntityRef` | `entity` | `entity` | callers of an entity | boundary | entity §2.2 |
-| `EntitySystem` | `entity` | `LocalSystem`, `ClusterSystem` (in `entity`) | the entity runtime | boundary | entity §2.3 |
-| `EntityStore` | `entity` | file-backed and in-memory stores | entity storage, per replica | plug point | storage §2.2 |
-| `BlockingIo` | `entity` | inline, thread pool | store calls | plug point | storage §2.5 |
-| `EntityJournal` | `entity` | the single-node and quorum journals | the entity host | boundary | storage §2.1 |
-| `ReplicaTransport` | `entity` | `entity` | the quorum journal, between a shard leader and its replicas | boundary | storage §2.3 |
-| `Facet` | `entity` | the six facets (sealed) | the entity host | boundary | facets §2.1 |
-| `EntityMetrics` | `entity` | a deployment's metrics sink | the entity runtime | plug point | entity §2.4 |
-| `Workflow` | `workflow` | `Agent` | the workflow engine | plug point | workflow §2.1 |
-| `Model` | `agent` | `ProtocolModel` | the run loop | plug point | agent §2.1 |
-| `Protocol`, `HttpPost` | `agent` | `agent-anthropic`, `agent-openai`; the deployment's HTTPS client | `ProtocolModel` | plug point | agent §2.2 |
-| `SandboxProvider`, `Sandbox` | `agent` | `TieredSandboxes` (`agent-sandbox`) | the run loop | plug point | agent §2.3, sandbox §2.1 |
-| `SessionRef` | `agent` | `agent` | the gateway, parent sessions, tests | boundary | agent §2.5 |
-| `MachineRuntimeProvider` | `machine-entity` | the hosted binding over `machine-host` | the machine entity | plug point | machine §2.2 |
-| `MachineHost`, `MachineGuest` | `machine-host` | microVM and container mechanisms | machines, the agent's sandbox tiers | plug point | machine §2.3 |
-| `MachineAuthority`, `ChannelBackend` | `machine-frontdoor` | `machine-standalone` | the SSH front door | plug point | machine §2.5 |
-| `TokenVerifier` | `agent-gateway` | static and development verifiers | the edge's authentication | plug point | edge §2.2 |
+| `Format`, `Stamp` | `compat` | every persisted or wire format | each format's reader | convention | compatibility §3 |
+| `Entity`, `EntityHandler` | `entity` | agents, machines, workflows, the tenancy directory | the entity runtime | plug point | entity §3.1 |
+| `EntityRef` | `entity` | `entity` | callers of an entity | boundary | entity §3.2 |
+| `EntitySystem` | `entity` | `LocalSystem`, `ClusterSystem` (in `entity`) | the entity runtime | boundary | entity §3.3 |
+| `EntityStore` | `entity` | file-backed and in-memory stores | entity storage, per replica | plug point | storage §3.2 |
+| `BlockingIo` | `entity` | inline, thread pool | store calls | plug point | storage §3.4 |
+| `EntityJournal` | `entity` | the single-node and quorum journals | the entity host | boundary | storage §3.1 |
+| `ReplicaTransport` | `entity` | `entity` | the quorum journal, between a shard leader and its replicas | boundary | storage §3.3 |
+| `Facet` | `entity` | the six facets (sealed) | the entity host | boundary | facets §3.1 |
+| `EntityMetrics` | `entity` | a deployment's metrics sink | the entity runtime | plug point | entity §3.4 |
+| `Workflow` | `workflow` | `Agent` | the workflow engine | plug point | workflow §3.1 |
+| `Model` | `agent` | `ProtocolModel` | the run loop | plug point | agent §3.1 |
+| `Protocol`, `HttpPost` | `agent` | `agent-anthropic`, `agent-openai`; the deployment's HTTPS client | `ProtocolModel` | plug point | agent §3.2 |
+| `SandboxProvider`, `Sandbox` | `agent` | `TieredSandboxes` (`agent-sandbox`) | the run loop | plug point | agent §3.3, sandbox §3.1 |
+| `SessionRef` | `agent` | `agent` | the gateway, parent sessions, tests | boundary | agent §3.4 |
+| `MachineRuntimeProvider` | `machine-entity` | the hosted binding over `machine-host` | the machine entity | plug point | machine §3.1 |
+| `MachineHost`, `MachineGuest` | `machine-host` | microVM and container mechanisms | machines, the agent's sandbox tiers | plug point | machine §3.2 |
+| `MachineAuthority`, `ChannelBackend` | `machine-frontdoor` | `machine-standalone` | the SSH front door | plug point | machine §3.4 |
+| `TokenVerifier` | `agent-gateway` | static and development verifiers | the edge's authentication | plug point | edge §3.2 |
 
 ## 4. Deployments
 
@@ -134,4 +135,4 @@ Operator guides: [standalone-deployment](standalone-deployment.md) for the agent
 
 Each kind of fact has one home. A component's **contract** (what it promises at its seams, whatever the implementation) is its spec. **Mechanism** (how a crate meets that contract: algorithms, tunables, file layouts, the third-party technology it uses) is the crate's rustdoc, including its private modules: build it with `cargo doc --workspace --no-deps --document-private-items`, as CI does. **Verification** (which suites exercise each invariant) is the crate's Rust catalogue beside its tests, held to the spec's invariant table by the `spec` crate. This page holds only what spans components.
 
-Every spec has the same shape: **Scope** (what the component is, what it builds on, what builds on it); **Seams** (one subsection per seam it owns: the two sides, what crosses, and the obligations on each); the **semantics** an independent implementation must reproduce; its **Invariants**; and what it **defers**. The specs cite downward, so they read bottom-up in the order of §1: a seam's subsection is where to start when a change crosses it.
+Every spec has the same skeleton: **Scope** (what the component is, what it builds on, what builds on it, its non-goals, and its conformance classes); **Model** (its terms and abstractions); **Seams** (one subsection per seam it owns: the roles on each side, plug point or boundary, the operations, and the obligations on each); the **semantics** an independent implementation must reproduce; its **Registries** of interop constants, if any; its **Invariants**; and its **Security considerations**. [docs/README](README.md) states the rules that keep implementation detail out. **Status** (what the code does not yet meet) is [status](status.md), which no spec cites. The specs cite downward, so they read bottom-up in the order of §1: a seam's subsection is where to start when a change crosses it.

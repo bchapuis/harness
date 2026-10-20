@@ -1,7 +1,7 @@
-//! The transport trait (spec §2.13).
+//! The transport trait (spec cluster §4).
 //!
 //! A [`Transport`] is the pluggable *mechanism* that carries [`Frame`]s between
-//! nodes (spec §2.13); the default TCP transport and the simulator's in-memory
+//! nodes (spec cluster §4); the default TCP transport and the simulator's in-memory
 //! network are two implementations of the one trait. The frames it carries (the
 //! wire *protocol*) live in [`crate::protocol`], so the carrier stays decoupled
 //! from any subsystem's payload.
@@ -12,7 +12,7 @@ use actor_core::NodeId;
 
 use crate::protocol::Frame;
 
-/// A transport-level failure (spec §2.13, §8). Surfaced to callers as
+/// A transport-level failure (spec cluster §4, actor §8). Surfaced to callers as
 /// `CallError::Unreachable`.
 #[derive(Clone, Debug)]
 pub enum TransportError {
@@ -30,11 +30,11 @@ impl std::fmt::Display for TransportError {
 
 impl std::error::Error for TransportError {}
 
-/// A pluggable transport (spec §2.13). Cloneable so the system can hand copies to
+/// A pluggable transport (spec cluster §3.1; associations, cluster §4). Cloneable so the system can hand copies to
 /// the per-reply forwarding tasks. Inbound frames are delivered out of band into
 /// the system's receive loop (the constructor wires the inbound channel).
 pub trait Transport: Clone + Send + Sync + 'static {
-    /// Send one frame to `peer` over its association. At-most-once (spec §4):
+    /// Send one frame to `peer` over its association. At-most-once (spec §8.1):
     /// the transport never transparently retransmits.
     fn send(
         &self,
@@ -43,7 +43,7 @@ pub trait Transport: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), TransportError>> + Send;
 
     /// Release the transport's resources (background tasks, listeners, and open
-    /// associations) on a graceful node stop (spec §6.3). Closing the inbound
+    /// associations) on a graceful node stop (spec cluster §5.3). Closing the inbound
     /// path also ends the system's receive loop. The default is a no-op, for a
     /// transport that holds nothing to release.
     fn shutdown(&self) {}

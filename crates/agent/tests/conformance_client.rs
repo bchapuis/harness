@@ -1,4 +1,4 @@
-//! Client/delegation plumbing conformance (agent spec §5.3, §6.1): the
+//! Client/delegation plumbing conformance (agent spec §7.2, §8.1): the
 //! ephemeral reply mailbox's lifetime is its caller's wait (no submit path
 //! leaks the actor), and a delegating parent's wait on a slow child scales
 //! with the child's carved budget rather than a flat attempt cap.
@@ -45,7 +45,7 @@ use support::tail_records;
 use support::tool_call;
 
 /// The live actors implied by a stream prefix: every `ActorReady` id without a
-/// matching `ResignId` (core §3.1); the leak observable behind §5.3's mailbox
+/// matching `ResignId` (core §4); the leak observable behind §7.2's mailbox
 /// lifetime.
 fn live_actors(events: &[Event]) -> BTreeSet<ActorId> {
     let mut live = BTreeSet::new();
@@ -125,7 +125,7 @@ impl Model for SlowChildModel {
 #[test]
 fn a_rejected_resubmission_leaks_no_reply_mailbox() {
     // A rejected re-submission spawns a reply mailbox nothing will ever notify;
-    // the caller's own wait ending must stop it (§5.3). Differential: before
+    // the caller's own wait ending must stop it (§7.2). Differential: before
     // the mailbox was tied to the wait, every rejected attempt leaked one
     // actor, and this set comparison caught eight of them.
     let sim = Simulation::new(41);
@@ -161,12 +161,12 @@ fn a_rejected_resubmission_leaks_no_reply_mailbox() {
             let rejected = s.prompt(Turn::new(TurnId::new("t-1"), "changed")).await;
             assert!(
                 rejected.is_err(),
-                "a content conflict is a rejection (§5.3)"
+                "a content conflict is a rejection (§7.2)"
             );
         }
         clock.sleep(Duration::from_secs(10)).await;
         let after = live_actors(&observer.events());
-        assert_eq!(before, after, "rejected attempts leak no actor (§5.3)");
+        assert_eq!(before, after, "rejected attempts leak no actor (§7.2)");
     });
     let violations = check_events(&sink.events());
     assert!(violations.is_empty(), "checkers: {violations:?}");
@@ -175,7 +175,7 @@ fn a_rejected_resubmission_leaks_no_reply_mailbox() {
 /// One delegation to a child whose model stalls far past the wait: the parent
 /// gives up at the configured bound (`cycles` re-attach lapses of the 30s
 /// cadence), its own run completing with the delegation's failure journaled
-/// (§4.2, §6.1). Returns the count of live actors just after the give-up,
+/// (§5.2, §8.1). Returns the count of live actors just after the give-up,
 /// while the child is still mid-call, so a mailbox its lapsed attempts left
 /// subscribed is still visibly alive (the drain would eventually complete the
 /// child and notify even a leaked mailbox, hiding the leak at quiescence).
@@ -228,7 +228,7 @@ fn run_abandoned_child(cycles: u32) -> usize {
             )
             .await
             .expect("call")
-            .expect("the parent's run never fails because a child did (§6.2)");
+            .expect("the parent's run never fails because a child did (§8.2)");
         assert_eq!(outcome.text(), "parent-answer");
         let records = tail_records(&s).await;
         assert!(
@@ -239,7 +239,7 @@ fn run_abandoned_child(cycles: u32) -> usize {
                     ..
                 }
             )),
-            "the give-up is the delegation's journaled tool failure (§4.2)"
+            "the give-up is the delegation's journaled tool failure (§5.2)"
         );
         // Let post-give-up deliveries settle, then count while the child is
         // still mid-call.
@@ -251,7 +251,7 @@ fn run_abandoned_child(cycles: u32) -> usize {
 #[test]
 fn an_abandoned_child_wait_accumulates_no_mailboxes() {
     // The same scenario at 2 vs 8 lapse cycles: the live-actor set at
-    // quiescence must not grow with the number of re-attach attempts (§5.3).
+    // quiescence must not grow with the number of re-attach attempts (§7.2).
     // Differential: before the mailbox guard, every lapsed attempt left its
     // mailbox subscribed forever on the stalled child; six more actors here.
     assert_eq!(run_abandoned_child(2), run_abandoned_child(8));
@@ -262,7 +262,7 @@ fn the_child_wait_scales_with_the_carved_steps() {
     // A child answering after 700s of virtual time, delegated twice: a 3-step
     // carve waits 60 + 3×300 = 960s ≥ 700 and collects the answer; a 1-step
     // carve waits 60 + 300 = 360s < 700 and resolves as the give-up failure.
-    // The wait is a function of the carve (§6.1), not a flat cap: under a flat
+    // The wait is a function of the carve (§8.1), not a flat cap: under a flat
     // 32×30s cap both would have completed identically.
     let sim = Simulation::new(47);
     let sink = CollectingSink::default();
@@ -318,7 +318,7 @@ fn the_child_wait_scales_with_the_carved_steps() {
             )
             .await
             .expect("call")
-            .expect("the parent's run never fails because a child did (§6.2)");
+            .expect("the parent's run never fails because a child did (§8.2)");
         assert_eq!(outcome.text(), "parent-answer");
         let records = tail_records(&s).await;
         let outcomes: BTreeMap<CallId, Result<serde_json::Value, ToolError>> = records
@@ -333,14 +333,14 @@ fn the_child_wait_scales_with_the_carved_steps() {
         assert_eq!(
             outcomes.get(&CallId::new("d1")),
             Some(&Ok(serde_json::Value::String("child-answer".to_string()))),
-            "the 3-step carve's 960s wait outlasts the 700s child (§6.1)"
+            "the 3-step carve's 960s wait outlasts the 700s child (§8.1)"
         );
         assert!(
             matches!(
                 outcomes.get(&CallId::new("d2")),
                 Some(&Err(ToolError::Delegation(_)))
             ),
-            "the 1-step carve's 360s wait lapses first (§6.1): {:?}",
+            "the 1-step carve's 360s wait lapses first (§8.1): {:?}",
             outcomes.get(&CallId::new("d2"))
         );
         clock.sleep(Duration::from_secs(10)).await;

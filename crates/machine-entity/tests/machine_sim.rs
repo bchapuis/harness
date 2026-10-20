@@ -1,9 +1,9 @@
 //! Machine lifecycle under deterministic simulation, `Local` tier (machine
-//! §4, §5): provision from a base image, attach boots the fake VM, the
+//! §6, §7): provision from a base image, attach boots the fake VM, the
 //! checkpoint alarm captures mid-session (M3's cadence), detach schedules the
 //! final capture (M2's graceful boundary), hibernation finds a clean disk, and
 //! reactivation reproduces the image byte-identically. Front-door death folds
-//! `Detached { FrontDoorLost }` (machine §2.5). Crash/partition behavior (M3
+//! `Detached { FrontDoorLost }` (machine §5.1). Crash/partition behavior (M3
 //! rewind, M5 self-fence) is `tests/machine_swarm.rs`'s job.
 
 use std::sync::Arc;
@@ -41,7 +41,7 @@ use serde::Serialize;
 
 type SimMachine = Machine<SimSystem>;
 
-/// A stand-in for the front-door member holding an attachment (machine §2.5):
+/// A stand-in for the front-door member holding an attachment (machine §5.1):
 /// the machine death-watches this actor's id.
 #[derive(Default)]
 struct DoorStub;
@@ -182,7 +182,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
         assert_eq!(status.attachments, vec![(reply.attachment, "alice".into())]);
 
         // Three checkpoint intervals of dirtying guest writes: the alarm
-        // captures mid-session (machine §4, quiescent point 3).
+        // captures mid-session (machine §6, quiescent point 3).
         sys.sleep(Duration::from_millis(350)).await;
         let status = entity.ask(Status).await.expect("status");
         assert!(
@@ -191,7 +191,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
             status.captures
         );
 
-        // Detach: the final capture runs immediately (machine §4, quiescent
+        // Detach: the final capture runs immediately (machine §6, quiescent
         // point 1); guest stopped, image settled, entity clean.
         entity
             .ask(Detach {
@@ -230,7 +230,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
     });
 }
 
-/// The workspace facet's narrative (machine §3, §4): file commands work
+/// The workspace facet's narrative (machine §4, §6): file commands work
 /// without booting the VM, refuse while one is live, the boot pushes the
 /// host-written files into the guest, the capture cadence pulls the guest's
 /// writes back (one atomic batch with the disk manifest), and the whole
@@ -417,11 +417,11 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
     });
 }
 
-/// The host key is born at provisioning (machine §3): each machine draws its
+/// The host key is born at provisioning (machine §4): each machine draws its
 /// own 32-byte ed25519 seed from the system's entropy stream (so no two
 /// machines share an SSH identity), and the seed is folded state, so
 /// rehydration returns the same identity and the client's `known_hosts` pin
-/// survives hibernation (machine §2.5). Read through [`DoorPolicy`], the
+/// survives hibernation (machine §5.1). Read through [`DoorPolicy`], the
 /// command the front door itself presents the key from.
 #[test]
 fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
@@ -454,13 +454,13 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
             assert_eq!(
                 policy.host_key.len(),
                 32,
-                "the host key is a raw 32-byte ed25519 seed (machine §3)"
+                "the host key is a raw 32-byte ed25519 seed (machine §4)"
             );
             keys.push(policy.host_key);
         }
         assert_ne!(
             keys[0], keys[1],
-            "two machines must draw distinct host keys (machine §3)"
+            "two machines must draw distinct host keys (machine §4)"
         );
         keys.swap_remove(0)
     });
@@ -486,7 +486,7 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
             .expect("door policy after rehydration");
         assert_eq!(
             policy.host_key, key_a,
-            "rehydration must reproduce the provisioned host key (machine §3)"
+            "rehydration must reproduce the provisioned host key (machine §4)"
         );
     });
 }
@@ -528,7 +528,7 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
         );
 
         // The front-door member dies without detaching: the death watch folds
-        // `Detached { FrontDoorLost }` (machine §2.5) and the final capture
+        // `Detached { FrontDoorLost }` (machine §5.1) and the final capture
         // releases the pin.
         door.tell(Die).await.expect("die");
         sys.sleep(Duration::from_millis(50)).await;
@@ -551,7 +551,7 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
     );
 }
 
-/// Policy commands before `Provision` are refused (machine §3): the
+/// Policy commands before `Provision` are refused (machine §4): the
 /// `Provisioned` fold sets the key set whole, so a `KeyAdded` journaled
 /// earlier would be silently discarded, and an `EgressChanged` would outlive
 /// a typo in the machine's name.

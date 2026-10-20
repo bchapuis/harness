@@ -1,4 +1,4 @@
-//! Catalogue drift test (machine spec §6): the machine-readable M1–M6 table stays
+//! Catalogue drift test (machine spec §9): the machine-readable M1–M6 table stays
 //! complete, and every file it points at still exists.
 //!
 //! The machine's spec↔code drift gate, the same pattern guarding the core,
@@ -50,7 +50,7 @@ fn every_entry_has_spec_property_and_a_verification_method() {
 }
 
 /// Every test the catalogue names is still defined, somewhere across the three
-/// crates the machine's verification spans (§6). A rename that misses this table
+/// crates the machine's verification spans (§9). A rename that misses this table
 /// fails here rather than drifting out from under it unnoticed.
 #[test]
 fn every_named_test_exists() {
@@ -116,7 +116,7 @@ fn defined_in(name: &str) -> Option<String> {
 
 #[test]
 fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
-    // M4 and M6 are the machine's two seam invariants (§2), and neither is provable
+    // M4 and M6 are the machine's two seam invariants (§5), and neither is provable
     // from the entity's own simulation: the front door terminates SSH in another
     // crate, and the egress rules are a pure generator with no entity in the loop.
     // Pinning that here keeps a future edit from "simplifying" them into an
@@ -140,7 +140,7 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
     }
 }
 
-/// The table above and the machine spec's §6 copy of it are the same table.
+/// The table above and the machine spec's §9 copy of it are the same table.
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds
 /// it equal to the prose one, which is the copy a reader trusts: an invariant
@@ -149,7 +149,7 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("machine");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("machine spec §6 parses");
+    let documented = catalogue::documented(&root, site).expect("machine spec §9 parses");
     let implemented: Vec<catalogue::Row> = m_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -158,7 +158,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "machine spec §6 and m_catalogue() disagree:\n  {}\n",
+        "machine spec §9 and m_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

@@ -23,7 +23,7 @@
 //! given `&dyn Codec`, and the codec type never appears in `ActorRef`, `Ctx`,
 //! or the registry's type. That registry, not this crate, is the
 //! deserialization allowlist: it decides which types are built from network
-//! bytes (spec §2.10, §9).
+//! bytes (spec §7, §14).
 //!
 //! Specified by `docs/distributed-actor-spec.md`.
 
@@ -40,7 +40,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// The bound every message and reply type must satisfy to cross the wire
-/// (spec §2.11).
+/// (spec §3.4).
 ///
 /// It is a parameter of the system, enforced at compile time by the
 /// [`Message`](../actor_core/trait.Message.html) and `Handler` bounds. The

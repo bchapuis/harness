@@ -1,13 +1,13 @@
-//! Deterministic placement by rendezvous hashing (utilities spec §2.1).
+//! Deterministic placement by rendezvous hashing (utilities spec §4.1).
 //!
 //! Answers one question identically on every node: *given a key, which member
 //! owns it?* Each candidate is scored independently; `weight(tag, key)`, and
 //! the highest weight wins, so removing a member reassigns only the keys it
-//! owned and adding one moves only the keys it now owns (utilities spec §2.1
+//! owned and adding one moves only the keys it now owns (utilities spec §4.1
 //! item 5, invariant U1). Everything here is a pure function of its arguments:
-//! no state, no clock, no entropy (core spec §2.12.2).
+//! no state, no clock, no entropy (core spec §11).
 //!
-//! The hash is normative and version-stable (utilities spec §2.1 item 3):
+//! The hash is normative and version-stable (utilities spec §4.1 item 3):
 //! FNV-1a 64 over `tag ‖ key`, finished with the splitmix64 mixer, which
 //! compensates for FNV-1a's weak avalanche on short inputs. Two framework
 //! versions and platforms must agree on every owner, so `std::hash` and other
@@ -15,9 +15,9 @@
 //! tests below so an accidental change fails the build.
 //!
 //! Candidates come from [`Membership::serving_members`](crate::Membership::serving_members)
-//! (utilities spec §2.1). Callers with divergent views may disagree on an owner
+//! (utilities spec §4.1). Callers with divergent views may disagree on an owner
 //! until those views converge: placement is a routing function, not a lease
-//! (utilities spec §2.1).
+//! (utilities spec §4.1).
 
 use actor_core::ActorId;
 use actor_core::NodeId;
@@ -51,19 +51,19 @@ pub(crate) fn mix64(mut x: u64) -> u64 {
 }
 
 /// The rendezvous weight of one candidate (by its `tag`) for `key` (utilities
-/// spec §2.1): `mix64(fnv1a64(tag ‖ key))`. Pure and version-stable.
+/// spec §4.1): `mix64(fnv1a64(tag ‖ key))`. Pure and version-stable.
 pub fn weight(tag: &[u8], key: &[u8]) -> u64 {
     mix64(fnv1a64(&[tag, key]))
 }
 
-/// The normative placement tag of a node (utilities spec §2.1): its uid as 8
+/// The normative placement tag of a node (utilities spec §4.1): its uid as 8
 /// little-endian bytes.
 pub fn node_tag(node: NodeId) -> [u8; 8] {
     node.uid().to_le_bytes()
 }
 
 /// The placement tag of an actor: owner-node tag ‖ path bytes ‖ incarnation
-/// (little-endian). Used by routers to rank routees for a key (utilities spec §2.2).
+/// (little-endian). Used by routers to rank routees for a key (utilities spec §3.1).
 pub fn actor_tag(id: &ActorId) -> Vec<u8> {
     let path = id.path().as_str().as_bytes();
     let mut tag = Vec::with_capacity(8 + path.len() + 8);
@@ -73,7 +73,7 @@ pub fn actor_tag(id: &ActorId) -> Vec<u8> {
     tag
 }
 
-/// The owner of `key` among `nodes` (utilities spec §2.1): the highest
+/// The owner of `key` among `nodes` (utilities spec §4.1): the highest
 /// rendezvous weight, ties to the lower [`NodeId`]. `None` when `nodes` is
 /// empty. Equal inputs yield equal owners on every node (invariant U1).
 pub fn owner(nodes: &[NodeId], key: &[u8]) -> Option<NodeId> {
@@ -85,7 +85,7 @@ pub fn owner(nodes: &[NodeId], key: &[u8]) -> Option<NodeId> {
 
 /// The `n` highest-weight nodes for `key`, in descending weight order with the
 /// same tie rule as [`owner`]: `top(nodes, key, 1)` equals `owner(nodes, key)`.
-/// Provided for replica/shard placement (storage §6); returns fewer than
+/// Provided for replica/shard placement (storage §7); returns fewer than
 /// `n` entries when the candidate set is smaller.
 pub fn top(nodes: &[NodeId], key: &[u8], n: usize) -> Vec<NodeId> {
     let mut ranked: Vec<(u64, NodeId)> = nodes
@@ -102,7 +102,7 @@ mod tests {
 
     /// The published FNV-1a 64 test vectors pin the constants: a change to the
     /// offset basis or prime is a wire-visible placement change (utilities spec
-    /// §2.1 item 3) and must fail loudly.
+    /// §4.1 item 3) and must fail loudly.
     #[test]
     fn fnv1a64_known_answers() {
         assert_eq!(fnv1a64(&[b""]), 0xcbf2_9ce4_8422_2325);

@@ -1,7 +1,7 @@
-//! The `ActorSystem` contract and the single-node `LocalSystem` (spec §2.8).
+//! The `ActorSystem` contract and the single-node `LocalSystem` (spec §3.3).
 //!
 //! [`ActorSystem`] is the runtime an actor runs on. Beyond spawning and local
-//! resolution it carries the **transport boundary** (spec §2.8): locality
+//! resolution it carries the **transport boundary** (spec §3.3): locality
 //! classification, the system codec, and the byte-level `remote_ask`/
 //! `remote_tell` the typed [`ActorRef`] layer encodes onto. [`LocalSystem`] is
 //! the single-node implementation: its remote methods are unreachable because
@@ -37,10 +37,10 @@ use crate::runtime::Entropy;
 use crate::runtime::Instant;
 use crate::runtime::Spawner;
 
-/// The runtime an actor runs on (spec §2.8). A cloneable handle: cloning shares
+/// The runtime an actor runs on (spec §3.3). A cloneable handle: cloning shares
 /// the same underlying system.
 ///
-/// One trait with two faces (spec §2.8). A layer above calls the consumer face:
+/// One trait with two faces (spec §3.3). A layer above calls the consumer face:
 /// `spawn`/`spawn_with`/`resolve`, `node`, `receptionist`, `clock`/`now`/`sleep`,
 /// `launch`, `emit`, and `next_random`, taking its identity, time, randomness,
 /// scheduling, and observability from the system so one seed reproduces it under
@@ -50,9 +50,9 @@ use crate::runtime::Spawner;
 /// provided methods define the first face in terms of the second.
 pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// Spawn an actor from `factory`, parented to `parent` (`None` for a root):
-    /// the one spawn seam an implementation supplies (spec §2.8, §3.1). The
+    /// the one spawn seam an implementation supplies (spec §3.3, §4). The
     /// factory yields the initial instance and any restart re-creations, and
-    /// `None` once exhausted (spec §2.4). Callers use the four provided forms
+    /// `None` once exhausted (spec §9). Callers use the four provided forms
     /// ([`spawn`], [`spawn_with`], [`Ctx::spawn`], [`Ctx::spawn_with`]), which
     /// are defined in terms of this.
     ///
@@ -66,16 +66,16 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
         parent: Option<ActorId>,
     ) -> ActorRef<A>;
 
-    /// Spawn a root actor and return a handle to it (spec §2.8, §3.1). The
+    /// Spawn a root actor and return a handle to it (spec §3.3, §4). The
     /// actor is value-spawned: it cannot be re-created, so a `Restart`
-    /// directive degrades to `Stop` (spec §2.4); use
+    /// directive degrades to `Stop` (spec §9); use
     /// [`spawn_with`](ActorSystem::spawn_with) for a restartable actor.
     fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
         self.spawn_factory(once(actor), None)
     }
 
     /// Spawn a root actor from a `factory` so a `Restart` directive can
-    /// re-create it (spec §2.4), unlike the value-based
+    /// re-create it (spec §9), unlike the value-based
     /// [`spawn`](ActorSystem::spawn).
     fn spawn_with<A, F>(&self, factory: F) -> ActorRef<A>
     where
@@ -86,21 +86,21 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     }
 
     /// Resolve `id` to its local mailbox if a live local actor of type `A` owns
-    /// it (spec §3.2). `None` for a remote or resigned id; performs no network
+    /// it (spec §5). `None` for a remote or resigned id; performs no network
     /// round-trip and never blocks.
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>>;
 
-    /// Build a typed handle to `id` on this system (spec §3.2). The handle works
+    /// Build a typed handle to `id` on this system (spec §5). The handle works
     /// whether the target is local or remote; locality is decided on each send.
     fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A> {
         ActorRef::from_parts(id, self.clone())
     }
 
-    /// Classify `id` as owned by this node, from the id alone (spec §3.2).
+    /// Classify `id` as owned by this node, from the id alone (spec §5).
     fn is_local(&self, id: &ActorId) -> bool;
 
     /// Whether `node` is in rotation for service discovery: the receptionist
-    /// listing filter (spec §6.4, §2.6 requirement 4). The default is `true` (a
+    /// listing filter (spec cluster §5.4, actor §3.7 requirement 4). The default is `true` (a
     /// system without membership treats every node as available); a clustered
     /// system returns `false` for a node an operator has drained for maintenance,
     /// or one that is down. It gates which actors a receptionist
@@ -112,12 +112,12 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
         true
     }
 
-    /// The system codec, fixed per system (spec §2.11). The `ActorRef` layer uses
+    /// The system codec, fixed per system (spec §3.4). The `ActorRef` layer uses
     /// it to (de)serialize messages and replies that cross the wire.
     fn codec(&self) -> Arc<dyn Codec>;
 
     /// Send an already-encoded request to a remote actor and await its encoded
-    /// reply (spec §2.8, transport boundary). The typed caller,
+    /// reply (spec §3.3, transport boundary). The typed caller,
     /// [`ActorRef::ask`], brackets the call with [`Event::AskIssued`] and
     /// [`Event::AskOutcome`], so an implementation emits neither.
     fn remote_ask(
@@ -128,7 +128,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
         within: Duration,
     ) -> impl Future<Output = Result<Vec<u8>, CallError>> + Send;
 
-    /// Send an already-encoded one-way message to a remote actor (spec §2.8).
+    /// Send an already-encoded one-way message to a remote actor (spec §3.3).
     fn remote_tell(
         &self,
         recipient: &ActorId,
@@ -137,23 +137,23 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), CallError>> + Send;
 
     /// Register `watcher`'s death watch of `target`, delivering via `deliver`
-    /// (spec §2.5). An already-terminated target is reported immediately
+    /// (spec §10). An already-terminated target is reported immediately
     /// (invariant #12).
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery);
 
-    /// Cancel `watcher`'s death watch of `target` (spec §2.5).
+    /// Cancel `watcher`'s death watch of `target` (spec §10).
     fn unwatch(&self, target: &ActorId, watcher: &ActorId);
 
     /// This node's identity.
     fn node(&self) -> NodeId;
 
-    /// A draw from the system's seeded [`Entropy`] (§2.12.1), the
+    /// A draw from the system's seeded [`Entropy`] (§11.1), the
     /// single source of randomness in the run: it never reaches for a host RNG, so
     /// a simulated run stays reproducible. Used for supervision backoff jitter
-    /// (§2.4) and by actors needing deterministic randomness.
+    /// (§9) and by actors needing deterministic randomness.
     fn next_random(&self) -> u64;
 
-    /// The system's [`Clock`] (§2.12.1): the single source of time. Layered
+    /// The system's [`Clock`] (§11.1): the single source of time. Layered
     /// runtimes read and schedule time through this (never a host clock), so
     /// one seed reproduces their timing under simulation.
     type Clock: Clock;
@@ -175,13 +175,13 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
         Box::pin(async move { clock.sleep(dur).await })
     }
 
-    /// Launch a detached background task on the system's executor (§2.12.1): the
+    /// Launch a detached background task on the system's executor (§11.1): the
     /// same [`Spawner`] that runs the mailboxes, so layered
     /// runtimes' loops are scheduled (and, under simulation, interleaved
     /// deterministically) like everything else.
     fn launch(&self, task: BoxFuture<'static, ()>);
 
-    /// Emit onto the observability stream (spec §2.7). Layered runtimes
+    /// Emit onto the observability stream (spec §3.6). Layered runtimes
     /// extending the [`Event`] enum through [`Event::App`] emit into the same
     /// ordered stream the checkers and the reproducibility recorder read.
     fn emit(&self, event: Event);
@@ -189,11 +189,11 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// The shared receptionist registry backing [`receptionist`](Self::receptionist).
     fn receptionist_state(&self) -> Arc<ReceptionistState>;
 
-    /// Replicate a registration to the rest of the cluster (spec §2.6). The
+    /// Replicate a registration to the rest of the cluster (spec §3.7). The
     /// default does nothing: a single-node system has no peers.
     fn replicate_registration(&self, _key: &str, _origin: NodeId, _id: ActorId) {}
 
-    /// The receptionist for service discovery (spec §2.6).
+    /// The receptionist for service discovery (spec §3.7).
     fn receptionist(&self) -> Receptionist<Self>
     where
         Self: Sized,
@@ -212,7 +212,7 @@ struct Inner<C, E, S> {
     events: Arc<dyn EventSink>,
 }
 
-/// A single-node actor system (spec §2.8). Generic over the runtime seam so the
+/// A single-node actor system (spec §3.3). Generic over the runtime seam so the
 /// same code runs in production and under deterministic simulation.
 pub struct LocalSystem<C, E, S> {
     inner: Arc<Inner<C, E, S>>,
@@ -258,20 +258,20 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystemBuilder<C, E, S> {
         self
     }
 
-    /// Set the bounded mailbox capacity for every actor (spec §3.3).
+    /// Set the bounded mailbox capacity for every actor (spec §6).
     pub fn mailbox_capacity(mut self, capacity: usize) -> Self {
         assert!(capacity > 0, "mailbox capacity must be positive");
         self.mailbox_capacity = capacity;
         self
     }
 
-    /// Set the wire codec (spec §2.11).
+    /// Set the wire codec (spec §3.4).
     pub fn codec(mut self, codec: Arc<dyn Codec>) -> Self {
         self.codec = codec;
         self
     }
 
-    /// Route observability events to `events` (spec §2.7).
+    /// Route observability events to `events` (spec §3.6).
     pub fn events(mut self, events: Arc<dyn EventSink>) -> Self {
         self.events = events;
         self

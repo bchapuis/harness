@@ -1,4 +1,4 @@
-//! Actor and node identity (spec §2.2).
+//! Actor and node identity (spec §3.2).
 //!
 //! An [`ActorId`] is the cluster-unique, serializable name the system assigns:
 //! `{ node, path, incarnation }`.
@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// A cluster node identity (spec §2.2): a bare uid. It carries no network
+/// A cluster node identity (spec §3.2): a bare uid. It carries no network
 /// endpoint: the transport's address book maps a node to where it is reached,
 /// so the same id routes over TCP in production and over the in-memory network
 /// under simulation.
@@ -31,7 +31,7 @@ impl std::fmt::Display for NodeId {
     }
 }
 
-/// A hierarchical actor name, e.g. `/user/greeter` (spec §2.2).
+/// A hierarchical actor name, e.g. `/user/greeter` (spec §3.2).
 ///
 /// The string is refcounted because [`ActorId`] is cloned several times per message
 /// (once to resolve the target's mailbox, then once per event the send emits) and the
@@ -108,11 +108,11 @@ impl std::fmt::Display for Path {
     }
 }
 
-/// A cluster-unique actor identity (spec §2.2).
+/// A cluster-unique actor identity (spec §3.2).
 ///
 /// Two actors are equal iff their `ActorId`s are equal; `Hash`/`Eq` on an
 /// `ActorRef` derive from this. The `node` makes locality classifiable without
-/// contacting another node (spec §3.2); the `path` comes from a counter the
+/// contacting another node (spec §5); the `path` comes from a counter the
 /// host never reuses, so a fresh actor never collides with a resigned one; the
 /// `incarnation` is the owning **process** incarnation, so an id issued before a
 /// process restart never resolves against the actor that now holds the same
@@ -134,17 +134,17 @@ impl ActorId {
         }
     }
 
-    /// The node that owns this actor: the locality key (spec §2.2, §3.2).
+    /// The node that owns this actor: the locality key (spec §3.2, §5).
     pub fn node(&self) -> NodeId {
         self.node
     }
 
-    /// This actor's hierarchical path, e.g. `/user/greeter` (spec §2.2).
+    /// This actor's hierarchical path, e.g. `/user/greeter` (spec §3.2).
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// The incarnation (spec §2.2).
+    /// The incarnation (spec §3.2).
     pub fn incarnation(&self) -> u64 {
         self.incarnation
     }

@@ -64,13 +64,13 @@ pub const FANOUT_TYPE: &str = "test.Fanout";
 pub enum Outcome {
     /// Answer after `delay` of virtual time.
     Answer { delay: Duration },
-    /// Fail after `delay`, with an error the consumer folds as a value (§4.2).
+    /// Fail after `delay`, with an error the consumer folds as a value (§5.2).
     Fail { delay: Duration },
     /// Never return: the effect is in flight forever, which is how a suite holds
     /// a claim open across a hibernation attempt or a step-down.
     Hang,
     /// Panic inside `perform`, which the workflow catches at the task boundary and
-    /// settles as `Failed` (§4.2).
+    /// settles as `Failed` (§5.2).
     Panic,
 }
 
@@ -140,19 +140,19 @@ impl Script {
 }
 
 /// A handle to the script, cloned into `perform`'s `'static` future the way a
-/// consumer clones its real seams out of `&self` (§2.4).
+/// consumer clones its real seams out of `&self` (§3.1).
 pub type Seam = Arc<Mutex<Script>>;
 
 fn lock(seam: &Seam) -> std::sync::MutexGuard<'_, Script> {
     seam.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// --- The entity: ordinary entity. Records, a fold, handlers (entity §3.1, §3.2).
+// --- The entity: ordinary entity. Records, a fold, handlers (entity §4.1, §4.2).
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
-    /// The recovery policy this task's effect declares (§4.3). Journaled with
+    /// The recovery policy this task's effect declares (§5.3). Journaled with
     /// the task, because `pending` must re-derive it identically on every
     /// activation and it is part of what the consumer decided.
     pub on_orphan: OnOrphan,
@@ -170,8 +170,8 @@ pub struct FanoutState {
     pub done: BTreeMap<TaskId, Answer>,
     pub finished: bool,
     /// Keys whose settle the consumer deliberately journals nothing for, so the
-    /// suites can exercise the record-less settle path (§4.1) and the backoff
-    /// entry point it depends on (§3.2 item 3).
+    /// suites can exercise the record-less settle path (§5.1) and the backoff
+    /// entry point it depends on (§4.2 item 3).
     pub silent: BTreeSet<TaskId>,
 }
 
@@ -188,7 +188,7 @@ pub enum FanoutRecord {
     Finished,
     /// Retire a task without answering it: the record that takes a key *out* of
     /// the desired set with its effect still in flight, which is how the suites
-    /// produce a straggler (§4.4).
+    /// produce a straggler (§5.4).
     Retracted {
         task: TaskId,
     },
@@ -239,7 +239,7 @@ impl<S: EntitySystem> Entity for Fanout<S> {
     }
 
     fn register(r: &mut EntityRegistry<Self>) {
-        // The network allowlist (entity §4.5). The workflow's `Tick` and
+        // The network allowlist (entity §5.5). The workflow's `Tick` and
         // `Settled` are local self-tells and are deliberately absent: nothing
         // outside the entity injects an effect outcome.
         r.accept::<Request>();
@@ -249,13 +249,13 @@ impl<S: EntitySystem> Entity for Fanout<S> {
 
     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
         // Forget every claim and count, arm the first tick, and tick so a
-        // resumed entity with work outstanding drives it without a caller (§4.3).
+        // resumed entity with work outstanding drives it without a caller (§5.3).
         self.engine.on_activate(ctx);
         Ok(())
     }
 
     fn can_hibernate(&self, _state: &FanoutState) -> bool {
-        // Derived, not hand-written (§6). A consumer with work that no effect
+        // Derived, not hand-written (§7). A consumer with work that no effect
         // represents would conjoin its own clause here; this one has none.
         self.engine.quiescent()
     }
@@ -269,7 +269,7 @@ impl<S: EntitySystem> Workflow for Fanout<S> {
     type Effect = Task;
     type Outcome = Answer;
 
-    /// Pure (§3.1). Every task requested and not yet answered, at once the
+    /// Pure (§4.1). Every task requested and not yet answered, at once the
     /// dispatch list, the recovery set after a crash, and the straggler filter.
     fn pending(&self, state: &FanoutState) -> Vec<Pending<TaskId, Task>> {
         state
@@ -284,7 +284,7 @@ impl<S: EntitySystem> Workflow for Fanout<S> {
             .collect()
     }
 
-    /// The only I/O (§2.4). Off the command path, holding nothing: the seam is
+    /// The only I/O (§3.1). Off the command path, holding nothing: the seam is
     /// cloned out of `&self` before the future is returned, which is why the
     /// future is `'static`.
     fn perform(
@@ -319,7 +319,7 @@ impl<S: EntitySystem> Workflow for Fanout<S> {
         }
     }
 
-    /// A pure decision (§4.1), like any handler: records out, no I/O, no
+    /// A pure decision (§5.1), like any handler: records out, no I/O, no
     /// mutation.
     async fn settle(
         &self,
@@ -329,13 +329,13 @@ impl<S: EntitySystem> Workflow for Fanout<S> {
         _ctx: &EntityCtx<Self>,
     ) -> Vec<FanoutRecord> {
         if state.silent.contains(key) {
-            // "This outcome changed nothing" (§4.1): no record, so nothing
+            // "This outcome changed nothing" (§5.1): no record, so nothing
             // commits and only the backoff timer brings the next tick.
             return Vec::new();
         }
         let answer = match outcome {
             Ok(a) => a,
-            // A failure is a value (§4.2), not a fault.
+            // A failure is a value (§5.2), not a fault.
             Err(e) => Answer::Failed(e.to_string()),
         };
         let mut out = vec![FanoutRecord::Answered { task: *key, answer }];
@@ -368,7 +368,7 @@ impl<S: EntitySystem> EntityHandler<Settled<Fanout<S>>> for Fanout<S> {
         ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
         // The workflow re-enters the cycle itself after a committed settle, or arms
-        // the backoff timer after one that committed nothing (§3.2 items 1, 3).
+        // the backoff timer after one that committed nothing (§4.2 items 1, 3).
         (self.engine.settled(self, state, msg, ctx).await, ())
     }
 }
@@ -376,12 +376,12 @@ impl<S: EntitySystem> EntityHandler<Settled<Fanout<S>>> for Fanout<S> {
 // --- The consumer's own commands.
 
 /// Request `tasks`, journaling the intent. The effects launch from the workflow
-/// that follows the commit, never from this handler: intent before effect (§5)
+/// that follows the commit, never from this handler: intent before effect (§6)
 /// is the cycle's shape, not a check.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
     pub tasks: Vec<Task>,
-    /// Keys whose settle will journal nothing (§4.1).
+    /// Keys whose settle will journal nothing (§5.1).
     pub silent: Vec<TaskId>,
 }
 
@@ -409,7 +409,7 @@ impl<S: EntitySystem> EntityHandler<Request> for Fanout<S> {
 }
 
 /// Retract a task: it leaves the desired set with its effect possibly still in
-/// flight, so its outcome becomes a straggler (§4.4).
+/// flight, so its outcome becomes a straggler (§5.4).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Retract(pub TaskId);
 
@@ -430,7 +430,7 @@ impl<S: EntitySystem> EntityHandler<Retract> for Fanout<S> {
     }
 }
 
-/// A read: no records, commits nothing (entity §6).
+/// A read: no records, commits nothing (entity §7).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Status;
 
@@ -565,7 +565,7 @@ pub fn launched_on(events: &[Event], node: NodeId) -> Vec<String> {
     })
 }
 
-/// Every orphaned key `node`'s activation resolved `Interrupted` (§4.3).
+/// Every orphaned key `node`'s activation resolved `Interrupted` (§5.3).
 pub fn interrupted_on(events: &[Event], node: NodeId) -> Vec<String> {
     keys(events, |e| match e {
         WorkflowEvent::Interrupted { key, node: n, .. } if *n == node => Some(key),
@@ -573,7 +573,7 @@ pub fn interrupted_on(events: &[Event], node: NodeId) -> Vec<String> {
     })
 }
 
-/// Every key whose outcome was discarded as a straggler (§4.4).
+/// Every key whose outcome was discarded as a straggler (§5.4).
 pub fn discarded(events: &[Event]) -> Vec<String> {
     keys(events, |e| match e {
         WorkflowEvent::Discarded { key, .. } => Some(key),
@@ -592,7 +592,7 @@ pub fn settled(events: &[Event]) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// Whether any activation announced quiescence (§6).
+/// Whether any activation announced quiescence (§7).
 pub fn announced_quiescence(events: &[Event]) -> bool {
     events
         .iter()
@@ -600,7 +600,7 @@ pub fn announced_quiescence(events: &[Event]) -> bool {
         .any(|e| matches!(e, WorkflowEvent::Quiescent { .. }))
 }
 
-/// Whether any entity hibernated (entity §10).
+/// Whether any entity hibernated (entity §11).
 pub fn hibernated(events: &[Event]) -> bool {
     events.iter().any(|e| {
         matches!(
@@ -613,7 +613,7 @@ pub fn hibernated(events: &[Event]) -> bool {
 /// Hold the workflow's grammar over a recorded stream at the end of a clustered
 /// scenario, through the same `Checker` the swarm runner uses: the failover
 /// checker, because every such scenario deposes a leader with claims open, which
-/// is legal (§6).
+/// is legal (§7).
 pub fn assert_grammar(events: Vec<Event>) {
     let checker = Checker::new(vec![Box::new(WorkflowCycle::under_failover())]);
     for event in events {

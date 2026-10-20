@@ -283,7 +283,7 @@ pub fn local(seed: u64) -> (Simulation, SimSystem) {
     (sim, system)
 }
 
-/// A single-node system whose event stream is recorded (spec §2.7).
+/// A single-node system whose event stream is recorded (spec §3.6).
 pub fn local_recorded(seed: u64) -> (Simulation, SimSystem, Recorder) {
     let sim = Simulation::new(seed);
     let recorder = Recorder::new();
@@ -294,7 +294,7 @@ pub fn local_recorded(seed: u64) -> (Simulation, SimSystem, Recorder) {
 }
 
 /// A network for a multi-node cluster; call `.join(node)` to bring nodes up.
-/// `swim` enables gossip-based membership (spec §6.4.4) with conservative
+/// `swim` enables gossip-based membership (spec cluster §5.4.4) with conservative
 /// downing when `Some`; `None` runs static mode without a detector.
 pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) {
     let sim = Simulation::new(seed);
@@ -325,7 +325,7 @@ pub fn drive<T: Send + 'static>(
 // The mutating operations carry an **idempotency key** (`ReqId`), which is what
 // makes the object linearizable when it is reached across a faulted network.
 // The framework's delivery guarantee is at-most-once *at the caller* (spec
-// §4): a frame the wire duplicates is handled twice by the recipient, and the
+// §8.1): a frame the wire duplicates is handled twice by the recipient, and the
 // caller resolves against whichever reply survives. For a `Cas` the two
 // handlings answer differently (the first flips the value and returns `true`,
 // the second finds it already flipped and returns `false`), so a caller whose
@@ -340,7 +340,7 @@ pub fn drive<T: Send + 'static>(
 // `SimNode` (generic actors are allowed by the spec, §1.1).
 
 /// A caller's name for one mutating call *attempt*: the idempotency key of
-/// spec §4. Unique per (client, operation), and identical across every copy
+/// spec §8.1. Unique per (client, operation), and identical across every copy
 /// of the same request the wire may deliver.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ReqId {

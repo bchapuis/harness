@@ -1,28 +1,28 @@
-//! Awaiting a durable outcome (workflow spec §2.7).
+//! Awaiting a durable outcome (workflow spec §9).
 //!
 //! Autonomous work outlives the request that started it. A caller that asked for
 //! it therefore cannot receive it as a reply: a reply handle is resolved exactly
-//! once within the delivery of one message (core §2.10) and the work spans many.
+//! once within the delivery of one message (core §7) and the work spans many.
 //! Every consumer of the workflow meets this the same way: an ack, a registered
-//! reply-to, and a later notification (agent §2.6), so the pattern is supplied
+//! reply-to, and a later notification (agent §7.2), so the pattern is supplied
 //! here as a **component** with a normative discipline.
 //!
 //! It is a component and not a trait method because the *key* and the *payload*
 //! are the consumer's, and because a consumer with no external callers (one
 //! driven entirely by alarms) should carry none of it.
 //!
-//! The discipline (§2.7), which this type enforces where it can and documents
+//! The discipline (§9), which this type enforces where it can and documents
 //! where it cannot:
 //!
 //! 1. The set MUST NOT be journaled. It is ephemeral activation state, rebuilt
 //!    by callers re-contacting after a resume, like the claims and for the same
 //!    reason: a reply-to is a routing address, not a fact about the work.
 //! 2. A notification MUST be sent only **after** the record carrying the outcome
-//!    commits (entity §5), so no caller holds a completion the journal could
+//!    commits (entity §6), so no caller holds a completion the journal could
 //!    lose. [`take`](Subscribers::take) is therefore the only way to get the
 //!    registered addresses out, and a consumer calls it from its post-commit
 //!    pass.
-//! 3. A notification is a `tell` (core §2.2): at-most-once, best-effort,
+//! 3. A notification is a `tell` (core §3.2): at-most-once, best-effort,
 //!    **delivery and not the source of truth**. The committed record is. A lost
 //!    notification is recovered by the caller re-contacting the entity, never by
 //!    a transparent retry (core §1.1).
@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-/// The reply-tos registered against in-flight work (spec §2.7): ephemeral
+/// The reply-tos registered against in-flight work (spec §9): ephemeral
 /// activation state, never journaled.
 ///
 /// `K` identifies the unit of work a caller is waiting on (the agent runtime's

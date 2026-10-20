@@ -1,5 +1,5 @@
-//! The simulated external registry for registry-based mode (spec §6.4.2,
-//! §2.12.2, §10).
+//! The simulated external registry for registry-based mode (spec cluster §5.4.2,
+//! actor §11, §13).
 //!
 //! [`SimRegistry`] implements the [`RegistryClient`] seam the registry-based
 //! control plane syncs against, with **seeded faults**: latency on every fetch,
@@ -38,7 +38,7 @@ struct SimRegistryState {
     entries: BTreeMap<NodeId, (RegistryState, u64)>,
     /// Recent snapshots, oldest first: what a stale read is served from.
     history: Vec<RegistrySnapshot>,
-    /// While `false`, every client call fails `Unavailable` (spec §6.4.2 item 6).
+    /// While `false`, every client call fails `Unavailable` (spec cluster §5.4.2 item 6).
     available: bool,
     /// Outage windows opened so far (coverage telemetry, docs/simulation-testing.md).
     outages: u64,
@@ -72,7 +72,7 @@ impl SimRegistryState {
     }
 }
 
-/// The simulated external registry (spec §6.4.2, §2.12.2). Cloning shares the same
+/// The simulated external registry (spec cluster §5.4.2, actor §11). Cloning shares the same
 /// registry. [`client`](SimRegistry::client) yields the [`RegistryClient`] handle
 /// a [`SimNetwork`](crate::SimNetwork) node syncs against; the mutation methods
 /// are the operator side a test drives directly.
@@ -115,7 +115,7 @@ impl SimRegistry {
         Arc::new(self.clone())
     }
 
-    /// Toggle availability (spec §6.4.2 item 6): while unavailable, every
+    /// Toggle availability (spec cluster §5.4.2 item 6): while unavailable, every
     /// client call fails `Unavailable`. Mutations through this operator handle
     /// still apply: the registry exists; only the cluster's path to it is out.
     pub fn set_available(&self, available: bool) {
@@ -147,7 +147,7 @@ impl SimRegistry {
     }
 
     /// Register `node` as a member (`Up`): the operator/platform admission
-    /// (spec §6.4.2 item 2). Returns the mutation's revision.
+    /// (spec cluster §5.4.2 item 2). Returns the mutation's revision.
     pub fn register(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
             let revision = state.revision;
@@ -155,13 +155,13 @@ impl SimRegistry {
         })
     }
 
-    /// Cordon `node` for maintenance (spec §6.4.2 item 5). A no-op revision
+    /// Cordon `node` for maintenance (spec cluster §5.4.2 item 5). A no-op revision
     /// bump if `node` is not registered.
     pub fn drain(&self, node: NodeId) -> u64 {
         self.set_state(node, RegistryState::Draining)
     }
 
-    /// Return a drained `node` to service (spec §6.4.2 item 5).
+    /// Return a drained `node` to service (spec cluster §5.4.2 item 5).
     pub fn resume(&self, node: NodeId) -> u64 {
         self.set_state(node, RegistryState::Up)
     }
@@ -176,7 +176,7 @@ impl SimRegistry {
     }
 
     /// Remove `node` from the registry: the removal finalizes `down` at this
-    /// revision (spec §6.4.2 items 3–4).
+    /// revision (spec cluster §5.4.2 items 3–4).
     pub fn deregister(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
             state.entries.remove(&node);

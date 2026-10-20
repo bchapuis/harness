@@ -1,4 +1,4 @@
-//! The agent runtime's swarm sweeps (agent spec §9; core spec §2.12.2).
+//! The agent runtime's swarm sweeps (agent spec §1.2; core spec §11).
 //!
 //! Two claims over the same faulted workload. **Determinism:** the same
 //! `(workload, seed)` reproduces the full event stream byte-for-byte
@@ -54,7 +54,7 @@ struct FaultyWorkload {
     name: &'static str,
     sessions: usize,
     model_fail_num: u64,
-    /// Coverage accounting (§10): model faults the sweep actually fired while
+    /// Coverage accounting (§12): model faults the sweep actually fired while
     /// agent traffic flowed, aggregated across seeds.
     model_fired: Arc<AtomicUsize>,
 }
@@ -118,7 +118,7 @@ impl Workload for FaultyWorkload {
                 let clock = clock.clone();
                 waiting.push(async move {
                     let turn = Turn::new(TurnId::new("t-1"), "go");
-                    // Caller-driven resumption (§5.4): re-submit the same TurnId
+                    // Caller-driven resumption (§7.3): re-submit the same TurnId
                     // on a reported transport failure, bounded.
                     for _ in 0..20 {
                         match session.prompt(turn.clone()).await {
@@ -141,7 +141,7 @@ impl Workload for FaultyWorkload {
 
 #[test]
 fn the_event_stream_reproduces_byte_for_byte_per_seed() {
-    // The determinism contract over the real stream (core spec §2.12.2 #1), agent
+    // The determinism contract over the real stream (core spec §11 #1), agent
     // and entity events included: one leak (a wall clock, an OS thread, an
     // unseeded draw) breaks this, which is the point.
     for seed in [3, 17, 5151] {
@@ -156,7 +156,7 @@ fn the_event_stream_reproduces_byte_for_byte_per_seed() {
 fn the_a_invariants_hold_across_a_faulted_seed_sweep() {
     let workload = FaultyWorkload::new("agent-swarm", 4, 1);
     run_swarm(&workload, sweep_seeds(1..26)).expect("every seed upholds the A-invariant");
-    // Coverage accounting (§10): a green sweep proves model faults actually fired
+    // Coverage accounting (§12): a green sweep proves model faults actually fired
     // while agent traffic flowed, not that seed luck dodged them.
     assert!(
         workload.model_fired.load(Ordering::SeqCst) > 0,

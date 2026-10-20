@@ -1,6 +1,6 @@
 //! The provider: one workspace directory per session, held as a capability
 //! handle; tier environments built lazily on the first call that carries
-//! them (sandbox spec §3.3 item 2).
+//! them (sandbox spec §4.3 item 2).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ impl TierStats {
     }
 
     /// Containers actually provisioned: lazy on first use, once per held
-    /// tier per activation barring single-tier loss (sandbox spec §5).
+    /// tier per activation barring single-tier loss (sandbox spec §6).
     pub fn native_built(&self) -> usize {
         self.native_built.load(Ordering::SeqCst)
     }
@@ -80,7 +80,7 @@ impl TierStats {
     }
 }
 
-/// The tiered sandbox provider (sandbox spec §4): `Workspace` by capability
+/// The tiered sandbox provider (sandbox spec §5): `Workspace` by capability
 /// handle, `Compute` by hermetic wasmtime guests, `Native` by an OCI
 /// container or a Firecracker microVM, and nothing else. The crate docs hold
 /// the offered set.
@@ -90,7 +90,7 @@ pub struct TieredSandboxes {
     seed: u64,
     /// Deployment-registered compute modules (the QuickJS runner and kin):
     /// resolved by name before any workspace path, so a guest write can
-    /// never shadow them. Shared across sessions, which sandbox spec §3.3
+    /// never shadow them. Shared across sessions, which sandbox spec §4.3
     /// item 2 permits: a module is code, not working state; every call
     /// still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
@@ -101,7 +101,7 @@ pub struct TieredSandboxes {
     #[cfg(feature = "native")]
     container_cli: Option<String>,
     /// When set, the native tier runs at the microVM grade instead of the
-    /// docker fallback (sandbox spec §4): one Firecracker VM per
+    /// docker fallback (sandbox spec §5): one Firecracker VM per
     /// activation, workspace synced over vsock.
     #[cfg(feature = "firecracker")]
     firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
@@ -171,7 +171,7 @@ impl TieredSandboxes {
     /// Run the native tier at the microVM grade (feature `firecracker`):
     /// one Firecracker VM per activation instead of the docker fallback.
     /// Runtime needs Linux and `/dev/kvm`; where they are absent the first
-    /// `Native` call fails as a `ToolError` outcome (agent spec §4.2). The
+    /// `Native` call fails as a `ToolError` outcome (agent spec §5.2). The
     /// profile's `image` names the base rootfs a session boots.
     #[cfg(feature = "firecracker")]
     pub fn with_firecracker(
@@ -251,7 +251,7 @@ impl TieredSandboxes {
 /// keeps a mixed-realization cluster from agreeing silently. Arbitrary
 /// commands are not idempotent, so an orphaned call interrupts and the model
 /// decides whether to retry the side effect (`OnOrphan::Interrupt`, agent
-/// spec §4.4).
+/// spec §5.4).
 #[cfg(feature = "native")]
 fn shell_decl(description: &str) -> ToolDecl {
     ToolDecl {
@@ -283,13 +283,13 @@ impl SandboxProvider for TieredSandboxes {
     /// Open a session's environment over `workspace`, the directory the caller
     /// owns (S1). Refused, as a [`SandboxError`], is any profile whose egress
     /// allowlist is non-empty or whose explicit cap contains `Network`:
-    /// holding `Native` implies `Network`'s grants (sandbox spec §3.2), and
+    /// holding `Native` implies `Network`'s grants (sandbox spec §4.2), and
     /// neither native realization has a dataplane (`--network none` for the
     /// container, no network device in the microVM), so both deliver exactly
     /// an empty allowlist, and a profile asking for more must fail loudly here
     /// rather than have a granted capability silently withheld. The refusal
     /// is unconditional under every feature set, so this contract does not
-    /// vary with which tiers a build compiles in (sandbox spec §4).
+    /// vary with which tiers a build compiles in (sandbox spec §5).
     fn open(
         &self,
         session: &SessionId,
@@ -332,7 +332,7 @@ impl SandboxProvider for TieredSandboxes {
             // *vanishing after* this open. Workspace *contents* are reached
             // only through the capability handle opened here (S1); the
             // crate's ambient calls are this open, the loss stat sandbox
-            // spec §5 requires, the bind-mount and tar-restore host path,
+            // spec §6 requires, the bind-mount and tar-restore host path,
             // and the microVM's own assets, none of which reads the
             // workspace by path.
             std::fs::create_dir_all(&workspace)
@@ -348,11 +348,11 @@ impl SandboxProvider for TieredSandboxes {
             stats.count_opened();
             let dir = Arc::new(dir);
             // The tier struct is cheap and eager; the *environment*
-            // (container or microVM) is what stays lazy (sandbox spec §3.3
+            // (container or microVM) is what stays lazy (sandbox spec §4.3
             // item 2).
             #[cfg(feature = "native")]
             let native = NativeEnv::build(spec, &dir, &host_path, stats.clone());
-            // Opening grants `Workspace` and nothing else (agent spec §4.5
+            // Opening grants `Workspace` and nothing else (agent spec §5.5
             // item 1): no other tier environment exists until a call carries
             // its tier.
             Ok(Arc::new(TieredSandbox {
@@ -384,17 +384,17 @@ struct TieredSandbox {
     /// The session's injected seed (S2). Consumed by the compute tier only.
     #[cfg_attr(not(feature = "compute"), allow(dead_code))]
     seed: u64,
-    /// Compute resource limits from the profile (sandbox spec §4.2).
+    /// Compute resource limits from the profile (sandbox spec §5.2).
     #[cfg_attr(not(feature = "compute"), allow(dead_code))]
     limits: ComputeLimits,
     /// The provider's registered compute modules, shared across sessions.
     #[cfg(feature = "compute")]
     modules: Arc<BTreeMap<String, Arc<[u8]>>>,
-    /// The compute tier, built on the first `Compute` call (§3.3 item 2).
+    /// The compute tier, built on the first `Compute` call (§4.3 item 2).
     #[cfg(feature = "compute")]
     compute: std::sync::Mutex<Option<Arc<crate::compute::ComputeTier>>>,
     /// The native tier: the struct is eager, its *environment* (container or
-    /// microVM) is built on the first `Native` call (§3.3 item 2).
+    /// microVM) is built on the first `Native` call (§4.3 item 2).
     #[cfg(feature = "native")]
     native: NativeEnv,
     stats: TierStats,
@@ -412,7 +412,7 @@ struct NativeSpec {
     firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
 }
 
-/// Which realization answers `Native` for this sandbox (sandbox spec §4):
+/// Which realization answers `Native` for this sandbox (sandbox spec §5):
 /// the docker fallback, or the microVM grade.
 #[cfg(feature = "native")]
 #[derive(Clone)]
@@ -524,7 +524,7 @@ pub(crate) fn capped(bytes: &[u8]) -> String {
 }
 
 /// Distinguish a lost environment from an ordinary outcome (agent spec
-/// §4.4): when the session's workspace directory no longer exists on disk
+/// §5.4): when the session's workspace directory no longer exists on disk
 /// the environment itself is gone, whatever the call reported.
 /// `EnvironmentLost` engages the agent runtime's reset protocol (drop the binding,
 /// journal `WorkspaceReset`). The loss outranks even an `Ok`: the open handle
@@ -549,9 +549,9 @@ fn escalate_loss(
 #[cfg(feature = "compute")]
 impl TieredSandbox {
     /// Provision-or-get the compute engine under the lock, lazily on the first
-    /// call that carries the tier (sandbox spec §3.3 item 2). Poison recovery,
+    /// call that carries the tier (sandbox spec §4.3 item 2). Poison recovery,
     /// not propagation: a panic in a prior call must degrade to per-call
-    /// `ToolError` outcomes (agent spec §4.2), never poison every later call.
+    /// `ToolError` outcomes (agent spec §5.2), never poison every later call.
     fn compute_tier(&self) -> Result<Arc<crate::compute::ComputeTier>, ToolError> {
         let mut slot = self
             .compute
@@ -605,7 +605,7 @@ impl Sandbox for TieredSandbox {
                 let native = self.native.clone();
                 let name = name.to_string();
                 Box::pin(async move {
-                    // escalate_loss gives §5's asymmetry: container gone but
+                    // escalate_loss gives §6's asymmetry: container gone but
                     // workspace intact stays a Sandbox outcome (single-tier
                     // loss); workspace gone is EnvironmentLost.
                     escalate_loss(native.call(&name, &input).await, &path)
@@ -613,8 +613,8 @@ impl Sandbox for TieredSandbox {
             }
             other => {
                 // Not offered by this provider (crate docs): a per-call
-                // failure (agent spec §4.2), unreachable in a correctly
-                // capped deployment (agent §2.4).
+                // failure (agent spec §5.2), unreachable in a correctly
+                // capped deployment (agent §6.1).
                 let message = format!("tier {other:?} is not offered by this provider");
                 Box::pin(async move { Err(ToolError::Sandbox(message)) })
             }

@@ -1,7 +1,7 @@
-//! Seed-reproducibility: the determinism contract, enforced (spec §2.12.2 #1).
+//! Seed-reproducibility: the determinism contract, enforced (spec §11 #1).
 //!
 //! Two runs of the same workload under the same seed MUST produce byte-identical
-//! event streams (spec §2.12.2 #1). A single leak of ambient nondeterminism (a
+//! event streams (spec §11 #1). A single leak of ambient nondeterminism (a
 //! wall-clock read, an OS thread, a non-seeded RNG, `HashMap` iteration order)
 //! silently breaks it, so it is checked directly rather than assumed.
 //!
@@ -10,7 +10,7 @@
 //! the first point of divergence as a [`Divergence`].
 //! [`check_reproducible`] and [`check_cluster_reproducible`] are the single-run
 //! gates; [`replay_swarm`] and [`replay_cluster_swarm`] sweep them across seeds,
-//! the standing determinism corpus (spec §2.12.2).
+//! the standing determinism corpus (spec §11).
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use crate::Workload;
 use crate::cluster_swarm::drive_cluster;
 use crate::workload::drive_local;
 
-/// The first point at which two same-seed runs disagreed (spec §2.12.2 #1). A
+/// The first point at which two same-seed runs disagreed (spec §11 #1). A
 /// `None` event means that run's stream ended first.
 ///
 /// A sweep also reports a workload that panicked while being recorded as one of
@@ -131,7 +131,7 @@ fn caught_divergence(
 }
 
 /// Run a workload twice under one seed and diff the two event streams, reporting
-/// the first [`Divergence`] (spec §2.12.2 #1). The `record` closure supplies the
+/// the first [`Divergence`] (spec §11 #1). The `record` closure supplies the
 /// driver, single-node or cluster. Boxed because a `Divergence` carries two full
 /// events and dwarfs the `Ok` path.
 fn check_twice(
@@ -149,7 +149,7 @@ fn check_twice(
 
 /// Sweep a per-seed determinism check across many seeds, stopping at the first
 /// divergence, or, when `collect`, running to the end and reporting every seed
-/// that diverged or panicked. The standing reproducibility corpus (spec §2.12.2).
+/// that diverged or panicked. The standing reproducibility corpus (spec §11).
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run ahead of
 /// `seeds`, exactly as they do for an invariant sweep: a seed that once broke
@@ -229,7 +229,7 @@ pub(crate) fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
 }
 
 /// Verify the determinism contract for a single-node workload at `seed`: two runs
-/// must emit byte-identical event streams (spec §2.12.2 #1). Returns the first
+/// must emit byte-identical event streams (spec §11 #1). Returns the first
 /// [`Divergence`] otherwise (boxed: it carries two full events, so it dwarfs the
 /// `Ok` path).
 pub fn check_reproducible<W: Workload>(workload: &W, seed: u64) -> Result<(), Box<Divergence>> {
@@ -237,7 +237,7 @@ pub fn check_reproducible<W: Workload>(workload: &W, seed: u64) -> Result<(), Bo
 }
 
 /// Sweep the determinism contract across seeds for a single-node workload: the
-/// standing reproducibility corpus (spec §2.12.2). Stops at the first divergence
+/// standing reproducibility corpus (spec §11). Stops at the first divergence
 /// unless the run asks for every one.
 pub fn replay_swarm<W: Workload>(
     workload: &W,
@@ -262,7 +262,7 @@ pub fn record_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Vec<E
 }
 
 /// Verify the determinism contract for a cluster workload at `seed` (spec
-/// §2.12.2 #1): two runs over the multi-node network, seeded faults, and nemesis
+/// §11 #1): two runs over the multi-node network, seeded faults, and nemesis
 /// must emit byte-identical event streams.
 pub fn check_cluster_reproducible<W: ClusterWorkload>(
     workload: &W,
@@ -272,7 +272,7 @@ pub fn check_cluster_reproducible<W: ClusterWorkload>(
 }
 
 /// Sweep the determinism contract across seeds for a cluster workload (spec
-/// §2.12.2). Stops at the first divergence unless the run asks for every one.
+/// §11). Stops at the first divergence unless the run asks for every one.
 ///
 /// ```ignore
 /// if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {

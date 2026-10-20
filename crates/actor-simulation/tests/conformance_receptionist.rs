@@ -1,4 +1,4 @@
-//! Conformance: receptionist (spec §2.6); empty lookups, concurrent registration
+//! Conformance: receptionist (spec §3.7); empty lookups, concurrent registration
 //! merge, graceful-stop prune, and anti-entropy convergence (late joiners and
 //! partition heals), plus end-to-end remote service discovery, death-watch
 //! pruning of a downed node's registrations, and subscription snapshot/updates.
@@ -29,7 +29,7 @@ use support::Greet;
 use support::Greeter;
 use support::Stop;
 
-// --- Remote-service discovery actor (spec §2.6) -------------------------------
+// --- Remote-service discovery actor (spec §3.7) -------------------------------
 
 type Sys = SimNode;
 
@@ -204,7 +204,7 @@ fn a_registration_whose_stop_was_lost_is_pruned_after_the_heal() {
     // while the nodes are partitioned, so the `Terminated` frame that would
     // prune B's copy is lost. After the heal, B's watch repair asks again, A
     // answers from the recorded stop, and B's listing converges on the live
-    // registrations: none (spec §2.6 requirement 8).
+    // registrations: none (spec §3.7 requirement 8).
     let (sim, net) = support::cluster(13, Some(brisk_swim()));
     let node_a = net.join(NodeId::new(1));
     let node_b = net.join(NodeId::new(2));
@@ -262,7 +262,7 @@ fn lookup_discovers_a_remote_service_and_calls_it() {
 
 #[test]
 fn registration_is_pruned_when_its_node_goes_down() {
-    // Cascade step 5 (spec §5.1, §2.6 rule 3): when B is declared down, A's
+    // Cascade step 5 (spec cluster §7, actor §3.7 rule 3): when B is declared down, A's
     // listing for the key it published loses that registration.
     let sim = Simulation::new(2);
     let net = SimNetwork::new(&sim).with_gossip(
@@ -295,7 +295,7 @@ fn registration_is_pruned_when_its_node_goes_down() {
 
 #[test]
 fn subscribe_delivers_current_listing_then_updates() {
-    // Spec §2.6 rule 5 / invariant #19: the current snapshot first, then a fresh
+    // Spec §3.7 rule 5 / invariant #19: the current snapshot first, then a fresh
     // listing on every change.
     let sim = Simulation::new(3);
     let node = SimNetwork::new(&sim).join(NodeId::new(1));

@@ -27,9 +27,8 @@
 //!
 //! # The two shapes
 //!
-//! Six catalogues are markdown tables with `Invariant` and `Defined in`
-//! columns. The core catalogue (actor §10) is a numbered list instead
-//! ([`Shape`]), for seven sites in all.
+//! Every catalogue is a markdown table with `Invariant` and `Defined in`
+//! columns, seven sites in all.
 
 use std::fmt;
 use std::io;
@@ -44,8 +43,6 @@ pub enum Shape {
     /// A markdown table with `Invariant` and `Defined in` columns, the
     /// invariant's label in the first cell.
     Table,
-    /// A numbered list, each item opening `N. **Property (§a, §b).**`.
-    NumberedList,
 }
 
 /// Where one invariant catalogue lives in the specifications.
@@ -69,18 +66,17 @@ pub struct CatalogueSite {
 /// own crate can import, which is why the comparison runs inside each crate's
 /// `conformance_catalogue.rs` rather than centrally.
 pub const CATALOGUES: &[CatalogueSite] = &[
-    // A numbered list rather than a table.
     CatalogueSite {
         id: "core",
         doc: "actor",
-        section: "10",
+        section: "13",
         label: "",
-        shape: Shape::NumberedList,
+        shape: Shape::Table,
     },
     CatalogueSite {
         id: "utilities",
         doc: "utilities",
-        section: "4",
+        section: "6",
         label: "U",
         shape: Shape::Table,
     },
@@ -94,28 +90,28 @@ pub const CATALOGUES: &[CatalogueSite] = &[
     CatalogueSite {
         id: "workflow",
         doc: "workflow",
-        section: "8",
+        section: "12",
         label: "W",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "agent",
         doc: "agent",
-        section: "10",
+        section: "12",
         label: "A",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "sandbox",
         doc: "sandbox",
-        section: "6",
+        section: "7",
         label: "S",
         shape: Shape::Table,
     },
     CatalogueSite {
         id: "machine",
         doc: "machine",
-        section: "6",
+        section: "9",
         label: "M",
         shape: Shape::Table,
     },
@@ -226,7 +222,6 @@ pub fn documented(root: &Path, site: &CatalogueSite) -> io::Result<Vec<Row>> {
         .ok_or_else(|| io::Error::other(format!("{} has no §{}", doc.path, site.section)))?;
     Ok(match site.shape {
         Shape::Table => table_rows(body, site),
-        Shape::NumberedList => list_rows(body),
     })
 }
 
@@ -316,23 +311,6 @@ fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
         .collect()
 }
 
-/// Rows of a numbered list, each item opening `N. **Property (§a, §b).**`.
-fn list_rows(body: &str) -> Vec<Row> {
-    body.lines()
-        .filter_map(|line| {
-            let (number, item) = markdown::list_item(line)?;
-            let number = u8::try_from(number).ok()?;
-            // Sections live in the bold lead-in; the rest of the item is prose
-            // that cites other sections incidentally.
-            let lead = item.split("**").nth(1).unwrap_or("");
-            Some(Row {
-                number,
-                sections: section_numbers(lead),
-            })
-        })
-        .collect()
-}
-
 /// The cells of a markdown table row, trimmed, outer pipes dropped.
 fn cells(line: &str) -> Vec<&str> {
     line.trim()
@@ -416,15 +394,20 @@ mod tests {
     }
 
     #[test]
-    fn a_numbered_list_takes_sections_from_the_bold_lead_in() {
-        let body = "1. **No silent loss (§7.2, §14).** Every `ask` terminates, see §18.3.\n";
-        let rows = list_rows(body);
+    fn an_unlabelled_row_takes_its_number_from_the_first_cell() {
+        let body = "\n| # | Invariant | Defined in |\n|---|---|---|\n\
+                    | 1 | **No silent loss.** Every ask ends, see §18.3. | §8, cluster §5.4 |\n";
+        let site = CatalogueSite {
+            label: "",
+            ..ENTITY
+        };
+        let rows = table_rows(body, &site);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].number, 1);
         assert_eq!(
             rows[0].sections,
-            ["7.2", "14"],
-            "§18.3 is prose after the lead-in",
+            ["8", "5.4"],
+            "only the Defined in column counts",
         );
     }
 

@@ -1,5 +1,5 @@
 //! The entity-native content-addressed blob store, end-to-end under deterministic
-//! simulation (entity §11).
+//! simulation (entity §10).
 //!
 //! An entity reaches its colocated, immutable blob area through
 //! [`EntityCtx::blobs`](entity::EntityCtx::blobs): it stores bulk bytes by content
@@ -378,7 +378,7 @@ fn cluster_cfg(
 }
 
 /// One node's store directory under a [`FileEntityStore::factory`] root: the hosted
-/// entity type, then the node (storage §3.2; a store is per type, so its shard-keyed fence
+/// entity type, then the node (storage §4.2; a store is per type, so its shard-keyed fence
 /// belongs to exactly one leader-election group).
 fn store_dir(root: &std::path::Path, node: NodeId) -> std::path::PathBuf {
     root.join(BlobEntity::<SimSystem>::ENTITY_TYPE)
@@ -562,7 +562,7 @@ fn a_tampered_replica_copy_falls_through_to_a_good_one() {
 #[test]
 fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
     // Beyond falling through (above): the corrupt local copy is *repaired* in place
-    // from the verifying peer, restoring this replica's durability margin (storage §9
+    // from the verifying peer, restoring this replica's durability margin (storage §10
     // self-heal). Without it the bad copy persists (a content-addressed re-put of an
     // id already on disk is a no-op), every read re-fetches over the wire, and a
     // later loss of the good peers loses a blob that looked present.
@@ -613,7 +613,7 @@ fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
     assert_eq!(
         read_blob_file(&leader_dir, id).map(|b| BlobId::of(&b)),
         Some(id),
-        "the corrupt local copy must be repaired from the verifying replica (storage §9)",
+        "the corrupt local copy must be repaired from the verifying replica (storage §10)",
     );
 
     // And a subsequent read is served locally from the healed copy: still correct.

@@ -1,15 +1,30 @@
-//! Harness observability events (agent spec §2.8): checker-facing,
+//! Harness observability events (agent spec §10.1): checker-facing,
 //! ephemeral, describing the *machinery around* sessions (run pairing, model
 //! completions, the sandbox bind/release pair), so the A-invariants are
 //! checkable over a run's stream. They carry nothing about a session's content: records are the
-//! durable, user-facing account (§8.1). Activation, deactivation, and the
+//! durable, user-facing account (§10.1). Activation, deactivation, and the
 //! single-writer fence are the entity's events (`Activated`/`Deactivated`/
-//! `LeaderChanged`, entity §10), not duplicated here.
+//! `LeaderChanged`, entity §11), not duplicated here.
 //!
-//! Each event rides the core stream as [`Event::App`] (core spec §2.7), so
+//! Each event rides the core stream as [`Event::App`] (core spec §3.6), so
 //! checkers observe one totally ordered sequence interleaved with the core
-//! events and the seed-reproducibility contract (core spec §2.12.2 #1) covers
+//! events and the seed-reproducibility contract (core spec §11 #1) covers
 //! these too. Recover them with `event.as_app::<AgentEvent>()`.
+//!
+//! The stream is the one sanctioned restatement of the journal: a continuous
+//! checker reads it, not per-session journals. The emission rules it relies on:
+//!
+//! - `RunStarted`, `ModelCompleted`, `ToolCompleted`, and `RunEnded` are
+//!   emitted only after the record each announces commits, and only by the
+//!   committing activation: a straggler or a deposed leader's uncommitted work
+//!   emits nothing.
+//! - `RunStarted` fires exactly once per `(session, turn)`, when the turn's
+//!   `TurnStarted` commits. A resume emits none (it reads as `Activated` then
+//!   `ModelCompleted` on a started turn), and a turn cancelled while queued
+//!   emits neither `RunStarted` nor `RunEnded`.
+//! - `SandboxBound` and `SandboxReleased` alternate within the entity's
+//!   `Activated`/`Deactivated` window for the session and node, and a bound
+//!   sandbox's `SandboxReleased` precedes that activation's `Deactivated`.
 
 use actor_core::Event;
 use actor_core::NodeId;
@@ -17,7 +32,7 @@ use actor_core::NodeId;
 use crate::session::SessionId;
 use crate::session::TurnId;
 
-/// One agent event (agent spec §2.8): the events a stream checker cannot
+/// One agent event (agent spec §10.1): the events a stream checker cannot
 /// reconstruct from the entity's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
@@ -25,8 +40,8 @@ pub enum AgentEvent {
     /// (on the activation whose append committed the turn) under any
     /// duplication or retry (A6). A resume emits **no** second `RunStarted`: a
     /// checker recognizes a resume as the entity's `Activated` followed by a
-    /// `ModelCompleted` on an already-started turn (§2.8). `parent` is the
-    /// delegating session for a run started by delegation (§6.1).
+    /// `ModelCompleted` on an already-started turn (§10.1). `parent` is the
+    /// delegating session for a run started by delegation (§8.1).
     RunStarted {
         session: SessionId,
         turn: TurnId,
@@ -35,7 +50,7 @@ pub enum AgentEvent {
     /// One model call finished and its response committed on a live activation:
     /// the stream half of A3 (no completion after `RunEnded`) and the per-node
     /// half of A5. A discarded straggler (run already ended) emits nothing,
-    /// keeping the event scoped to journaled spend (§7.1 item 4, §2.8); the
+    /// keeping the event scoped to journaled spend (§9.1 item 4, §10.1); the
     /// spend itself is audited from records, not from the stream. `node`
     /// attributes the call to its enclosing activation.
     ModelCompleted {
@@ -43,9 +58,9 @@ pub enum AgentEvent {
         turn: TurnId,
         node: NodeId,
     },
-    /// One tool call's `ToolOutcome` committed on a live activation (§4.2,
-    /// §3.3). Scoped to a live run: a straggler of an ended or cancelled run
-    /// commits no record, so emits nothing (§3.2, §7.2). `node` attributes it to
+    /// One tool call's `ToolOutcome` committed on a live activation (§5.2,
+    /// §4.3). Scoped to a live run: a straggler of an ended or cancelled run
+    /// commits no record, so emits nothing (§4.2, §9.2). `node` attributes it to
     /// its enclosing activation.
     ToolCompleted {
         session: SessionId,
@@ -54,13 +69,13 @@ pub enum AgentEvent {
     },
     /// The run's exactly-one terminal outcome was journaled (A2). `outcome`
     /// is the terminal kind: `"ok"`, `"budget"`, `"cancelled"`, or `"model"`
-    /// (§3.2).
+    /// (§4.2).
     RunEnded {
         session: SessionId,
         turn: TurnId,
         outcome: &'static str,
     },
-    /// The activation opened its sandbox: first sandboxed call (§2.3).
+    /// The activation opened its sandbox: first sandboxed call (§3.3).
     /// Alternates with [`SandboxReleased`](AgentEvent::SandboxReleased)
     /// within the entity's activation window (A7).
     SandboxBound { session: SessionId, node: NodeId },

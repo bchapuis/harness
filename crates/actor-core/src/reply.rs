@@ -1,9 +1,9 @@
-//! Reply handling (spec §2.10).
+//! Reply handling (spec §7).
 //!
 //! A [`ReplyHandle`] carries the correlation and return channel for one inbound
 //! `ask`. `deliver` MUST resolve exactly one of [`send`](ReplyHandle::send) or
 //! [`fail`](ReplyHandle::fail). Because application errors live inside
-//! `M::Reply` (spec §2.1), `send` carries both successful and
+//! `M::Reply` (spec §3.1), `send` carries both successful and
 //! application-failed outcomes; `fail` is reserved for transport or system
 //! failures the handler never produced.
 
@@ -19,7 +19,7 @@ use crate::error::CallError;
 /// or a transport/system [`CallError`].
 pub type ReplyResult = Result<Vec<u8>, CallError>;
 
-/// The reply side of one inbound request (spec §2.10). Serializes the handler's
+/// The reply side of one inbound request (spec §7). Serializes the handler's
 /// reply with the system codec and routes it back to the caller.
 pub struct ReplyHandle {
     codec: Arc<dyn Codec>,
@@ -35,7 +35,7 @@ impl ReplyHandle {
         (ReplyHandle { codec, tx }, rx)
     }
 
-    /// Serialize `reply` and return it to the caller (spec §2.10). Carries both
+    /// Serialize `reply` and return it to the caller (spec §7). Carries both
     /// successful and application-failed outcomes (the latter as values inside
     /// `R`). Non-blocking: the return channel never applies backpressure. A
     /// receiver already gone (a one-way `tell`, or an `ask` that stopped
@@ -48,7 +48,7 @@ impl ReplyHandle {
         let _ = self.tx.send(encoded);
     }
 
-    /// Fail the call with a transport/system error (spec §2.10). Distinct from an
+    /// Fail the call with a transport/system error (spec §7). Distinct from an
     /// application error, which travels inside the reply via [`send`].
     ///
     /// [`send`]: ReplyHandle::send

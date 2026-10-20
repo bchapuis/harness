@@ -1,4 +1,4 @@
-//! The workflow under the cluster fault swarm (workflow spec §8, §7).
+//! The workflow under the cluster fault swarm (workflow spec §12, §3.2).
 //!
 //! The scenario suites assert W1–W7 through scripted runs. This file applies them
 //! the V&V way: a [`ClusterWorkload`] of workflow entities swept across seeds while
@@ -14,7 +14,7 @@
 //! **What re-activates an entity.** Resumption is caller-driven: an entity whose
 //! leader died stays cold until a message reaches it, so the workload polls every
 //! entity's `Status` on a fixed cadence. Each poll is at once the touch that
-//! re-activates a cold entity (whose first tick is the orphan set, §4.3), the
+//! re-activates a cold entity (whose first tick is the orphan set, §5.3), the
 //! wake for an entity that hibernated at quiescence under the short idle window,
 //! and an observation. A poll the faults refuse is not an observation.
 //!
@@ -94,7 +94,7 @@ struct Reached {
     /// Entities observed `finished` by a poll, across the sweep.
     finished: Arc<AtomicUsize>,
     /// Keys whose effect ran on more than one activation, across the sweep: the
-    /// orphaned chain (§4.3) the nemesis has to produce for W6 to be tested at all.
+    /// orphaned chain (§5.3) the nemesis has to produce for W6 to be tested at all.
     relaunched: Arc<AtomicUsize>,
 }
 
@@ -263,7 +263,7 @@ fn the_workflow_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
     assert!(
         relaunched > 0,
         "no effect was relaunched by a successor activation on any seed, so the \
-         orphaned path (§4.3) was never exercised under faults"
+         orphaned path (§5.3) was never exercised under faults"
     );
     assert!(
         stats.dropped > 0 && stats.duplicated > 0 && stats.delayed > 0 && stats.blocked > 0,
@@ -271,8 +271,8 @@ fn the_workflow_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
     );
 }
 
-/// The determinism contract over this workload (actor §2.12.2): the same seed
-/// twice, byte-identical event streams; workflow events included (§8).
+/// The determinism contract over this workload (actor §11): the same seed
+/// twice, byte-identical event streams; workflow events included (§12).
 #[test]
 fn the_workflow_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {

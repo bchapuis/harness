@@ -1,9 +1,9 @@
-//! The workspace facet on the clustered `Quorum` tier (spec facets §4.1, entity §11).
+//! The workspace facet on the clustered `Quorum` tier (spec facets §5.1, entity §10).
 //!
 //! Exercises the cluster-only behavior: a file captured on one node's entity
 //! handle is readable from any node (E13), the workspace survives losing a
 //! minority of replicas (delta records ride the record quorum, E14), and
-//! **root-driven blob repair** (storage §9 `repair_facets`) re-replicates a
+//! **root-driven blob repair** (storage §10 `repair_facets`) re-replicates a
 //! checkpoint chunk to a replica that missed its write, restoring the
 //! durability margin.
 
@@ -78,7 +78,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Off the activation latency path: sweep chunks a prior activation
         // orphaned and re-fan the live checkpoint chunks to the current
-        // replicas (storage §9 `repair_facets`), as the agent runtime does.
+        // replicas (storage §10 `repair_facets`), as the agent runtime does.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {
@@ -91,7 +91,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     }
 }
 
-/// Write a file into the workspace directory and capture it (facets §4.1).
+/// Write a file into the workspace directory and capture it (facets §5.1).
 #[derive(Clone, Serialize, Deserialize)]
 struct Put {
     path: String,
@@ -128,7 +128,7 @@ impl<S: EntitySystem> EntityHandler<Put> for Studio<S> {
     }
 }
 
-/// Read a file straight off the materialized directory: a pure read (§6).
+/// Read a file straight off the materialized directory: a pure read (§7).
 #[derive(Clone, Serialize, Deserialize)]
 struct Get {
     path: String,
@@ -187,7 +187,7 @@ fn cluster(sim: &Simulation, cfg: EntityConfig) -> (SimNetwork, Vec<SimNode>, Ve
 /// Whether node `node`'s on-disk store holds a blob named `id` (the file-store
 /// names a blob file by its content-hash hex). The store sits under the hosted entity
 /// type, then the node: one store per type, so its shard-keyed fence belongs to
-/// exactly one leader-election group (storage §3.2).
+/// exactly one leader-election group (storage §4.2).
 fn blob_on_node(root: &Path, node: NodeId, id: BlobId) -> bool {
     fn walk(dir: &Path, name: &str) -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -292,7 +292,7 @@ fn the_workspace_survives_losing_a_minority_replica() {
 fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     // A replica partitioned during a checkpoint misses the chunk blobs; after
     // the partition heals, the entity's re-activation runs root-driven repair
-    // (storage §9 `repair_facets`), which re-fans the live checkpoint chunks to the current
+    // (storage §10 `repair_facets`), which re-fans the live checkpoint chunks to the current
     // replicas, restoring the copy on the node that missed them.
     let sim = Simulation::new(3);
     let dir = tempfile::tempdir().unwrap();
@@ -363,7 +363,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     );
 
     // Heal; the idle entity hibernates, and the next access re-activates it,
-    // whose on_activate repair re-fans the live chunk set (storage §9 `repair_facets`).
+    // whose on_activate repair re-fans the live chunk set (storage §10 `repair_facets`).
     net.heal();
     sim.run_for(Duration::from_secs(5));
     let read = drive(&sim, Duration::from_secs(20), {
@@ -385,6 +385,6 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
 
     assert!(
         blob_on_node(dir.path(), victim, id),
-        "repair must re-replicate the live chunk to the healed replica (storage §9 `repair_facets`)",
+        "repair must re-replicate the live chunk to the healed replica (storage §10 `repair_facets`)",
     );
 }

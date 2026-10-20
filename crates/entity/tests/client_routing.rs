@@ -1,4 +1,4 @@
-//! Spike (§4.3/§4.4): an Orleans-style cluster **client** (a member that hosts
+//! Spike (§5.3/§5.4): an Orleans-style cluster **client** (a member that hosts
 //! no entities and is not a Raft voter) addresses and calls an entity hosted on
 //! the cluster, via `entities_client`. It proves a non-hosting participant
 //! discovers a host's gateway through the receptionist gossip and routes an `ask`
@@ -150,7 +150,7 @@ fn a_non_hosting_client_routes_to_a_cluster_entity() {
     };
 
     // From the non-hosting client: an Add (a write that must reach the shard
-    // leader and commit), a Read, and a gateway-level event read (§6) that
+    // leader and commit), a Read, and a gateway-level event read (§7) that
     // never touches the activation.
     let (after_add, after_read, tailed) = drive(&sim, Duration::from_secs(8), async move {
         let counter = client_entities.entity("counter/1");

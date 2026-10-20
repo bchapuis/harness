@@ -1,4 +1,4 @@
-//! Invariant #20 (spec §2.2): `ask`-ing a message the actor has no `Handler`
+//! Invariant #20 (spec §3.2): `ask`-ing a message the actor has no `Handler`
 //! for MUST NOT compile. `Greeter` handles `Hello` but not `Question`.
 
 use core::marker::PhantomData;

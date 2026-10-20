@@ -1,6 +1,6 @@
-//! Shared blob machinery for the checkpointing facets (spec facets §3): the F3
+//! Shared blob machinery for the checkpointing facets (spec facets §4): the F3
 //! root-keeping discipline and the chunked blob-area transfer helpers the SQL
-//! (facets §4.3), workspace (facets §4.1), and disk (facets §4.4) facets have in common. Each
+//! (facets §5.3), workspace (facets §5.1), and disk (facets §5.4) facets have in common. Each
 //! facet keeps its own chunking policy and manifest shape; what lives here is
 //! the part that must be identical for GC safety to hold.
 
@@ -59,7 +59,7 @@ const IN_FLIGHT_CHUNKS: usize = 16;
 /// Every future is polled to completion even after one fails: the reason
 /// `join_all_results` was chosen over `try_join_all` here. A short-circuiting
 /// combinator drops the transfers still in flight and abandons the peer `ask`s they
-/// had already issued (core spec §10 #1); the transfers are independent and
+/// had already issued (core spec §13 #1); the transfers are independent and
 /// content-addressed, so finishing them costs nothing and leaves more of the
 /// checkpoint durable. Buffering preserves that: it only declines to *start* work,
 /// which is not the same as abandoning work already issued.
@@ -84,7 +84,7 @@ where
 
 /// Store `chunks` in the entity's blob area, returning their ids in order. The puts
 /// are independent and issue concurrently, [`IN_FLIGHT_CHUNKS`] at a time; dedup
-/// makes a chunk already stored ~free (storage §9). `what` labels a failure (e.g.
+/// makes a chunk already stored ~free (storage §10). `what` labels a failure (e.g.
 /// `"sql checkpoint"`).
 ///
 /// Takes the whole artifact up front, which suits a facet whose artifact is already
@@ -107,7 +107,7 @@ pub(crate) async fn put_chunked(
 /// `chunks` is advanced only when a transfer slot frees, so peak memory is
 /// `IN_FLIGHT_CHUNKS` chunks whatever the artifact's total size, and a source that
 /// reads from a file paces itself against the puts instead of racing ahead of them.
-/// That is what lets the disk facet (facets §4.4) pipeline a 16 GiB image's blocks without
+/// That is what lets the disk facet (facets §5.4) pipeline a 16 GiB image's blocks without
 /// materializing it: the alternative (collect every block, then hand the vector to
 /// [`put_chunked`]) needs the whole image in memory.
 ///

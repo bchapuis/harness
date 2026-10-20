@@ -1,7 +1,7 @@
-//! Conformance: death watch (spec §2.5): multiple watchers, `unwatch`, and signal
+//! Conformance: death watch (spec §10): multiple watchers, `unwatch`, and signal
 //! ordering through the mailbox, plus a watcher receiving exactly one
 //! [`Terminated`] when a watched actor stops, fails, or (the distributed case)
-//! has its node declared `down` (the node-down cascade, spec §5.1 step 4).
+//! has its node declared `down` (the node-down cascade, spec cluster §7 step 4).
 
 mod support;
 
@@ -155,7 +155,7 @@ fn terminated_arrives_in_mailbox_order_after_earlier_messages() {
         let watcher = system.spawn(Watcher::new(target.clone(), observed));
         clock.sleep(Duration::from_millis(1)).await;
         // Messages sent before the target stops are observed before Terminated
-        // (spec §2.5 #13: signals ride the mailbox in serial order).
+        // (spec §10 #13: signals ride the mailbox in serial order).
         watcher.tell(Note(1)).await.unwrap();
         watcher.tell(Note(2)).await.unwrap();
         target.tell(Stop).await.unwrap();
@@ -169,7 +169,7 @@ fn terminated_arrives_in_mailbox_order_after_earlier_messages() {
 fn remote_graceful_stop_notifies_a_remote_watcher() {
     // A watcher on node A watches a greeter on node B. When B's greeter stops
     // gracefully, B sends a `Terminated` frame to A and the watcher is notified,
-    // not only on node-down (spec §2.5).
+    // not only on node-down (spec §10).
     let (sim, net) = support::cluster(8, None);
     let node_a = net.join(actor_core::NodeId::new(1));
     let node_b = net.join(actor_core::NodeId::new(2));
@@ -320,7 +320,7 @@ fn watching_an_already_dead_actor_yields_terminated_immediately() {
 #[test]
 fn watching_an_already_failed_actor_reports_failed_not_stopped() {
     // Invariant #12 with reason fidelity: a watch placed *after* the target has
-    // already failed must report `Failed`, not a blanket `Stopped` (spec §2.5).
+    // already failed must report `Failed`, not a blanket `Stopped` (spec §10).
     let (sim, node) = one_node(5);
     let got: Reasons = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&got);
@@ -345,7 +345,7 @@ fn watching_an_already_failed_actor_reports_failed_not_stopped() {
 fn remote_watch_after_death_reports_the_true_reason() {
     // A remote watcher that registers interest after the target has already
     // failed must learn it `Failed`, not a default `Stopped`: the target's node
-    // reports the reason it recorded at resignation (spec §2.5).
+    // reports the reason it recorded at resignation (spec §10).
     let sim = Simulation::new(6);
     let net = SimNetwork::new(&sim); // SWIM off: the node stays up, the actor dies
     let node_a = net.join(NodeId::new(1));
@@ -399,7 +399,7 @@ fn watch_reports_failure_when_handler_panics() {
 
 #[test]
 fn node_down_synthesizes_terminated_for_remote_watch() {
-    // The cascade (spec §5.1 step 4): a watcher of an actor on a downed node
+    // The cascade (spec cluster §7 step 4): a watcher of an actor on a downed node
     // receives `Terminated { NodeDown }`, even though no stop message can arrive.
     let sim = Simulation::new(4);
     let net = SimNetwork::new(&sim).with_gossip(
@@ -424,7 +424,7 @@ fn node_down_synthesizes_terminated_for_remote_watch() {
 
 /// Two nodes in static mode with the observe-only detector: the anti-entropy
 /// loop runs, but no node is ever declared `down`, so only the watch repair can
-/// recover a frame a partition swallowed (spec §2.5).
+/// recover a frame a partition swallowed (spec §10).
 fn observed_pair(seed: u64) -> (Simulation, SimNetwork, SimNode, SimNode) {
     let sim = Simulation::new(seed);
     let net = SimNetwork::new(&sim).with_mode(actor_cluster::MembershipMode::Static {

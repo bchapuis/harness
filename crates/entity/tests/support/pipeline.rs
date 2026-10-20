@@ -1,5 +1,5 @@
 //! The steps-facet `Pipeline` entity, shared by `steps.rs` (scenarios) and
-//! `steps_swarm.rs` (the sweep), facets §4.6.
+//! `steps_swarm.rs` (the sweep), facets §5.6.
 //!
 //! A self-driving re-entrant workflow: fetch → (sleep) → double → `Finished`, the
 //! reference shape a linear DSL would generate. Two things about it are load-
@@ -230,7 +230,7 @@ impl<S: EntitySystem> Pipeline<S> {
         }));
     }
 
-    /// The re-entrant workflow body (spec facets §4.6): re-run after every commit, it
+    /// The re-entrant workflow body (spec facets §5.6): re-run after every commit, it
     /// resolves completed steps from the memo and drives the first incomplete one.
     fn drive(&self, state: &PipelineState, ctx: &EntityCtx<Self>) -> Vec<PipelineEvent> {
         if state.finished.is_some() {
@@ -294,7 +294,7 @@ impl<S: EntitySystem> Pipeline<S> {
         self.run_effect(ctx, StepDone::new(STEP_DOUBLE, &(value * 2)));
     }
 
-    /// The off-command-path half of a step (facets §4.6): take `latency`, then self-`tell`
+    /// The off-command-path half of a step (facets §5.6): take `latency`, then self-`tell`
     /// the result back. A `tell` that the faults refuse is simply a step that did
     /// not resolve: the next drive re-launches it.
     fn run_effect(&self, ctx: &EntityCtx<Self>, done: StepDone) {
@@ -335,7 +335,7 @@ impl<S: EntitySystem> Entity for Pipeline<S> {
         self.eph.lock().unwrap().guard.reset();
         // Regression net: activation has no command stage armed, so this read
         // must answer from the committed form rather than panic about command
-        // scope (facets §4.6).
+        // scope (facets §5.6).
         let _ = ctx.steps().is_done(STEP_FETCH);
         // Resume an in-flight workflow after a (re)activation, and start one on the
         // first, so the workflow needs no message of its own to begin.

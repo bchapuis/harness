@@ -1,4 +1,4 @@
-//! The machine entity under the cluster fault swarm (machine §6; entity §11).
+//! The machine entity under the cluster fault swarm (machine §9; entity §10).
 //!
 //! `tests/machine_sim.rs` proves the lifecycle on the `Local` tier; this file
 //! hosts machines on the leader-based clustered system and sweeps seeds while
@@ -53,7 +53,7 @@ use machine_entity::fake::FakeRuntimeProvider;
 
 type ClusterMachine = Machine<SimNode>;
 
-/// The front-door member stand-in (machine §2.5): one per node; a node crash
+/// The front-door member stand-in (machine §5.1): one per node; a node crash
 /// kills it, and the machines watching it fold `Detached { FrontDoorLost }`.
 #[derive(Default)]
 struct DoorStub;
@@ -195,7 +195,7 @@ impl ClusterWorkload for MachineSwarm {
 
             // Cleanup: unlike the disk/sql swarm entities, an *attached* machine
             // never goes quiet; the checkpoint alarm chains by design
-            // (machine §4), and a faulted `Detach` can leak an attachment. So
+            // (machine §6), and a faulted `Detach` can leak an attachment. So
             // the drive ends by outlasting the bounded nemesis, healing
             // whatever it left torn, and detaching every surviving attachment,
             // letting each machine run its final capture and consume its

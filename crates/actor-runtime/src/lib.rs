@@ -9,12 +9,12 @@
 //! seams deterministically.
 //!
 //! - [`TokioClock`], [`OsEntropy`], [`TokioSpawner`]: the [`Clock`],
-//!   [`Entropy`], and [`Spawner`] of the host environment (spec §2.12.1).
-//! - [`TcpTransport`]: the [`Transport`] (spec §2.13), over TCP with an optional
+//!   [`Entropy`], and [`Spawner`] of the host environment (spec §11.1).
+//! - [`TcpTransport`]: the [`Transport`] (spec cluster §4), over TCP with an optional
 //!   mutual-TLS association ([`Encryption`], [`TlsConfig`]), a cluster secret,
-//!   and a node allowlist (spec §9).
+//!   and a node allowlist (spec cluster §11).
 //! - [`FileRaftWAL`]: the `RaftWAL` of the leader-based control plane, on the
-//!   local filesystem (spec §6.4.3).
+//!   local filesystem (spec cluster §5.4.3).
 //!
 //! [`join()`] and [`depart`] are the composed bring-up and stop of one
 //! production node, [`TcpCluster`] its type.
@@ -106,7 +106,7 @@
 //! [`Transport`]: actor_cluster::Transport
 //! [`ClusterSystem`]: actor_cluster::ClusterSystem
 
-// This crate IS the host seam (spec §2.12.1, §2.12.2): the one place allowed to read
+// This crate IS the host seam (spec §11.1, §11): the one place allowed to read
 // the wall clock, spawn OS/tokio tasks, and seed from the OS. The workspace
 // `clippy.toml` forbids those host APIs everywhere else to keep the simulation
 // build deterministic; this allow is the determinism boundary.

@@ -1,4 +1,4 @@
-//! Conformance: determinism harness (spec §2.12.2); the *event stream* is
+//! Conformance: determinism harness (spec §11); the *event stream* is
 //! byte-identical for a fixed seed, and `run_for` stops cleanly at its bound
 //! even with perpetual work outstanding. Also covers the deterministic
 //! executor's seed-driven replay (timers firing in deadline order, virtual time
@@ -50,7 +50,7 @@ use serde::Serialize;
 use support::Greet;
 use support::Greeter;
 
-// === Event-stream determinism harness (spec §2.12.2) ============================
+// === Event-stream determinism harness (spec §11) ============================
 
 /// Run a small workload under a recorded single-node system and return its event
 /// stream.
@@ -94,7 +94,7 @@ fn run_for_stops_at_the_time_bound_with_work_outstanding() {
 }
 
 // === Deterministic executor: seed replay, timer order, virtual time ==========
-// (spec §2.12.2): the deterministic executor reproduces runs from a seed, fires
+// (spec §11): the deterministic executor reproduces runs from a seed, fires
 // timers in deadline order, and advances virtual time for free.
 
 /// A workload whose interleaving depends on both scheduling and application
@@ -124,7 +124,7 @@ fn run_workload(seed: u64) -> Vec<String> {
 
 #[test]
 fn same_seed_reproduces_run() {
-    // Byte-identical results from the same seed (spec §2.12.2 #1).
+    // Byte-identical results from the same seed (spec §11 #1).
     assert_eq!(run_workload(42), run_workload(42));
     assert_eq!(run_workload(7), run_workload(7));
 }
@@ -157,7 +157,7 @@ fn timers_fire_in_deadline_order() {
 fn sleep_advances_virtual_time() {
     let sim = Simulation::new(0);
     let clock = sim.clock();
-    // An hour of logical time, paid for in zero wall-clock time (spec §2.12.2 #2).
+    // An hour of logical time, paid for in zero wall-clock time (spec §11 #2).
     let elapsed = sim.block_on(async move {
         let start = clock.now();
         clock.sleep(Duration::from_secs(3600)).await;
@@ -198,10 +198,10 @@ fn timeout_passes_through_fast_future() {
     assert_eq!(res, Ok(7));
 }
 
-// === Event-stream reproducibility over the real system (spec §2.12.2 #1) =======
+// === Event-stream reproducibility over the real system (spec §11 #1) =======
 //
 // A workload is run twice under one seed and the two recorded *event streams*
-// (spec §2.7) must be byte-identical; swept across many seeds, for both a
+// (spec §3.6) must be byte-identical; swept across many seeds, for both a
 // single-node and a multi-node-under-faults workload. A `negative` test then
 // proves the check has teeth: a workload with a deliberate determinism leak
 // (ambient state outside the seed) is caught, with the first divergence
@@ -386,8 +386,8 @@ fn cluster_one_seed_replays_identically() {
 /// latency and stale reads) while also discovering and calling. This exercises
 /// registry mode's *new* deterministic state (registry revisions, the sync
 /// loop, and the `MemberDraining`/`MemberResumed` event ordering), so the
-/// reproducibility check has something mode-specific to pin (spec §6.4.2,
-/// §2.12.2).
+/// reproducibility check has something mode-specific to pin (spec cluster §5.4.2,
+/// actor §11).
 struct RegistryChurn {
     nodes: usize,
     rounds: u64,
@@ -472,7 +472,7 @@ fn registry_mode_event_stream_is_byte_identical_across_seeds() {
 /// the nemesis crashes and partitions nodes, forcing elections mid-transition.
 /// This pins leader mode's *new* deterministic state: election timers and
 /// jitter, log replication, commit-index stamps, and `LeaderElected` ordering
-/// (spec §6.4.3, §2.12.2); the highest-risk determinism surface of the mode.
+/// (spec cluster §5.4.3, actor §11); the highest-risk determinism surface of the mode.
 struct LeaderChurn {
     nodes: usize,
     rounds: u64,
@@ -535,7 +535,7 @@ impl ClusterWorkload for LeaderChurn {
 /// Leader-mode churn with a voter **restarting** every other round: the
 /// restart seam (abrupt stop, storage reload, fresh loops drawing from the
 /// shared entropy stream) is itself part of the deterministic surface and must
-/// replay byte-for-byte (spec §2.12.2).
+/// replay byte-for-byte (spec §11).
 struct RestartReplay {
     nodes: usize,
     rounds: u64,
@@ -615,7 +615,7 @@ fn leader_mode_event_stream_is_byte_identical_across_seeds() {
 // --- Negative: a determinism leak is caught -----------------------------------
 
 /// Process-global state, *outside* the seed: the kind of ambient nondeterminism
-/// (a wall-clock read, a non-seeded RNG, `HashMap` order) §2.12.2 #3 forbids.
+/// (a wall-clock read, a non-seeded RNG, `HashMap` order) §11 #3 forbids.
 static RUNS: AtomicUsize = AtomicUsize::new(0);
 
 /// A workload that consults ambient state to decide how much traffic to drive,
@@ -651,7 +651,7 @@ fn the_checker_catches_a_determinism_leak() {
     assert_ne!(divergence.left_len, divergence.right_len);
 }
 
-// --- Cluster utilities (utilities spec §2.1–§2.3, core §2.12.2) ----------------------
+// --- Cluster utilities (utilities spec §4.1–§4.2, core §11) ----------------------
 
 /// The singleton's handoff message; delivered locally by the manager, so it
 /// needs no `register` entry.
@@ -674,8 +674,8 @@ const UTILITIES_SINGLETON: &str = "repro-singleton";
 /// A workload over the cluster utilities, pinning *their* new deterministic
 /// state: the singleton manager's tick loop and `SingletonStarted`/`Stopped`
 /// event ordering as anchors move under the nemesis, the router's seeded
-/// `Random` draws, and rendezvous selection (utilities spec §2.1–§2.3). Like every
-/// utility, these must reproduce byte-for-byte from the seed (core §2.12.2 #1).
+/// `Random` draws, and rendezvous selection (utilities spec §4.1–§4.2). Like every
+/// utility, these must reproduce byte-for-byte from the seed (core §11 #1).
 struct UtilitiesChurn {
     nodes: usize,
     rounds: u64,

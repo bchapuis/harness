@@ -1,4 +1,4 @@
-//! The workspace facet under the cluster fault swarm (spec facets §4.1, entity §11; V&V
+//! The workspace facet under the cluster fault swarm (spec facets §5.1, entity §10; V&V
 //! checklist #4, #7, #8).
 //!
 //! `tests/ws_clustered.rs` drives the workspace through *scripted* faults (one
@@ -6,8 +6,8 @@
 //! write/read/overwrite traffic across many seeds while a seeded nemesis injects
 //! partitions, crashes, heals, loss, duplication, and delay (docs/simulation-testing.md),
 //! so delta records on the record quorum and checkpoint chunks on the blob
-//! quorum (storage §9) are exercised together under the full fault matrix. A
-//! [`Checker`] watches the §10 event stream live.
+//! quorum (storage §10) are exercised together under the full fault matrix. A
+//! [`Checker`] watches the §11 event stream live.
 //!
 //! - **Read integrity under faults (#4, the safety property).** Each client owns
 //!   a private path subtree, so no cross-client overwrite races; a read of a
@@ -95,7 +95,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
         &mut self,
         ctx: &EntityCtx<Self>,
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
-        // Root-driven blob repair off the activation path (storage §9 `repair_facets`),
+        // Root-driven blob repair off the activation path (storage §10 `repair_facets`),
         // as the agent runtime does, so the swarm exercises repair under faults too.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
@@ -184,13 +184,13 @@ fn content(n: u64) -> Vec<u8> {
 ///
 /// A committed `Put` pins the value. A `Put` whose outcome was **ambiguous** does
 /// not: `Unavailable` means the quorum was not observed, not that the record was
-/// refused (storage §4, §10); a replica minority may hold it, and the next
+/// refused (storage §5, §11); a replica minority may hold it, and the next
 /// activation's quorum recovery can find it on a majority and adopt it. So an
 /// ambiguous write's bytes are admissible from then on, and the check is that a
 /// read returns *some value this client wrote and nothing has superseded*.
 ///
 /// Reads never narrow the set: the read path is read-your-leader, not
-/// linearizable (§6), so a deposed-but-unfenced activation may serve an older
+/// linearizable (§7), so a deposed-but-unfenced activation may serve an older
 /// admissible value after a newer one was seen.
 #[derive(Default)]
 struct PathState {
@@ -403,10 +403,10 @@ impl ClusterWorkload for WsSwarm {
                                 Ok(Ok(_)) => state.committed(bytes),
                                 // `NotLeader` survived the bounded redirect: the
                                 // append was refused before any store, and a fenced
-                                // one reached no quorum either (§5, storage §5), so it
+                                // one reached no quorum either (§6, storage §6), so it
                                 // provably did not commit and this path is unchanged.
                                 Err(EntityError::NotLeader(_)) => {}
-                                // Ambiguous (storage §4, §10): the record may already sit
+                                // Ambiguous (storage §5, §11): the record may already sit
                                 // on a replica minority and be adopted by a later
                                 // activation's quorum recovery. Reading it back then
                                 // is correct, not stale.

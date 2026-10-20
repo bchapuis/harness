@@ -1,8 +1,8 @@
-//! The wire protocol: frames exchanged over an association (spec §2.14).
+//! The wire protocol: frames exchanged over an association (spec cluster §9.1).
 //!
 //! This is the vocabulary every subsystem speaks across the network: actor
 //! envelopes and replies, SWIM probes, death-watch, receptionist replication,
-//! and Raft consensus traffic (leader-based mode, spec §6.4.3). It references
+//! and Raft consensus traffic (leader-based mode, spec cluster §5.4.3). It references
 //! domain types (e.g. [`MemberDigest`]); the
 //! [`Transport`](crate::Transport) that carries it does not.
 
@@ -18,7 +18,7 @@ use crate::membership::MemberDigest;
 use crate::raft::GroupId;
 use crate::raft::RaftMessage;
 
-/// The wire version this build speaks (spec §2.14, compatibility spec §4).
+/// The wire version this build speaks (spec cluster §9.1, compatibility spec §4).
 ///
 /// It sits with the protocol rather than with a transport because it describes
 /// the **frames**, not the carrier. Both transports in the tree (the TCP one and
@@ -84,7 +84,7 @@ mod reply_bytes {
 }
 
 /// A correlation id pairing a request with its reply on an association (spec
-/// §2.14).
+/// cluster §9.1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct CallId(pub u64);
 
@@ -95,7 +95,7 @@ impl From<u64> for CallId {
 }
 
 /// One receptionist registration: an actor registered under `key` by `origin`
-/// (spec §2.6). Carried in bulk by [`Frame::ReceptionistSync`] for anti-entropy.
+/// (spec §3.7). Carried in bulk by [`Frame::ReceptionistSync`] for anti-entropy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceptionistEntry {
     pub key: String,
@@ -103,9 +103,9 @@ pub struct ReceptionistEntry {
     pub actor: ActorId,
 }
 
-/// A frame exchanged over an association (spec §2.14). The message `payload` is
+/// A frame exchanged over an association (spec cluster §9.1). The message `payload` is
 /// already codec-encoded; under simulation the frame itself travels in-memory,
-/// so only the payload exercises the wire codec (spec §2.12.2). In production the
+/// so only the payload exercises the wire codec (spec §11). In production the
 /// whole frame is codec-encoded onto the wire, hence `Serialize`/`Deserialize`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Frame {
@@ -136,22 +136,22 @@ pub enum Frame {
         #[serde(with = "reply_bytes")]
         outcome: ReplyResult,
     },
-    /// A SWIM failure-detector probe (spec §7). Carries the sender's
+    /// A SWIM failure-detector probe (spec cluster §6). Carries the sender's
     /// `incarnation` (direct liveness evidence) and a gossip `digest` piggybacked
-    /// to disseminate membership (spec §6.2, §7 #6); `seq` correlates the `Ack`.
+    /// to disseminate membership (spec cluster §5.2, §6 #6); `seq` correlates the `Ack`.
     Ping {
         seq: u64,
         incarnation: u64,
         digest: Vec<MemberDigest>,
     },
     /// The reply to a `Ping`, echoing its `seq` and carrying the sender's own
-    /// incarnation and gossip digest (spec §7).
+    /// incarnation and gossip digest (spec cluster §6).
     Ack {
         seq: u64,
         incarnation: u64,
         digest: Vec<MemberDigest>,
     },
-    /// A request to indirectly probe `target` on the sender's behalf (spec §7
+    /// A request to indirectly probe `target` on the sender's behalf (spec cluster §6
     /// #2): the helper pings `target` and, on success, returns an `IndirectAck`
     /// echoing `seq`. Carries the requester's `incarnation` and a gossip `digest`.
     PingReq {
@@ -160,7 +160,7 @@ pub enum Frame {
         incarnation: u64,
         digest: Vec<MemberDigest>,
     },
-    /// A helper's relay that `target` answered an indirect probe (spec §7 #2):
+    /// A helper's relay that `target` answered an indirect probe (spec cluster §6 #2):
     /// it echoes the requester's `seq` and carries the `target`'s `incarnation`
     /// (so the requester can clear its suspicion) plus a gossip `digest`.
     IndirectAck {
@@ -169,20 +169,20 @@ pub enum Frame {
         incarnation: u64,
         digest: Vec<MemberDigest>,
     },
-    /// Register cross-node death watch (spec §2.5): `watcher` (on the sender's
+    /// Register cross-node death watch (spec §10): `watcher` (on the sender's
     /// node) wants to be notified when `target` (on this frame's destination
     /// node) terminates.
     Watch { target: ActorId, watcher: ActorId },
-    /// Cancel a cross-node death watch (spec §2.5).
+    /// Cancel a cross-node death watch (spec §10).
     Unwatch { target: ActorId, watcher: ActorId },
-    /// Notify a remote `watcher` that `target` has terminated (spec §2.5). Sent
+    /// Notify a remote `watcher` that `target` has terminated (spec §10). Sent
     /// from the target's node to the watcher's node.
     Terminated {
         target: ActorId,
         watcher: ActorId,
         reason: TerminationReason,
     },
-    /// A receptionist registration replicated from `origin` (spec §2.6):
+    /// A receptionist registration replicated from `origin` (spec §3.7):
     /// broadcast on change, when a registration first happens.
     Receptionist {
         key: String,
@@ -190,11 +190,11 @@ pub enum Frame {
         actor: ActorId,
     },
     /// A node's full receptionist registry, pushed periodically to a random peer
-    /// for anti-entropy (spec §2.6): it reconciles registrations a node missed
+    /// for anti-entropy (spec §3.7): it reconciles registrations a node missed
     /// (because it joined late or a broadcast was lost) without the registrant
     /// having to re-broadcast.
     ReceptionistSync { entries: Vec<ReceptionistEntry> },
-    /// One Raft engine message for `group` (leader-based mode, spec §6.4.3).
+    /// One Raft engine message for `group` (leader-based mode, spec cluster §5.4.3).
     ///
     /// The engine's vocabulary is [`RaftMessage`], and this carries it as the engine
     /// defines it rather than restating each message as a frame of its own: one
@@ -206,14 +206,14 @@ pub enum Frame {
         message: RaftMessage,
     },
     /// Many groups' heartbeats in one frame, from one leader to one follower
-    /// (spec §6.4.3).
+    /// (spec cluster §5.4.3).
     ///
     /// A heartbeat is an empty [`RaftMessage::Append`], and a node that
     /// leads `G` groups sends one to each of `R-1` followers every heartbeat
     /// interval. Sent individually that is `G × (R-1)` frames (each its own
     /// serialization, its own transport send) repeated several times a second, for
     /// traffic that carries no data at all. Since entity runs one Raft group per
-    /// shard (storage §3.2) and shard count is the elasticity knob (storage §7), `G`
+    /// shard (storage §4.2) and shard count is the elasticity knob (storage §8), `G`
     /// grows with the cluster, and this becomes the ceiling on how far a node can be
     /// packed long before storage or CPU does.
     ///
@@ -224,7 +224,7 @@ pub enum Frame {
     /// The replies to a [`RaftHeartbeats`](Frame::RaftHeartbeats), batched the same
     /// way and for the same reason: one reply per beat would undo half the saving.
     RaftHeartbeatReplies { replies: Vec<RaftBeatReply> },
-    /// An application command offered to `group`'s leader (spec §6.4.3 item 1):
+    /// An application command offered to `group`'s leader (spec cluster §5.4.3 item 1):
     /// a non-leader node sends it to a voter, which forwards it to its leader.
     /// The command is the opaque app payload (the engine's `EntryPayload::App`
     /// bytes, for the control group, an encoded `MembershipCommand`).
@@ -258,7 +258,7 @@ pub struct RaftBeat {
 }
 
 impl RaftBeat {
-    /// The batching lift (spec §6.4.3): `group`'s **empty** [`RaftMessage::Append`]
+    /// The batching lift (spec cluster §5.4.3): `group`'s **empty** [`RaftMessage::Append`]
     /// (a pure heartbeat) reduced to its beat; `None` for anything else,
     /// including an append that carries entries (real replication, never
     /// batched). Taken on the engine's output before framing, so the batch is

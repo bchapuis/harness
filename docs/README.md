@@ -4,11 +4,12 @@ Start at the root [README](../README.md) for what the system is and how to run i
 
 ## Specifications
 
-Each spec is the **contract** of one component: what it promises at its seams, whatever the implementation. Mechanism (how a crate meets the contract) is in the crate's rustdoc, private modules included (`cargo doc --workspace --no-deps --document-private-items`); which suites verify each invariant is in the crate's Rust catalogue beside its tests. Every spec has the same shape: Scope, Seams (one subsection per seam it owns), the semantics an independent implementation must reproduce, Invariants, and Deferred. They are normative (RFC 2119) and cite the ones beneath them by a short prefix (`actor §N`, `storage §N`, and so on).
+Each spec is the **contract** of one component: what it promises at its seams, whatever the implementation. Mechanism (how a crate meets the contract) is in the crate's rustdoc, private modules included (`cargo doc --workspace --no-deps --document-private-items`); which suites verify each invariant is in the crate's Rust catalogue beside its tests; what the implementation does not yet meet is in [status](status.md). The specs are normative (RFC 2119) and cite the ones beneath them by a short prefix (`actor §N`, `cluster §N`, `storage §N`, and so on).
 
 | | Spec | Owns | Crates | Invariants |
 |---|---|---|---|---|
-| substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, addressing, transport, membership, failure detection, consensus, supervision, discovery, the host environment | `actor-core`, `actor-serialization`, `actor-cluster`, `actor-runtime`, `actor-simulation` | #1–#22 |
+| substrate | [distributed-actor-spec](distributed-actor-spec.md) | the actor model: actors, messages, references, the actor system, the codec, the host environment, the event stream, the receptionist, supervision, death watch, determinism | `actor-core`, `actor-serialization`, `actor-simulation` | #1–#22 |
+| | [cluster-spec](cluster-spec.md) | the clustered actor system: transport, associations, membership and its four control planes, failure detection, consensus groups, authorization | `actor-cluster`, `actor-runtime` | defines a subset of #1–#22 |
 | | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | `actor-cluster` | U1–U2 |
 | storage | [compatibility-spec](compatibility-spec.md) | format stamps, the format registry, refusal by name | `compat` | V1–V3 |
 | durable objects | [entity-spec](entity-spec.md) | entities: the model, the gates, activation, lifecycle, observation, and the whole E catalogue | `entity` | E1–E21 |
@@ -21,6 +22,18 @@ Each spec is the **contract** of one component: what it promises at its seams, w
 | edge | [edge-spec](edge-spec.md) | the HTTP/SSE gateway, bearer-token identity, principal-scoped sessions, the tenancy directory | `agent-gateway`, `tenancy` | stated as obligations, no catalogue |
 
 The write-ahead log (`wal`) is specified by its own crate docs, L1–L4 included: its only callers are file-backed implementations of two seams (`EntityStore`, `RaftWAL`), and nothing else reads its files. Its format is registered in compatibility §4.
+
+### How a spec is written
+
+A spec is the contract of a role, not a description of a crate. Five rules decide what belongs in one:
+
+1. **Subjects are roles, objects are observables.** A requirement binds a role (a host, a journal, a caller, a peer, a provider, a deployment) and is stated in what its counterparts can observe: operations and their results, messages, errors, events, ordering, bounds, bytes on the wire or at rest. It never names a module, a helper type, an algorithm, or internal state.
+2. **A backticked name is registered or a plug-point item.** In backticks go the interop constants a spec registers (manifests, frames, formats, magics, tags, routes, codes, event kinds) and the items of a plug point's signature. Every other concept is a term the spec defines once, in its Model section, and then writes in plain prose.
+3. **Rust signatures only for plug points.** A **plug point** (a trait a deployment or third party implements or chooses, [architecture](architecture.md) §3) carries its signature in one fence in its seam subsection, async methods written `async fn`; types a fence names are defined in rustdoc. A **boundary** (one implementation) is specified by its abstract operations and their obligations.
+4. **Each requirement once.** A requirement lives in the spec that owns the behavior, and every other spec cites it. Determinism is stated once (actor §11), as obligations and as the deterministic profile.
+5. **Contract only.** No mechanism (algorithms, tunables, layouts beyond registered formats, stock implementations, configuration fields, the language's mechanics), no rationale (a requirement that needs its reason states the property the reason protects), no verification apparatus, no status, and no history.
+
+Every spec has the same skeleton, in this order: **Scope** (what the component is, what it builds on, what builds on it, its non-goals, and its conformance classes: the roles that can claim conformance and the sections binding each); **Model** (each term and abstraction, defined once); **Seams** (one subsection per seam it owns: the roles on each side, plug point or boundary, the operations, the obligations on each side); the **semantics**, one section per behavior an independent implementation must reproduce; **Registries**, when it owns interop constants; **Invariants**, whose identifiers are stable; and **Security considerations**.
 
 ## Assumptions
 
@@ -46,7 +59,7 @@ The write-ahead log (`wal`) is specified by its own crate docs, L1–L4 included
 
 ## Unfinished work
 
-Unfinished work is **declared in the spec that owns it**, one line each, where a reader sees its cost and blast radius, not left as a comment in the code. `crates/` has no `todo!()` or `unimplemented!()`, and every `#[ignore]` or `TODO`/`FIXME`/`HACK` hit is in the `spec` crate, where the word is the subject. To see what is left, read each spec's Deferred section: [actor §11](distributed-actor-spec.md), [utilities §5](cluster-utilities-spec.md), [entity §13](entity-spec.md), [storage §12](entity-storage-spec.md), [facets §6](entity-facets-spec.md), [workflow §9](workflow-spec.md), [agent §11](agent-spec.md), [sandbox §7](sandbox-spec.md), [machine §7](machine-spec.md), [edge §4](edge-spec.md); and [simulation-testing](simulation-testing.md), *Where the sweeps do not yet reach*: what the specs mandate that no sweep asserts.
+[status](status.md) is the one place unfinished work is declared, one line per item under the spec it concerns, where a reader sees its cost and blast radius; the specs themselves state only the contract. `crates/` has no `todo!()` or `unimplemented!()`, and every `#[ignore]` or `TODO`/`FIXME`/`HACK` hit is in the `spec` crate, where the word is the subject. What the specs mandate that no sweep asserts is in [simulation-testing](simulation-testing.md), *Where the sweeps do not yet reach*.
 
 ## Elsewhere in the tree
 

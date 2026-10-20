@@ -4,11 +4,11 @@
 //! that joins this transport as a non-voting member and addresses the entities
 //! directly (specified by `docs/edge-spec.md`).
 //!
-//! Every node is identical (agent spec §5.1): same kinds, same seams. A
+//! Every node is identical (agent spec §6.2): same kinds, same seams. A
 //! session is an entity, so durability, placement, and the single-writer fence are
 //! entity's: each node hosts every kind's entity type, joining its shards' Raft
-//! groups and registering its gateway (§2.3). Membership is a static roster with
-//! the SWIM detector observe-only (core spec §6.4.1): reachability drives the
+//! groups and registering its gateway (§3.3). Membership is a static roster with
+//! the SWIM detector observe-only (cluster spec §5.4.1): reachability drives the
 //! shard map's reallocation and the gateway gossip nodes route activations
 //! through. A `--client` (the gateway) is admitted to that membership so the same
 //! gossip reaches it, but never to the Raft roster, so it never votes or hosts.
@@ -55,7 +55,7 @@ use tenancy::Directory;
 use crate::http::HttpsPost;
 
 /// Which sandbox provider the node runs. Every mode's workspace is the agent
-/// entity's own facet directory (facets §4.1): tool-call deltas are captured
+/// entity's own facet directory (facets §5.1): tool-call deltas are captured
 /// into the session journal, so the workspace survives hibernation, migration,
 /// and node loss in every mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub enum SandboxMode {
     /// `agent-sandbox`'s container-backed `Native` tier: `shell` runs inside
     /// a per-session OCI container (the facet's workspace directory
     /// bind-mounted, no network; shared-kernel confinement, sandbox spec
-    /// §4's development fallback). Each variant carries exactly the
+    /// §5's development fallback). Each variant carries exactly the
     /// configuration its mode needs, so a flag for the wrong mode is a parse
     /// error rather than a silently ignored field.
     Docker {
@@ -74,7 +74,7 @@ pub enum SandboxMode {
     },
     /// `agent-sandbox`'s microVM-backed `Native` tier: `shell` runs inside a
     /// per-session Firecracker VM (the workspace synced over vsock, no network
-    /// device; hardware-virtualization confinement, sandbox spec §4.4's
+    /// device; hardware-virtualization confinement, sandbox spec §5.4's
     /// stronger grade; Linux with `/dev/kvm` only).
     Firecracker {
         /// The firecracker executable.
@@ -104,7 +104,7 @@ pub struct NodeOptions {
     pub nodes: u64,
     /// This node's own data directory (journal + workspaces). Each node keeps
     /// its own: the journal replicates over the transport (a quorum append per
-    /// entity, §5.2), so nodes never share a directory or a filesystem.
+    /// entity, §7.1), so nodes never share a directory or a filesystem.
     pub data: PathBuf,
     /// The local interface the transport port binds. `0.0.0.0` binds every
     /// interface, which is what a container or pod needs; the `127.0.0.1`
@@ -127,7 +127,7 @@ pub struct NodeOptions {
     pub port_base: u16,
     /// The Anthropic model id every kind runs on.
     pub model: String,
-    /// The cluster secret peers must present (core spec §9).
+    /// The cluster secret peers must present (core spec §14).
     pub secret: String,
     /// The Messages API base; `http://…` points at a local fake.
     pub api_url: String,
@@ -160,7 +160,7 @@ impl Default for NodeOptions {
 }
 
 /// Boot the node and host its entities until SIGTERM or SIGINT, then stop
-/// gracefully: hand off every shard this node leads (storage spec §5.3),
+/// gracefully: hand off every shard this node leads (storage spec §6.3),
 /// announce the departure, and release the transport.
 pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
@@ -179,7 +179,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // One codec value for this node, used in all three places that need to agree:
     // the transport's framing, the message layer entity encodes an entity's records
     // and snapshots with, and the entity store's stamp naming that codec (storage
-    // §2.2). The store refuses to open under a codec other than the one that wrote
+    // §3.2). The store refuses to open under a codec other than the one that wrote
     // it, so a stamp taken from a *different* value than the message layer's would
     // be worse than none: it would enforce agreement with the wrong thing.
     let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
@@ -228,7 +228,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    // One durable node under --data (storage §2.2, entity §10): the store the session kinds
+    // One durable node under --data (storage §3.2, entity §3.4): the store the session kinds
     // and the tenancy directory share, the I/O pool, and the metrics registry.
     let (entity_node, entity_store) =
         EntityNode::durable(system.clone(), &opts.data);
@@ -244,7 +244,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             agent_sandbox::TieredSandboxes::new()
                 .with_container_cli(cli.clone())
                 // The hermetic JS surface, so `run_js` runs without any
-                // language runtime in the container (sandbox spec §4.2).
+                // language runtime in the container (sandbox spec §5.2).
                 .with_quickjs(),
             Some(agent::SandboxProfile::image(image)),
         ),
@@ -302,7 +302,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     Ok(())
 }
 
-/// The cluster-wide kind map (agent spec §5.1). One pure function of the
+/// The cluster-wide kind map (agent spec §6.2). One pure function of the
 /// node options that shape kinds (`--model`, `--sandbox`, `--sandbox-image`)
 /// and the tools the configured provider answers: every node must register
 /// byte-identical kinds (the digest is pinned by `SessionCreated`), so all
@@ -329,12 +329,12 @@ fn kinds(
             None => kind,
         }
     };
-    // Durable entity storage under --data (§5.3): a session is an entity, so its
+    // Durable entity storage under --data (§7.2): a session is an entity, so its
     // journal must outlive a process restart for a cold-restarted cluster to recover
     // the conversation. Without this, each node's entity store is in-memory and a full
     // restart loses every session (the records do NOT ride the Raft log: that log
-    // only carries leader election and the shard map, §5.1). `data_dir` places the
-    // workspace facet's per-session directory materializations (facets §4.1) under
+    // only carries leader election and the shard map, §6.2). `data_dir` places the
+    // workspace facet's per-session directory materializations (facets §5.1) under
     // --data as well.
     let data_dir = opts.data.join("workspaces");
     let entity = move |kind: Kind| -> Kind {
@@ -393,7 +393,7 @@ fn harness_config() -> HarnessConfig {
     }
 }
 
-/// The observability stream on stderr (agent spec §2.8): membership and
+/// The observability stream on stderr (agent spec §10.1): membership and
 /// reachability transitions, and every agent event. Dispatch-level core events
 /// are swallowed as noise.
 struct StderrEvents {

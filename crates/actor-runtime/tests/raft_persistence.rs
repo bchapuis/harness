@@ -1,4 +1,4 @@
-//! Integration: durable Raft state across a real node restart (spec §6.4.3
+//! Integration: durable Raft state across a real node restart (spec cluster §5.4.3
 //! item 2).
 //!
 //! A three-voter leader-mode cluster runs over real TCP on loopback, with each
@@ -134,7 +134,7 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // The committed transition is on B's disk: a real term and the Drain entry,
-    // exactly what §6.4.3 item 2 requires to survive.
+    // exactly what cluster §5.4.3 item 2 requires to survive.
     // Storage is namespaced per (group, node); the membership log is the control
     // group's.
     let b_dir = data_dir

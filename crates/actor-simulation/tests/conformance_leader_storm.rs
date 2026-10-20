@@ -1,5 +1,5 @@
 //! Raft control-plane safety under a **rolling-partition election storm** (spec
-//! §6.4.3, invariants #14, #15, #22), under deterministic simulation (§2.12.2).
+//! cluster §5.4.3, invariants #14, #15, #22), under deterministic simulation (§11).
 //!
 //! `conformance_leader.rs` pins the leader-based control plane through *scripted,
 //! single-shot* faults: one election, one failover, one minority partition. That
@@ -11,10 +11,10 @@
 //!
 //! - **State Machine Safety / log matching (#22, "applied in log order").** No two
 //!   voters ever apply a different `(status, stamp)` for any member: the stamp is
-//!   the commit index (the authority stamp, §6.2), so disagreement would mean the
+//!   the commit index (the authority stamp, cluster §5.2), so disagreement would mean the
 //!   committed logs forked. Asserted at convergence after the storm.
 //! - **Election safety (#22).** Across every term the storm induces, at most one
-//!   leader is ever elected per term (checked over the §2.7 `LeaderElected` stream).
+//!   leader is ever elected per term (checked over the §3.6 `LeaderElected` stream).
 //! - **Convergence (#14).** Once the partitions heal, every `up` member converges
 //!   on one membership view: voters by log replication, the non-voter by gossip.
 //! - **`down` is terminal / no spurious down (#15, #16).** Under the conservative
@@ -193,7 +193,7 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
 
             // Teeth: the storm must have genuinely churned leadership AND committed
             // entries through that churn; otherwise the agreement check above compared
-            // a static, never-contested log and proved nothing. Confirm from the §2.7
+            // a static, never-contested log and proved nothing. Confirm from the §3.6
             // stream that several terms elected leaders and that leadership actually
             // moved between distinct nodes (a real, repeated split-brain).
             let mut distinct_leaders: BTreeSet<NodeId> = BTreeSet::new();
@@ -231,7 +231,7 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
 fn one_leader_per_term_survives_an_election_storm() {
     // Election safety (#22) is a continuous safety property; here it must hold
     // across an election STORM, not a single failover. The rolling partition forces
-    // a new term every round; over the whole §2.7 `LeaderElected` stream, no term in
+    // a new term every round; over the whole §3.6 `LeaderElected` stream, no term in
     // any group may ever name two different leaders. Teeth: assert the term actually
     // advanced well past the start, so this is not a vacuous single-election pass.
     scenario_sweep("leader-storm/election-storm", sweep_seeds(0..8), |seed| {

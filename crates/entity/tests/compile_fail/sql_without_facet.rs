@@ -1,4 +1,4 @@
-//! facets §3 / E10-for-storage: `ctx.sql()` on an entity that does not declare the
+//! facets §4 / E10-for-storage: `ctx.sql()` on an entity that does not declare the
 //! `Sql` facet must not compile; the accessor is gated by the compile-time
 //! containment proof (`G::Facets: HasFacet<Sql, I>`).
 

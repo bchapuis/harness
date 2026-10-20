@@ -1,4 +1,4 @@
-//! The continuous W-checkers over the workflow's event stream (workflow spec §8).
+//! The continuous W-checkers over the workflow's event stream (workflow spec §12).
 //!
 //! One checker, `workflow-cycle`, carrying four of the seven invariants: it is the
 //! grammar of a claim's life. A key is launched (or resolved as orphaned), and
@@ -22,7 +22,7 @@ use entity::EntityName;
 
 use crate::WorkflowEvent;
 
-/// An entity's open claims, per node hosting an activation of it (entity §10).
+/// An entity's open claims, per node hosting an activation of it (entity §11).
 /// Under failover a deposed leader and its successor are two activations of one
 /// entity, and their claims must not be confused.
 type Claims = BTreeMap<NodeId, BTreeSet<String>>;
@@ -33,13 +33,13 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///   activation is a second launch of an effect in flight, which no tick may
 ///   produce. A `Settled` closes an open claim; one with no claim open here must
 ///   at least name a key some activation launched: an outcome of a previous
-///   activation's launch reaching the one that now holds the entity (§3.3), or
+///   activation's launch reaching the one that now holds the entity (§4.3), or
 ///   the workflow settled something nothing ever sent.
 /// - **W5, straggler rejection.** A `Discarded` names a key whose outcome was
 ///   dropped without a record; it must correspond to a launch on the stream, or
 ///   the workflow discarded something it never sent.
 /// - **W7, quiescence.** A `Quiescent` must not be announced while a claim is
-///   open, and on the single-node tier the entity's `Deactivated` (entity §10) must
+///   open, and on the single-node tier the entity's `Deactivated` (entity §11) must
 ///   not arrive while one is: an activation with an effect in flight has not
 ///   settled its work, and hibernating under it would strand the outcome.
 /// - **W2, launch coverage**, in the shape a stream can carry: the `Quiescent`
@@ -47,14 +47,14 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///
 /// What the stream cannot show (that a *backed-off* key is eventually relaunched)
 /// is a scenario assertion rather than a grammar rule, because the liveness is
-/// conditional on the activation surviving (§8 W2). The checker does hold the
+/// conditional on the activation surviving (§12 W2). The checker does hold the
 /// half that is checkable: a `Settled { committed: false }` closes its claim, so
 /// a stranded key shows up as a `Deactivated` with nothing open and the work still
 /// in the fold, which the scenario suites assert against the journal.
 ///
 /// **Two tiers, one rule that differs.** A forced step-down (a leadership move,
 /// quorum loss) is involuntary, ignores `can_hibernate`, and legitimately
-/// abandons its launches (§6); on the stream it is a `Deactivated` with claims open,
+/// abandons its launches (§7); on the stream it is a `Deactivated` with claims open,
 /// exactly the shape of a W7 violation, and entity's event carries no reason that
 /// would tell the two apart. So the checker is built for the tier it watches:
 /// [`strict`](WorkflowCycle::strict) for the single-node suites, where nothing is
@@ -64,7 +64,7 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 /// half still holds.
 pub struct WorkflowCycle {
     /// Whether a `Deactivated` with claims open is a violation (single-node tier)
-    /// or a forced step-down abandoning its launches (clustered tier, §6).
+    /// or a forced step-down abandoning its launches (clustered tier, §7).
     hibernation_is_idle: bool,
     /// Keys currently claimed, per entity and per activation of it: launched and
     /// not yet terminated.
@@ -92,7 +92,7 @@ impl WorkflowCycle {
     }
 
     /// The clustered tier's checker: a `Deactivated` with claims open is read as a
-    /// forced step-down abandoning its launches (§6), and only the `Quiescent`
+    /// forced step-down abandoning its launches (§7), and only the `Quiescent`
     /// half of W7 is held.
     pub fn under_failover() -> WorkflowCycle {
         WorkflowCycle {
@@ -162,7 +162,7 @@ impl Invariant for WorkflowCycle {
     fn forget_node(&mut self, node: NodeId) {
         // Process death: its activations' launches are abandoned, and their
         // outcomes become stragglers at whichever activation next holds each
-        // entity (§6). `seen` is kept, because those stragglers must still be
+        // entity (§7). `seen` is kept, because those stragglers must still be
         // recognized as having had a launch behind them (W5).
         for claims in self.open.values_mut() {
             claims.remove(&node);
@@ -170,8 +170,8 @@ impl Invariant for WorkflowCycle {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // The activation lifecycle is the entity's own (entity §10); the workflow
-        // mints no duplicate of it (§2.8).
+        // The activation lifecycle is the entity's own (entity §11); the workflow
+        // mints no duplicate of it (§10).
         if let Some(entity) = event.as_app::<EntityEvent>() {
             match entity {
                 EntityEvent::Deactivated { node, name } => {
@@ -188,7 +188,7 @@ impl Invariant for WorkflowCycle {
                         ));
                     }
                     // Idle or forced, nothing is owed at deactivation: the next
-                    // activation starts from an empty table (§6).
+                    // activation starts from an empty table (§7).
                     self.clear(*node, name);
                 }
                 EntityEvent::Activated { node, name } => {
@@ -268,7 +268,7 @@ pub fn workflow_invariants() -> Vec<Box<dyn Invariant>> {
 }
 
 /// The core checkers plus the workflow's own, for a clustered sweep where a forced
-/// step-down may abandon launches (§6).
+/// step-down may abandon launches (§7).
 pub fn workflow_invariants_under_failover() -> Vec<Box<dyn Invariant>> {
     let mut v = default_invariants();
     v.push(Box::new(WorkflowCycle::under_failover()));
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn a_settle_that_committed_nothing_still_closes_its_claim() {
         // The reason `Settled` carries `committed` and fires on every settle
-        // (§2.8): an event that fired only on a commit would leave this claim open
+        // (§10): an event that fired only on a commit would leave this claim open
         // forever and W7 could never be closed.
         let mut c = WorkflowCycle::strict();
         c.observe(&launched("k")).unwrap();
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn deactivating_with_a_claim_open_is_a_step_down_under_failover() {
-        // §6: a forced step-down abandons its launches, and entity's `Deactivated`
+        // §7: a forced step-down abandons its launches, and entity's `Deactivated`
         // does not say which kind it was. The clustered checker reads it as the
         // legal kind and starts the next activation from an empty table.
         let mut c = WorkflowCycle::under_failover();
@@ -404,7 +404,7 @@ mod tests {
         assert!(c.observe(&deactivated_on(N1)).is_ok());
         assert!(
             c.observe(&activated_on(N1)).is_ok() && c.observe(&launched("k")).is_ok(),
-            "the successor relaunches the abandoned key as a fresh claim (§3.3)"
+            "the successor relaunches the abandoned key as a fresh claim (§4.3)"
         );
     }
 
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn an_outcome_of_a_previous_activations_launch_may_settle_at_the_successor() {
-        // §3.3: across activations an effect may run more than once, and the
+        // §4.3: across activations an effect may run more than once, and the
         // outcome of the deposed leader's launch may reach the node that now
         // holds the entity. It closes no claim there, but it is not an invention.
         let mut c = WorkflowCycle::under_failover();

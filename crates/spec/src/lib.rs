@@ -117,6 +117,15 @@ pub const DOCUMENTS: &[DocSpec] = &[
         unprefixed: Unprefixed::Own,
         scanned: true,
     },
+    // The clustered actor system: transport, membership, failure detection,
+    // consensus groups, and authorization, on the actor model above.
+    DocSpec {
+        id: "cluster",
+        path: "docs/cluster-spec.md",
+        aliases: &["cluster"],
+        unprefixed: Unprefixed::Own,
+        scanned: true,
+    },
     DocSpec {
         id: "utilities",
         path: "docs/cluster-utilities-spec.md",
@@ -215,6 +224,15 @@ pub const DOCUMENTS: &[DocSpec] = &[
         id: "edge",
         path: "docs/edge-spec.md",
         aliases: &["edge", "multi-tenant-edge"],
+        unprefixed: Unprefixed::Own,
+        scanned: true,
+    },
+    // What the implementation does not yet meet, per spec; it cites every spec with
+    // a prefix, and no spec cites it.
+    DocSpec {
+        id: "status",
+        path: "docs/status.md",
+        aliases: &["status"],
         unprefixed: Unprefixed::Own,
         scanned: true,
     },

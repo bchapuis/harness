@@ -1,4 +1,4 @@
-//! The OpenAI-compatible [`Model`](agent::Model) seam (agent spec §2.1, §2.2): a Chat
+//! The OpenAI-compatible [`Model`](agent::Model) seam (agent spec §3.1, §3.2): a Chat
 //! Completions API client.
 //!
 //! This crate is the single place the Chat Completions protocol exists: the
@@ -6,7 +6,7 @@
 //! taxonomy (OpenAI's `context_length_exceeded` and friends). It is the
 //! sibling of `agent-anthropic`: same seam, a different wire protocol.
 //! Everything that is not protocol (the socket, the key, the
-//! `Clock`/`Entropy` seams, the bounded retry engine, §2.1) is the
+//! `Clock`/`Entropy` seams, the bounded retry engine, §3.1) is the
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
@@ -39,7 +39,7 @@ const COMPLETIONS_PATH: &str = "/v1/chat/completions";
 /// Base URLs of well-known OpenAI-compatible endpoints, for a host to point its
 /// [`HttpPost`](agent::http::HttpPost) at. Each is the origin (plus any provider-specific prefix) that
 /// the protocol's path (`/v1/chat/completions`) appends to; none ends in `/v1`,
-/// because the path already carries it. The base URL is the deployment's to choose (§2.2); these are
+/// because the path already carries it. The base URL is the deployment's to choose (§3.2); these are
 /// convenience data, and self-hosted servers supply their own.
 pub mod base_url {
     /// OpenAI: `https://api.openai.com/v1/chat/completions`.
@@ -76,7 +76,7 @@ impl Protocol for ChatCompletions {
     }
 }
 
-/// The OpenAI-compatible Chat Completions model (agent spec §2.1): the
+/// The OpenAI-compatible Chat Completions model (agent spec §3.1): the
 /// shared shell bound to this crate's protocol.
 pub type OpenAiModel<C, E> = ProtocolModel<ChatCompletions, C, E>;
 
@@ -135,7 +135,7 @@ fn encode_request(req: &ModelRequest) -> Value {
                     "content": content,
                 }));
             }
-            // The workspace-loss notice (§4.4): it answers no CallId, so it
+            // The workspace-loss notice (§5.4): it answers no CallId, so it
             // enters as a user message the agent runtime authors.
             Entry::WorkspaceReset => messages.push(json!({
                 "role": "user",
@@ -170,7 +170,7 @@ fn encode_request(req: &ModelRequest) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Response decoding and the error taxonomy (§2.1)
+// Response decoding and the error taxonomy (§3.1)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -228,7 +228,7 @@ struct ApiErrorBody {
     message: String,
 }
 
-/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§2.1).
+/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§3.1).
 fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
     if response.status == 200 {
         let parsed: ApiResponse = serde_json::from_slice(&response.body)
@@ -277,7 +277,7 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
         500 | 502 | 503 | 529 => ModelError::Overloaded,
         // An over-long prompt is reported as an invalid request; the agent runtime
         // distinguishes it because the run must fail explicitly on it
-        // (§1.1, §2.1). Detection is by code, or by message across the servers
+        // (§1.1, §3.1). Detection is by code, or by message across the servers
         // that omit it: the leakiest part of "compatible".
         400 | 413 if code == "context_length_exceeded" || is_context_message(&detail.message) => {
             ModelError::ContextOverflow

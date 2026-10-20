@@ -1,6 +1,6 @@
-//! What a deployment measures about a node's entities (spec §10).
+//! What a deployment measures about a node's entities (spec §3.4).
 //!
-//! The [`Event`](actor_core::Event) stream (§10) is the *checker's* interface: it
+//! The [`Event`](actor_core::Event) stream (§11) is the *checker's* interface: it
 //! carries one structured record per lifecycle transition so the simulator can assert
 //! invariants over an exact history. That is the wrong shape for production. It emits
 //! per message, its volume scales with traffic, and answering "is commit latency
@@ -20,24 +20,24 @@
 //! unbounded label cardinality, which is the standard way a metrics pipeline falls
 //! over; every metric here is either a counter or a fixed-bucket histogram, keyed by
 //! nothing wider than an entity type. Not by shard: shard count is this substrate's
-//! elasticity knob (storage §7), so a per-shard key is unbounded by design.
+//! elasticity knob (storage §8), so a per-shard key is unbounded by design.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-/// How a commit ended (§5 steps 4–6): the label on every commit measurement.
+/// How a commit ended (§6 steps 4–6): the label on every commit measurement.
 ///
 /// A latency number without this is misleading: a fast `Unavailable` and a fast
 /// `Committed` mean opposite things, and averaging them hides both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitOutcome {
-    /// Durable on a quorum; the entity folded and replied (§5 step 4).
+    /// Durable on a quorum; the entity folded and replied (§6 step 4).
     Committed,
-    /// Leadership moved off this node mid-append (§5 step 5).
+    /// Leadership moved off this node mid-append (§6 step 5).
     NotLeader,
-    /// No quorum, or the commit timed out: the ambiguous outcome (§5 step 6, storage §10).
+    /// No quorum, or the commit timed out: the ambiguous outcome (§6 step 6, storage §11).
     Unavailable,
 }
 
@@ -70,7 +70,7 @@ impl CommitOutcome {
     }
 }
 
-/// The operator-facing measurements an entity node reports (spec §10).
+/// The operator-facing measurements an entity node reports (spec §3.4).
 ///
 /// Implemented for `()` as a no-op, matching [`EventSink`](actor_core::EventSink), so
 /// a system runs with no metrics wired up and pays only a virtual call.
@@ -80,13 +80,13 @@ pub trait EntityMetrics: Send + Sync + 'static {
     /// the latency the caller actually waited and the outcome the caller actually got.
     fn commit(&self, entity_type: &'static str, outcome: CommitOutcome, took: Duration);
 
-    /// One activation rehydrated (storage §8): the quorum head recovery plus snapshot and
+    /// One activation rehydrated (storage §9): the quorum head recovery plus snapshot and
     /// replay. Separate from `commit` because it is the cost of a *cold* access, which
-    /// is what hibernation tuning (§7) trades against memory.
+    /// is what hibernation tuning (§8) trades against memory.
     fn rehydrated(&self, entity_type: &'static str, took: Duration, replayed: u64);
 
     /// An entity activated (`+1`) or deactivated (`-1`) on this node: the resident
-    /// working set (storage §3.2), the thing hibernation is meant to bound.
+    /// working set (storage §4.2), the thing hibernation is meant to bound.
     fn activation_delta(&self, entity_type: &'static str, delta: i64);
 }
 
@@ -101,7 +101,7 @@ impl EntityMetrics for () {
 /// Chosen around what the numbers mean rather than as a round decade ladder: a local
 /// fsync lands in the low hundreds of microseconds, a healthy same-zone quorum in the
 /// low milliseconds, a cross-zone one in the tens, and anything past a second is
-/// heading for the append timeout (storage §10). The buckets are dense where the decisions
+/// heading for the append timeout (storage §11). The buckets are dense where the decisions
 /// are.
 const BUCKETS_US: [u64; 11] = [
     100,       // in-memory / page cache
@@ -186,7 +186,7 @@ struct TypeMetrics {
     rehydrate_latency: Histogram,
     replayed: AtomicU64,
     /// Signed, but held unsigned: activations only ever exceed deactivations, since a
-    /// deactivation follows an activation of the same entity (§7).
+    /// deactivation follows an activation of the same entity (§8).
     active: AtomicU64,
 }
 

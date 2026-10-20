@@ -1,5 +1,5 @@
-//! Conformance: lifecycle hooks, `Ctx`, and resolution (spec §2.3, §3.1, §3.2).
-//! Also folds in the local lifecycle ordering cases from actor.rs (spec §3.1).
+//! Conformance: lifecycle hooks, `Ctx`, and resolution (spec §3.2, §4, §5).
+//! Also folds in the local lifecycle ordering cases from actor.rs (spec §4).
 
 mod support;
 
@@ -31,7 +31,7 @@ use support::Greet;
 use support::Greeter;
 use support::Stop;
 
-// --- §2.1: stopped() runs with the right StopReason ------------------------
+// --- §3.1: stopped() runs with the right StopReason ------------------------
 
 type Recorded = Arc<Mutex<Option<StopReason>>>;
 
@@ -96,7 +96,7 @@ fn stopped_runs_with_failed_reason_on_panic() {
     assert_eq!(*reason.lock().unwrap(), Some(StopReason::Failed));
 }
 
-// --- §3.1 #6: failed startup resigns without becoming ready ------------------
+// --- §4 #6: failed startup resigns without becoming ready ------------------
 
 struct FailsToStart<S> {
     _system: PhantomData<fn() -> S>,
@@ -130,7 +130,7 @@ fn failed_startup_emits_assign_then_resign_no_ready() {
     assert_eq!(lifecycle, vec!["assign", "resign"]);
 }
 
-// --- §2.3: Ctx::id / this / system -------------------------------------------
+// --- §3.2: Ctx::id / this / system -------------------------------------------
 
 #[derive(Serialize, Deserialize)]
 struct WhoAmI;
@@ -173,7 +173,7 @@ impl<S: ActorSystem> Actor for Introspect<S> {
 }
 impl<S: ActorSystem> Handler<WhoAmI> for Introspect<S> {
     async fn handle(&mut self, _msg: WhoAmI, ctx: &Ctx<Self>) -> ActorId {
-        // `this()` must agree with `id()` (spec §2.3).
+        // `this()` must agree with `id()` (spec §3.2).
         assert_eq!(ctx.this().id(), ctx.id());
         ctx.id().clone()
     }
@@ -223,7 +223,7 @@ fn ctx_this_is_a_usable_self_reference() {
     assert_eq!(touches, Ok(1));
 }
 
-// --- §3.2: resolution ---------------------------------------------------------
+// --- §5: resolution ---------------------------------------------------------
 
 #[test]
 fn resolve_a_live_local_id_yields_a_working_ref() {
@@ -271,7 +271,7 @@ fn locality_is_classified_from_the_id_without_a_network_call() {
 }
 
 // =============================================================================
-// Merged from actor.rs (spec §3.1, invariant #6): local lifecycle ordering;
+// Merged from actor.rs (spec §4, invariant #6): local lifecycle ordering;
 // assign → ready → resign exactly once, and a failed startup that resigns
 // without ever becoming ready.
 // =============================================================================
@@ -299,7 +299,7 @@ mod local_lifecycle {
     /// The concrete system every test actor runs on.
     type Sys = LocalSystem<SimClock, SimEntropy, SimSpawner>;
 
-    // --- Lifecycle order and exactly-once (spec §3.1, invariant #6) ---------------
+    // --- Lifecycle order and exactly-once (spec §4, invariant #6) ---------------
 
     struct Stoppable;
 

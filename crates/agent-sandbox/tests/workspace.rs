@@ -1,7 +1,7 @@
 //! Workspace-tier conformance: S1 (confinement by capability handle;
-//! adversarial traversal) and S5 (per-tier release) of sandbox spec §6. The
+//! adversarial traversal) and S5 (per-tier release) of sandbox spec §7. The
 //! workspace directory is supplied by the caller (the agent's workspace facet,
-//! facets §4.1); the provider opens over it and never deletes it.
+//! facets §5.1); the provider opens over it and never deletes it.
 
 mod support;
 
@@ -188,13 +188,13 @@ fn tiers_not_offered_fail_as_outcomes() {
     let outcome = block_on(sandbox.call(Tier::Network, "anything", json!({})));
     assert!(
         matches!(outcome, Err(ToolError::Sandbox(_))),
-        "an unoffered tier is a per-call failure (agent §4.2), got {outcome:?}"
+        "an unoffered tier is a per-call failure (agent §5.2), got {outcome:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // S5: per-tier release, idempotent, and the workspace is not the provider's
-// to delete (its durable content is the caller's, facets §4.1)
+// to delete (its durable content is the caller's, facets §5.1)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -237,7 +237,7 @@ fn sessions_are_scoped_apart() {
 }
 
 // ---------------------------------------------------------------------------
-// Loss reporting (sandbox spec §5; agent spec §4.4)
+// Loss reporting (sandbox spec §6; agent spec §5.4)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -252,7 +252,7 @@ fn a_vanished_workspace_surfaces_as_environment_loss() {
     std::fs::remove_dir_all(&workspace).expect("external loss");
 
     // Not an ordinary tool failure: only EnvironmentLost engages the
-    // harness's reset protocol (agent §4.4); a Sandbox error here would leave the
+    // harness's reset protocol (agent §5.4); a Sandbox error here would leave the
     // model retrying against state that no longer exists.
     let lost = call(&sandbox, "read_file", json!({"path": "f"}));
     assert!(

@@ -1,15 +1,15 @@
-//! The journal seam (spec storage §2.1).
+//! The journal seam (spec storage §3.1).
 //!
 //! An entity's journal is its durable, totally-ordered, append-only log of events:
 //! the **source of truth** (§1, invariant **E3**). The [`EntityJournal`] trait is a
-//! simulation and deployment seam like `Transport` and `Clock` (actor §2.12.1, §2.13),
+//! simulation and deployment seam like `Transport` and `Clock` (actor §11.1, cluster §4),
 //! operating on opaque, codec-encoded event bytes so it stays codec-agnostic.
 //!
-//! Two reference tiers implement it (storage §2.2): the single-node `Local`
+//! Two reference tiers implement it (storage §3.2): the single-node `Local`
 //! [`LocalEntityJournal`](crate::memory::LocalEntityJournal) and the clustered `Quorum`
 //! (`EntityJournal for Arc<QuorumReplicator>`, replicator.rs). Because the methods
 //! return `impl Future`, the trait is not object-safe; it is threaded as a concrete
-//! type (actor §2.12.1).
+//! type (actor §11.1).
 
 use std::future::Future;
 
@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::blobs::BlobId;
 use crate::entity::EntityName;
 
-/// The position of an event in one entity's total order (spec storage §2.1). The first
+/// The position of an event in one entity's total order (spec storage §3.1). The first
 /// event commits at `1`; [`Seq::ZERO`] is the empty head.
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
@@ -28,7 +28,7 @@ use crate::entity::EntityName;
 pub struct Seq(u64);
 
 impl Seq {
-    /// The empty head: an entity with no committed events (spec storage §2.1).
+    /// The empty head: an entity with no committed events (spec storage §3.1).
     pub const ZERO: Seq = Seq(0);
 
     /// Wrap a raw sequence value.
@@ -49,7 +49,7 @@ impl std::fmt::Display for Seq {
 }
 
 /// The **shard term**: the single-writer fencing token every per-entity append
-/// carries (spec storage §5). It is the shard leader-election group's Raft term, so it only
+/// carries (spec storage §6). It is the shard leader-election group's Raft term, so it only
 /// ever advances; the store refuses any write stamped below the highest term it has
 /// acknowledged. `Ord` is the fence comparison. `Term::ZERO` is the single-node
 /// `Local` tier, which never elects and so never fences.
@@ -59,7 +59,7 @@ impl std::fmt::Display for Seq {
 pub struct Term(u64);
 
 impl Term {
-    /// The `Local` tier's constant term: it never elects, so it never fences (storage §2.2).
+    /// The `Local` tier's constant term: it never elects, so it never fences (storage §3.2).
     pub const ZERO: Term = Term(0);
 
     /// Wrap a raw term value (e.g. a leader-election group's Raft term).
@@ -80,30 +80,30 @@ impl std::fmt::Display for Term {
 }
 
 /// The outcome of an [`append`](EntityJournal::append) or
-/// [`save_snapshot`](EntityJournal::save_snapshot) (spec storage §2.1).
+/// [`save_snapshot`](EntityJournal::save_snapshot) (spec storage §3.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppendOutcome {
     /// Durable on a quorum; carries the new head (for a snapshot, the snapshot
     /// seq).
     Committed(Seq),
-    /// This node no longer leads the shard; redirect to the hinted leader (storage §5).
+    /// This node no longer leads the shard; redirect to the hinted leader (storage §6).
     /// Produced only when no replica can hold the batch, so the command provably did
-    /// not commit and a caller may re-issue it (§2.2); a deposed append that a peer
+    /// not commit and a caller may re-issue it (§3.2); a deposed append that a peer
     /// may have stored is `Unavailable` instead. Never produced by the `Local`
     /// single-node journal.
     NotLeader(actor_core::NodeId),
-    /// The shard cannot reach a quorum; the entity pauses writes (storage §10). The
+    /// The shard cannot reach a quorum; the entity pauses writes (storage §11). The
     /// `Local` single-node journal produces it only when its one store has failed.
     Unavailable(String),
 }
 
-/// One [`load`](EntityJournal::load) page (spec storage §2.1): up to `limit` records
+/// One [`load`](EntityJournal::load) page (spec storage §3.1): up to `limit` records
 /// after `from`, plus the store's compaction **base** at the moment of the read
-/// (storage §8), both read under one segment lock. Slots at `Seq <= base` are compacted:
+/// (storage §9), both read under one segment lock. Slots at `Seq <= base` are compacted:
 /// subsumed by the entity's snapshot and gone from every read path. Without the
 /// base a reader below it cannot tell truncated history from the interleaved
-/// slots a projection legally skips (facets §3), so every read reply carries it
-/// (§6).
+/// slots a projection legally skips (facets §4), so every read reply carries it
+/// (§7).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordPage {
     /// The compaction base: records at `Seq <= base` are no longer readable.
@@ -113,7 +113,7 @@ pub struct RecordPage {
     pub records: Vec<(Seq, Vec<u8>)>,
 }
 
-/// A failure of a *local* journal read (spec storage §2.1): I/O or corruption.
+/// A failure of a *local* journal read (spec storage §3.1): I/O or corruption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntityJournalError {
     /// A local read could not complete (I/O or corruption).
@@ -130,11 +130,11 @@ impl std::fmt::Display for EntityJournalError {
 
 impl std::error::Error for EntityJournalError {}
 
-/// An entity's durable, append-only event log and snapshot store (spec storage §2.1).
+/// An entity's durable, append-only event log and snapshot store (spec storage §3.1).
 ///
 /// All methods address one entity by name; the implementation keys each entity's
 /// events and snapshot independently. The host calls [`append`](EntityJournal::append)
-/// only from the shard leader and behind the entity's input gate (§5), so `after`
+/// only from the shard leader and behind the entity's input gate (§6), so `after`
 /// always equals the entity's known head.
 pub trait EntityJournal: Clone + Send + Sync + 'static {
     /// Append `events` for one entity immediately after `after`, as one atomic
@@ -158,25 +158,25 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<RecordPage, EntityJournalError>> + Send;
 
     /// The entity's committed head: the authoritative source of `head` on
-    /// rehydration (storage §8, invariant **E3**), and the **rehydration barrier** itself.
+    /// rehydration (storage §9, invariant **E3**), and the **rehydration barrier** itself.
     /// `Seq::ZERO` for an entity with no committed events.
     ///
     /// On the `Quorum` tier this recovers the head from a write quorum of the
     /// shard's replicas by read-repair (highest-term record per slot, written back
-    /// under the leader's own term, storage §5), so a fresh leader never folds onto a stale
+    /// under the leader's own term, storage §6), so a fresh leader never folds onto a stale
     /// head and subsequent `load`s read locally. Short of a quorum within
     /// `recover_timeout` it adopts the merged view without write-back, which MAY be
-    /// stale but cannot fork a write (storage §5). On the `Local` tier it reads locally. Rehydration derives `head` from this, never from memory.
+    /// stale but cannot fork a write (storage §6). On the `Local` tier it reads locally. Rehydration derives `head` from this, never from memory.
     fn head(
         &self,
         entity: &EntityName,
     ) -> impl Future<Output = Result<Seq, EntityJournalError>> + Send;
 
-    /// The shard term this journal is writing under **right now** (spec storage §5): the
+    /// The shard term this journal is writing under **right now** (spec storage §6): the
     /// leader-election group's term while this node leads the shard, `None`
     /// otherwise. A cheap local read, never a network round.
     ///
-    /// This is the *validity token* of the gateway's non-activating read (§6):
+    /// This is the *validity token* of the gateway's non-activating read (§7):
     /// a [`head`](EntityJournal::head) recovery is trustworthy only while the
     /// leadership it ran under persists; leadership regained is a **higher**
     /// term, so an unchanged term proves no other node could have appended in
@@ -184,7 +184,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     /// [`Term::ZERO`].
     fn term(&self) -> Option<Term>;
 
-    /// Persist a snapshot for one entity at a committed seq (storage §8). Returns
+    /// Persist a snapshot for one entity at a committed seq (storage §9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.
     fn save_snapshot(
         &self,
@@ -193,21 +193,23 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
         state: Vec<u8>,
     ) -> impl Future<Output = AppendOutcome> + Send;
 
-    /// The latest snapshot for one entity, if any (storage §8), read from the **local**
+    /// The latest snapshot for one entity, if any (storage §9), read from the **local**
     /// store on every tier. On the `Quorum` tier the quorum-best snapshot is
-    /// chosen during `head`'s recovery (storage §5) and cached locally there, so this
+    /// chosen during `head`'s recovery (storage §6) and cached locally there, so this
     /// read (like `load`) costs no round trip and follows that recovery.
     fn load_snapshot(
         &self,
         entity: &EntityName,
     ) -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, EntityJournalError>> + Send;
 
-    // --- The entity-native content-addressed blob store (storage §9) ---
+    // --- The entity-native content-addressed blob store (storage §10) ---
     //
     // An entity's immutable blobs, replicated to the *same* shard replicas as its
     // records but off the ordered/fenced path (no `Seq`, no term). On the journal seam
     // so the host needs no extra dependency to hand the entity a
-    // [`EntityBlobs`](crate::blobs::EntityBlobs) handle.
+    // [`EntityBlobs`](crate::blobs::EntityBlobs) handle, and because blobs share
+    // everything else the journal already carries per entity: its replicas, its
+    // recovery, the migration and split passes, and the simulation seed.
 
     /// Store an immutable blob for one entity, durable on a write quorum of its
     /// replicas (one local copy on `Local`). Idempotent and dedup'd by content.

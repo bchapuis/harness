@@ -76,7 +76,7 @@ Defaults, each overridable by a measurement.
 
 **hw §3.8: Below a millisecond on the session path is invisible; above a hundred is not.** From I4: no saved microseconds justify a weaker bound or a harder-to-read module. Failover windows, cold starts, capture and restore, and uplink saturation are user-visible latency and deserve the effort microseconds do not.
 
-**hw §3.9: Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer. This is why facet 0's state goes through content-defined chunking (facets §3): snapshotted whole, a 2 MB transcript would cost 16 ms of uplink per peer for one appended turn; chunked, it costs what the turn changed.
+**hw §3.9: Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer. This is why facet 0's state goes through content-defined chunking (facets §4): snapshotted whole, a 2 MB transcript would cost 16 ms of uplink per peer for one appended turn; chunked, it costs what the turn changed.
 
 ## 4. Where this already decided something
 
@@ -88,7 +88,7 @@ The decisions this envelope settled (no group commit, `sync_all` over `sync_data
 
 **A bound is not an optimization.** Bounded mailboxes, in-flight chunk limits, segment and cache capacities, maximum record and image sizes: each exists so an unlucky input cannot consume the machine. 128 GB changes what the number should be, never whether there is one.
 
-**The simulator does not run on this hardware.** Deterministic simulation (actor §2.12.2) runs production code on one logical thread over virtual time, so anything justified by real concurrency or real device behaviour stays behind a seam it can replace; that is why store I/O is a `BlockingIo` seam defaulting to inline.
+**The simulator does not run on this hardware.** Deterministic simulation (actor §11) runs production code on one logical thread over virtual time, so anything justified by real concurrency or real device behaviour stays behind a seam it can replace; that is why store I/O is a `BlockingIo` seam defaulting to inline.
 
 **hw §3.8 is not an excuse.** "The model takes a second anyway" justifies the simpler design over the faster one, never one that is both slower *and* more complex. It says nothing about throughput: a node serving many sessions is bounded by aggregate work, not one session's patience.
 

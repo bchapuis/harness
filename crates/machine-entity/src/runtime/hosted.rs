@@ -1,18 +1,18 @@
-//! The machine's production binding (machine §2.3): one implementation over
+//! The machine's production binding (machine §3.2): one implementation over
 //! [`machine_host::MachineHost`], whichever mechanism a node was configured with.
 //!
 //! A machine's durability does not depend on how its guest is held: the disk
-//! facet's image is the durable thing (facets §4.4), the capture command's
+//! facet's image is the durable thing (facets §5.4), the capture command's
 //! quiescent point is a pause, and `/workspace` travels as a tar over a channel
 //! to the guest agent, whether the guest is a Firecracker microVM or a
 //! container holding the same rootfs. So this file states them once, and
 //! `machine-host` states the two mechanisms:
 //!
-//! - **The drive is the disk facet's materialized image** (facets §4.4), used in
+//! - **The drive is the disk facet's materialized image** (facets §5.4), used in
 //!   place, no per-guest copy, because the guest writing that file between
 //!   captures *is* the machine's persistence model, and a non-committed outcome
 //!   discards it (E20).
-//! - **The guest boots its own init** (machine §2.4): the agent is an ordinary
+//! - **The guest boots its own init** (machine §3.3): the agent is an ordinary
 //!   service the rootfs ships, not pid 1. Under the container mechanism there is
 //!   no init at all and the agent is the container's only process: that grade's
 //!   one visible departure.
@@ -23,11 +23,11 @@
 //!   and in time by [`HostedRuntimeConfig::agent_timeout`]. The agent is the
 //!   user's own code, so one that stops answering must cost a capture its
 //!   workspace, never the capture cadence that is also the session lease (M5).
-//! - **Pause/resume are load-bearing** (machine §4): the capture command's
+//! - **Pause/resume are load-bearing** (machine §6): the capture command's
 //!   quiescent point. How much consistency a pause gives is the mechanism's to
 //!   promise (`machine_host::MachineGuest::pause`); the agent's `sync` before the pull is
 //!   this layer's contribution either way (machine §1.1, M3).
-//! - **Egress is the microVM grade's alone** (machine §2.6, M6): the tap and
+//! - **Egress is the microVM grade's alone** (machine §5.2, M6): the tap and
 //!   ruleset are realized here, from journaled policy, and skipped where the
 //!   mechanism cannot take a NIC; the same degradation as a node without
 //!   `CAP_NET_ADMIN`, never a boot failed over egress.
@@ -57,7 +57,7 @@ use super::ws_proto;
 use super::ws_proto::SyncError;
 
 /// The kernel command line a machine's guest boots with under the microVM
-/// mechanism: the rootfs's **own init** on `/dev/vda` (machine §2.4), no
+/// mechanism: the rootfs's **own init** on `/dev/vda` (machine §3.3), no
 /// `init=` override, unlike the agent sandbox's agent-as-init image.
 const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off quiet root=/dev/vda rw";
 
@@ -67,7 +67,7 @@ const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off quiet root=/dev/
 const GUEST_PREFIX: &str = "harness-machine";
 
 /// This node's microVM mechanism, carrying the machine's own boot policy
-/// (machine §2.4's own-init boot, and a name prefix no other consumer uses).
+/// (machine §3.3's own-init boot, and a name prefix no other consumer uses).
 ///
 /// A constructor rather than exported constants: policy that must travel
 /// *together* should not be two values a deployment is trusted to pair.
@@ -107,7 +107,7 @@ pub fn guest_key(node: &str, machine: &EntityName) -> GuestKey {
 }
 
 /// Open one channel to `machine`'s guest agent on this node, from the machine's
-/// name alone: what a front door needs, holding no guest object (machine §2.5).
+/// name alone: what a front door needs, holding no guest object (machine §5.1).
 ///
 /// Node-local by construction: [`MachineHost::connect_by_key`] answers
 /// [`GuestError::Gone`] for a machine whose activation is on another node, which
@@ -127,7 +127,7 @@ pub async fn open_channel(
 }
 
 /// Tell the agent what this channel is for. The first frame of every channel
-/// (machine §2.4), sent by whoever opened it.
+/// (machine §3.3), sent by whoever opened it.
 async fn send_header(channel: &mut Box<dyn Duplex>, kind: &ChannelKind) -> std::io::Result<()> {
     machine_host::vsock::send_frame(channel, &kind.header()).await
 }
@@ -136,7 +136,7 @@ async fn send_header(channel: &mut Box<dyn Duplex>, kind: &ChannelKind) -> std::
 /// take, and this node's egress. The mechanism itself (VMM assets, or container
 /// CLI and runner image) is configured on the [`MachineHost`]; the per-machine
 /// half (sizing, the image) arrives in each [`BootSpec`] from journaled state
-/// (machine §3).
+/// (machine §4).
 #[derive(Clone, Debug)]
 pub struct HostedRuntimeConfig {
     /// This node's id, scoping its guests' names ([`guest_key`]).
@@ -149,12 +149,12 @@ pub struct HostedRuntimeConfig {
     /// a capture's flush and pull) may take before it fails as a runtime
     /// error. The agent ships in the user's own rootfs, so nothing guarantees
     /// it answers: unbounded, a hung agent would hold the capture command, and
-    /// with it the alarm fire that is the session lease (machine §4, M5),
+    /// with it the alarm fire that is the session lease (machine §6, M5),
     /// forever. A failed pull skips the workspace for that capture and the
     /// disk capture proceeds. The default allows a full 64 MiB workspace over
     /// a slow channel several times over.
     pub agent_timeout: Duration,
-    /// The node's egress configuration (machine §2.6, M6). `None` (the default)
+    /// The node's egress configuration (machine §5.2, M6). `None` (the default)
     /// boots machines with no NIC; set it to wire the per-machine tap, node
     /// NAT, and guest addressing. Realized only behind `feature = "net"` on
     /// Linux and only at `machine_host::MachineIsolation::MicroVm`; anything
@@ -173,12 +173,12 @@ impl HostedRuntimeConfig {
     }
 }
 
-/// Boots machines on this node's mechanism (machine §2.3). One per node,
+/// Boots machines on this node's mechanism (machine §3.2). One per node,
 /// injected into the entity factory (`entities_named`).
 pub struct HostedRuntimeProvider {
     host: Arc<dyn MachineHost>,
     config: Arc<HostedRuntimeConfig>,
-    /// The node-local guest-address pool (machine §2.6), `Some` iff the config
+    /// The node-local guest-address pool (machine §5.2), `Some` iff the config
     /// wired egress *and* the mechanism can realize it. Shared into each booted
     /// guest so a kill returns its slot.
     pool: Option<Arc<std::sync::Mutex<crate::net::GuestPool>>>,
@@ -204,7 +204,7 @@ impl HostedRuntimeProvider {
         }
     }
 
-    /// Realize a machine's egress before the guest starts (machine §2.6, M6):
+    /// Realize a machine's egress before the guest starts (machine §5.2, M6):
     /// allocate a guest /30, install the tap and policy ruleset, and return the
     /// NIC to boot with plus its teardown. `None` when egress is unconfigured,
     /// the mechanism cannot take a NIC, the pool is full, or the plumbing could
@@ -309,7 +309,7 @@ impl MachineRuntimeProvider for HostedRuntimeProvider {
     }
 }
 
-/// A booted machine's egress teardown (machine §2.6): the tap and ruleset to
+/// A booted machine's egress teardown (machine §5.2): the tap and ruleset to
 /// remove and the pool slot to return when the guest is killed. Held only for
 /// machines that booted with a NIC.
 struct EgressHandle {
@@ -348,10 +348,10 @@ impl EgressHandle {
     }
 }
 
-/// One live machine guest (machine §1's disposable activation half).
+/// One live machine guest (machine §2's disposable activation half).
 pub struct HostedRuntime {
     guest: Arc<dyn MachineGuest>,
-    /// The egress teardown (machine §2.6), `Some` iff this machine booted with a
+    /// The egress teardown (machine §5.2), `Some` iff this machine booted with a
     /// NIC. Torn down on kill and again on drop (idempotent), so a dropped
     /// activation can never leak a tap or its pool slot.
     egress: Option<EgressHandle>,
@@ -393,7 +393,7 @@ impl HostedRuntime {
 }
 
 impl Drop for HostedRuntime {
-    /// A dropped activation must leak no egress plumbing (machine §2.6); the
+    /// A dropped activation must leak no egress plumbing (machine §5.2); the
     /// guest itself is the mechanism's to reap on drop (`machine_host::MachineGuest`).
     fn drop(&mut self) {
         if let Some(egress) = &self.egress {
@@ -414,7 +414,7 @@ impl MachineRuntime for HostedRuntime {
     fn kill(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.guest.stop().await;
-            // The tap and ruleset outlive the guest otherwise (machine §2.6).
+            // The tap and ruleset outlive the guest otherwise (machine §5.2).
             if let Some(egress) = &self.egress {
                 egress.teardown();
             }

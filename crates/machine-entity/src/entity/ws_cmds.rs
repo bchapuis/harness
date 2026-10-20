@@ -1,4 +1,4 @@
-//! The workspace file commands (machine §3): read and mutate the machine's
+//! The workspace file commands (machine §4): read and mutate the machine's
 //! `/workspace` **without booting it**; the last committed state while
 //! hibernated. These commands touch the activation only through
 //! [`Machine::ws_command_guard`].
@@ -18,11 +18,11 @@ use super::MachineError;
 use super::MachineEvent;
 use super::MachineState;
 
-// --- Workspace file commands (machine §3) --------------------------------------
+// --- Workspace file commands (machine §4) --------------------------------------
 
 /// Cap on one file command's bytes, both directions: a [`WsWrite`]'s record
 /// and a [`WsRead`]'s reply must stay bounded (the ws facet's records carry
-/// bytes inline, facets §4.1).
+/// bytes inline, facets §5.1).
 pub const MAX_WS_FILE: usize = 1024 * 1024;
 
 /// The one mapping every workspace file operation fails through.
@@ -86,7 +86,7 @@ impl<S: EntitySystem> Machine<S> {
 }
 
 /// Write one file into the machine's `/workspace` without booting it
-/// (machine §3): the bytes land in the workspace facet's directory and their
+/// (machine §4): the bytes land in the workspace facet's directory and their
 /// delta commits in this command's batch. The next boot pushes them into the
 /// guest.
 #[derive(Clone, Serialize, Deserialize)]
@@ -130,7 +130,7 @@ impl<S: EntitySystem> EntityHandler<WsWrite> for Machine<S> {
 }
 
 /// Read one file from the machine's `/workspace` without booting it: the last
-/// committed state while hibernated. Stages nothing (entity §6).
+/// committed state while hibernated. Stages nothing (entity §7).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WsRead {
     pub path: String,
@@ -173,7 +173,7 @@ pub struct WsFileInfo {
 }
 
 /// List one level of the machine's `/workspace` without booting it. An empty
-/// `path` lists the root. Stages nothing (entity §6).
+/// `path` lists the root. Stages nothing (entity §7).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WsList {
     pub path: String,

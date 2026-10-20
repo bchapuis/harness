@@ -1,4 +1,4 @@
-//! Cancellation conformance (agent spec §7.2; invariant A4): message
+//! Cancellation conformance (agent spec §9.2; invariant A4): message
 //! granularity, idempotence, straggler discard, and propagation across the
 //! delegation tree.
 
@@ -70,7 +70,7 @@ fn a_cancel_takes_effect_during_a_model_call() {
                     let clock = system.clock().clone();
                     async move {
                         // Cancel while the 60s model call is in flight: the
-                        // mailbox is live during it (§3.2), so the cancel lands at
+                        // mailbox is live during it (§4.2), so the cancel lands at
                         // message granularity, not after the call.
                         clock.sleep(Duration::from_secs(5)).await;
                         session.cancel(&TurnId::new("t-1")).await.expect("cancel")
@@ -85,7 +85,7 @@ fn a_cancel_takes_effect_during_a_model_call() {
     );
     run_seed(&workload, 43).expect("invariants hold");
 
-    // The straggling model response was discarded, not journaled (§7.2 item 4):
+    // The straggling model response was discarded, not journaled (§9.2 item 4):
     // the cancelled run's terminal record is the last word.
     let records = records.lock().unwrap();
     assert!(
@@ -139,9 +139,9 @@ fn provider_strict(responses: Vec<ModelResponse>, seen: Arc<Mutex<Vec<Entry>>>) 
 fn a_session_cancelled_mid_tool_runs_its_next_turn() {
     // Turn 1 asks for two calls; the sandbox holds each for 60s, and the run
     // is cancelled at t=5 with both in flight. Its `RunEnded { Cancelled }`
-    // answers both `Interrupted` in the transcript (§7.2 item 2), in the order
+    // answers both `Interrupted` in the transcript (§9.2 item 2), in the order
     // the model asked (the ids sort the other way), so turn 2's request
-    // carries no unanswered call and the provider accepts it (§2.1).
+    // carries no unanswered call and the provider accepts it (§3.1).
     let mut first = tool_call("call-b", "shell", json!({"cmd": "sleep"}));
     first.calls.push(ToolCall {
         id: agent::CallId::new("call-a"),
@@ -218,9 +218,9 @@ fn a_session_cancelled_mid_tool_runs_its_next_turn() {
 fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
     // Timeline (10s model calls): t=0 run A starts and its call flies to t=10;
     // t=1 turn B is accepted behind it; fold state, not activation memory
-    // (§2.6); t=2 a re-submission of B with different content is rejected off
-    // the journal (§5.3, the dedup covers queued turns); t=3 B is cancelled:
-    // its `RunEnded { Cancelled }` journals with no run ever starting (§7.2),
+    // (§7.2); t=2 a re-submission of B with different content is rejected off
+    // the journal (§7.2, the dedup covers queued turns); t=3 B is cancelled:
+    // its `RunEnded { Cancelled }` journals with no run ever starting (§9.2),
     // and B's waiting prompt resolves from the recorded outcome. A is
     // untouched and completes at t=10.
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
@@ -256,7 +256,7 @@ fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
                     let clock = clock.clone();
                     async move {
                         clock.sleep(Duration::from_secs(2)).await;
-                        // The queued turn is dedup-checked like any other (§5.3):
+                        // The queued turn is dedup-checked like any other (§7.2):
                         // same TurnId, different content; a caller bug, rejected.
                         let conflict = session.prompt(Turn::new(TurnId::new("t-b"), "not b")).await;
                         assert!(conflict.is_err(), "queued re-submit content-checked");
@@ -278,7 +278,7 @@ fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
     run_seed(&workload, 59).expect("invariants hold");
 
     // B ends by record without ever starting: its terminal commits mid-run-A,
-    // and only A has a `TurnStarted` (§7.2; the checkers verify no event pair
+    // and only A has a `TurnStarted` (§9.2; the checkers verify no event pair
     // fired for B).
     let records = records.lock().unwrap();
     assert_eq!(
@@ -320,7 +320,7 @@ fn a_cancel_for_an_ended_or_unknown_run_is_a_no_op() {
                     .expect("call")
                     .expect("run");
                 assert_eq!(outcome.text(), "done");
-                // A delayed cancel never kills the named run's successor (§7.2
+                // A delayed cancel never kills the named run's successor (§9.2
                 // item 1): it is a no-op on the ended run.
                 session.cancel(&TurnId::new("t-1")).await.expect("cancel");
                 session.cancel(&TurnId::new("t-x")).await.expect("unknown");
@@ -414,7 +414,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                 assert_eq!(outcome.expect("call"), Err(RunError::Cancelled));
                 flush(&system).await;
 
-                // The parent's journal names the child (§6.1); read the child's
+                // The parent's journal names the child (§8.1); read the child's
                 // journal through its own session.
                 let records = tail_records(&session).await;
                 let (child_kind, child_session) = records
@@ -442,7 +442,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
     });
     run_seed(&workload, 53).expect("invariants hold");
 
-    // The child's run ended Cancelled within bounded logical time (A4, §7.2 item 2).
+    // The child's run ended Cancelled within bounded logical time (A4, §9.2 item 2).
     assert!(
         child_records.lock().unwrap().iter().any(|r| matches!(
             &r.body,
@@ -451,18 +451,18 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                 ..
             }
         )),
-        "the child's run ended Cancelled (§7.2 item 2)"
+        "the child's run ended Cancelled (§9.2 item 2)"
     );
 
     // The delivered propagation cleared its owed fact durably: the parent
     // journaled `CancelDelivered` for the delegation once the child acked
-    // (§7.2), so no later activation re-owes the send.
+    // (§9.2), so no later activation re-owes the send.
     assert!(
         parent_records
             .lock()
             .unwrap()
             .iter()
             .any(|r| matches!(&r.body, RecordBody::CancelDelivered { .. })),
-        "the parent journaled CancelDelivered for the propagated cancel (§7.2)"
+        "the parent journaled CancelDelivered for the propagated cancel (§9.2)"
     );
 }

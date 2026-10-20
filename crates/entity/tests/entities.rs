@@ -1,7 +1,7 @@
-//! End-to-end entity tests under deterministic simulation (entity §11).
+//! End-to-end entity tests under deterministic simulation (entity §10).
 //!
 //! Mirrors the actor framework's V&V doctrine: drive entities through the public
-//! API only, assert the entity invariants over the §10 event stream, decide a
+//! API only, assert the entity invariants over the §11 event stream, decide a
 //! recorded history against a reference model, and check seed-reproducibility.
 //! The single-node `Local` tier covers E2, E3, E5, E6, and the E12 hibernation
 //! round-trip; the cluster-only invariants (E1-under-election, E11, E13–E15)
@@ -41,7 +41,7 @@ use support::ReadCount;
 
 #[test]
 fn register_populates_the_command_allowlist() {
-    // `Entity::register` fills the §4.5 deserialization allowlist.
+    // `Entity::register` fills the §5.5 deserialization allowlist.
     let accepted = entity::accepted_manifests::<CounterEntity>();
     assert!(accepted.contains("test.Add"));
     assert!(accepted.contains("test.ReadCount"));
@@ -183,7 +183,7 @@ fn hibernated_entity_reactivates_with_state() {
     );
 }
 
-// --- The non-activating read: observation leaves hibernation alone (§6) -----
+// --- The non-activating read: observation leaves hibernation alone (§7) -----
 
 #[test]
 fn a_gateway_read_leaves_a_hibernated_entity_asleep() {
@@ -215,7 +215,7 @@ fn a_gateway_read_leaves_a_hibernated_entity_asleep() {
         "the idle entity must hibernate",
     );
 
-    // The gateway serves the committed events from the journal (§6): correct
+    // The gateway serves the committed events from the journal (§7): correct
     // content, ascending real slots, short only at the head.
     let reread = counters.entity("counter/0");
     let events = sim.block_on(async move {
@@ -248,7 +248,7 @@ fn a_gateway_read_leaves_a_hibernated_entity_asleep() {
     );
 
     // Reading woke nothing: the one activation is the write-time one, and no
-    // rehydration followed the hibernation (§7).
+    // rehydration followed the hibernation (§8).
     sim.run();
     let activated = recorder
         .events()
@@ -263,7 +263,7 @@ fn a_gateway_read_leaves_a_hibernated_entity_asleep() {
     assert_eq!(activated, 1, "a poll must not wake a hibernated entity");
 }
 
-// --- Compaction is visible to readers: the base rides every page (§6, storage §8) ---
+// --- Compaction is visible to readers: the base rides every page (§7, storage §9) ---
 
 #[test]
 fn a_compacted_entity_reports_its_base_instead_of_a_silent_gap() {
@@ -285,7 +285,7 @@ fn a_compacted_entity_reports_its_base_instead_of_a_silent_gap() {
 
     // A read from ZERO asked for history the snapshot has subsumed: the page
     // reports the base, so the missing prefix is announced truncation, not a
-    // silent gap the caller would misread as facet slots (§6).
+    // silent gap the caller would misread as facet slots (§7).
     let reread = counters.entity("counter/0");
     let history = sim.block_on(async move {
         reread
@@ -332,10 +332,10 @@ fn a_compacted_entity_reports_its_base_instead_of_a_silent_gap() {
     );
 }
 
-// --- can_hibernate: an entity that vetoes idle hibernation (§7) ----------------
+// --- can_hibernate: an entity that vetoes idle hibernation (§8) ----------------
 
 /// An entity that never permits idle hibernation. The agent runtime overrides
-/// `can_hibernate` this way while a run is live (agent §5.2).
+/// `can_hibernate` this way while a run is live (agent §7.1).
 #[derive(Default)]
 struct PinnedEntity;
 
@@ -408,7 +408,7 @@ fn can_hibernate_vetoes_idle_hibernation() {
             e.as_app::<EntityEvent>(),
             Some(EntityEvent::Deactivated { .. })
         )),
-        "can_hibernate = false must veto idle hibernation (§7)",
+        "can_hibernate = false must veto idle hibernation (§8)",
     );
 }
 
@@ -428,7 +428,7 @@ enum Ledger {
     Withdrew(u64),
 }
 
-/// An application error: lives inside `M::Reply`, never in `EntityError` (§3.2).
+/// An application error: lives inside `M::Reply`, never in `EntityError` (§4.2).
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Overdraft;
 
@@ -536,7 +536,7 @@ fn account_entity_end_to_end() {
             acct.ask(Withdraw { cents: 9999 }).await.unwrap(),
             Err(Overdraft)
         );
-        // The overdrawn withdraw committed nothing (§6): balance is unchanged.
+        // The overdrawn withdraw committed nothing (§7): balance is unchanged.
         assert_eq!(acct.ask(ReadBalance).await.unwrap(), 500);
     });
 }
@@ -562,9 +562,9 @@ fn tell_commits_fire_and_forget() {
 
 #[test]
 fn cached_host_is_reused_and_self_heals_after_hibernation() {
-    // §4.4 host-ref caching: the first call resolves through the gateway and caches
+    // §5.4 host-ref caching: the first call resolves through the gateway and caches
     // the host; a later call hits the cache and skips the gateway. When the cached
-    // host hibernates (§7) the handle goes stale: the next call's `ask`
+    // host hibernates (§8) the handle goes stale: the next call's `ask`
     // dead-letters, the cache is invalidated, and the command is re-issued through
     // a fresh activation (the command did not run, so the re-issue keeps
     // at-most-once).
@@ -588,7 +588,7 @@ fn cached_host_is_reused_and_self_heals_after_hibernation() {
     });
     assert!(
         cached_after_first,
-        "the first call must cache the resolved host (§4.4)"
+        "the first call must cache the resolved host (§5.4)"
     );
 
     // Drive past the idle window so the cached host hibernates and stops.
@@ -630,7 +630,7 @@ fn account_balance_survives_reactivation() {
 
 #[test]
 fn entity_named_hosts_one_entity_under_many_type_names() {
-    // The extension point the agent runtime uses (§4.1): one Rust entity (its run
+    // The extension point the agent runtime uses (§5.1): one Rust entity (its run
     // loop) hosted under many runtime type names, one per kind. Each name is its
     // own entity type (its own gateway key, shard map, and namespace), so the same
     // key under two names addresses two **independent** entities. The factory also
@@ -730,7 +730,7 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
             );
         }
 
-        // Snapshot at the current head, as the host does (storage §8).
+        // Snapshot at the current head, as the host does (storage §9).
         let _seeded = store.store_snapshot(
             shard,
             &name,
@@ -758,7 +758,7 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
 /// authority (**E3**) and never folds a state no committed prefix supports.
 /// With an untruncated journal that means replaying whole from `ZERO`; here the
 /// real snapshot's compaction has already drained the prefix, so no committed
-/// prefix exists to replay: the base guard (storage §8) fails the activation loudly
+/// prefix exists to replay: the base guard (storage §9) fails the activation loudly
 /// rather than fold the 2 surviving records of 10 and serve the wrong count.
 #[test]
 fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
@@ -837,7 +837,7 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
     );
 }
 
-// --- Lifecycle: a failed `on_activate` fails the command that triggered it (§3.1) --
+// --- Lifecycle: a failed `on_activate` fails the command that triggered it (§4.1) --
 
 #[derive(Default)]
 struct RefusingEntity;
@@ -887,7 +887,7 @@ fn a_failed_on_activate_fails_the_triggering_command() {
         "the command that triggered the aborted activation fails: {outcome:?}",
     );
 
-    // The abort leaves no `Activated` on the stream (§10): a phantom activation
+    // The abort leaves no `Activated` on the stream (§11): a phantom activation
     // would break every E6 activation count.
     sim.run();
     assert!(
@@ -899,7 +899,7 @@ fn a_failed_on_activate_fails_the_triggering_command() {
     );
 }
 
-// --- Death watch: `watch` after death fires `on_peer_terminated` at once (§2.2) --
+// --- Death watch: `watch` after death fires `on_peer_terminated` at once (§3.2) --
 
 #[derive(Default)]
 struct Watcher;
@@ -918,7 +918,7 @@ impl Entity for Watcher {
     }
 
     // One event per terminated peer: the callerless decision commits through the
-    // §5 barrier, so the count below is journaled, not in-memory.
+    // §6 barrier, so the count below is journaled, not in-memory.
     async fn on_peer_terminated(
         &self,
         _state: &CounterState,
@@ -944,7 +944,7 @@ impl EntityHandler<WatchPeer> for Watcher {
         msg: WatchPeer,
         ctx: &EntityCtx<Self>,
     ) -> (Vec<CounterEvent>, ()) {
-        // Queued here, installed by the host after this handler returns (§2.2).
+        // Queued here, installed by the host after this handler returns (§3.2).
         ctx.watch(msg.0);
         (Vec::new(), ())
     }
@@ -968,7 +968,7 @@ fn a_watch_on_a_dead_peer_runs_on_peer_terminated_through_the_barrier() {
     let sim = Simulation::new(13);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
     let watchers = system.entities::<Watcher>(EntityConfig::default());
-    // No actor ever held this id: the watch fires immediately (actor §2.5).
+    // No actor ever held this id: the watch fires immediately (actor §10).
     let ghost = actor_core::ActorId::new(system.node(), actor_core::Path::new("/user/ghost"), 0);
 
     let watcher = watchers.entity("w/0");

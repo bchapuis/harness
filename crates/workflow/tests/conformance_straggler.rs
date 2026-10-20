@@ -1,4 +1,4 @@
-//! Straggler rejection end to end (workflow spec §4.4, §3.1): W5.
+//! Straggler rejection end to end (workflow spec §5.4, §4.1): W5.
 //!
 //! An outcome MAY arrive after its key has left the desired set: a timeout
 //! racing the real result, a retracted effect completing anyway, an effect of a
@@ -8,7 +8,7 @@
 //!
 //! The suite has two halves. The first shows the filter working: a key retracted
 //! mid-flight has its outcome dropped. The second shows what the filter rests on.
-//! Its only test is **presence in the set**, not identity, so §3.1's rule that a
+//! Its only test is **presence in the set**, not identity, so §4.1's rule that a
 //! key is unique over the entity's whole journal is load-bearing: with a key
 //! reused across occurrences the workflow settles the *first* occurrence's
 //! outcome as the second's, and no machinery here can tell.
@@ -110,7 +110,7 @@ fn an_outcome_whose_key_left_the_desired_set_is_discarded_and_writes_nothing() {
 
 #[test]
 fn a_retracted_key_that_never_returns_leaves_the_activation_free_to_rest() {
-    // The other side of the same rule (§3.2 step 2): releasing the claim of a key
+    // The other side of the same rule (§4.2 step 2): releasing the claim of a key
     // that has left the desired set is what bounds the claim table by the work
     // outstanding rather than by the work ever done. A hung effect whose key was
     // retracted must stop holding the activation resident, or a cancelled call
@@ -131,13 +131,13 @@ fn a_retracted_key_that_never_returns_leaves_the_activation_free_to_rest() {
     assert!(
         announced_quiescence(&recorder.events()),
         "with its only key retracted the activation has nothing in flight and \
-         nothing at all in its desired set: it must reach quiescence (§6)"
+         nothing at all in its desired set: it must reach quiescence (§7)"
     );
 }
 
 #[test]
 fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
-    // §3.1 and §4.4 together, stated as the failure they prevent. The filter
+    // §4.1 and §5.4 together, stated as the failure they prevent. The filter
     // decides *presence*, not identity. Reuse a key across occurrences and the
     // workflow cannot tell them apart: the straggler of the first finds its key
     // present again and is settled as the second's outcome, while the second's
@@ -168,7 +168,7 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     sim.run_for(Duration::from_millis(200));
 
     // Retract, let the workflow release the claim, and re-request the *same* key: a
-    // second visit to one call site, which §3.1 forbids and nothing in the workflow
+    // second visit to one call site, which §4.1 forbids and nothing in the workflow
     // can detect.
     ask(&sim, &fanouts, "job/2", Retract(0));
     // The retract's tick must run before the re-request, or the second
@@ -196,7 +196,7 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     assert!(
         done.contains_key(&0),
         "the first occurrence's outcome was settled as the second's, because \
-         presence is the only test the filter has (§4.4, §3.1)"
+         presence is the only test the filter has (§5.4, §4.1)"
     );
     assert!(
         outstanding.is_empty(),

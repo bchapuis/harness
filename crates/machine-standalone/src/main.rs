@@ -17,7 +17,7 @@
 //! `--help` lists every flag. The rest are one-shot commands issued through a
 //! node's admin socket (see [`admin`] for why they are not cluster members
 //! themselves); each becomes an ordinary journaled entity command, because
-//! provisioning and access policy *are* journal events (machine §3), not an
+//! provisioning and access policy *are* journal events (machine §4), not an
 //! administrative side channel.
 //!
 //! The deployment supplies every plug point the machine crates leave open:
@@ -152,7 +152,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     node::run(opts).await
 }
 
-/// The node's egress configuration (machine §2.6) from its three flags, or
+/// The node's egress configuration (machine §5.2) from its three flags, or
 /// `None` when egress is off. An uplink turns it on and needs a pool beside it:
 /// nodes sharing a host must not carve guest addresses from one pool, so there
 /// is no default.
@@ -308,7 +308,7 @@ async fn run_create(args: &[String]) -> Result<(), String> {
     .map_err(|e| format!("provision {}: {e}", common.machine))?;
     match reply {
         AdminReply::Done => println!("machine `{}` provisioned", common.machine),
-        // A machine is a durable, named thing (machine §1): asking for one that
+        // A machine is a durable, named thing (machine §2): asking for one that
         // exists is asking for the one that exists. Reported rather than failed,
         // so a re-run of a demo, or a retried command whose first landing was
         // lost, is a no-op instead of an error.
@@ -352,7 +352,7 @@ async fn run_status(args: &[String]) -> Result<(), String> {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "-".to_string())
     );
-    // The capture cadence is the durability grain (machine §4, M3): the last
+    // The capture cadence is the durability grain (machine §6, M3): the last
     // capture is the point a crash rewinds to.
     println!("captures       {}", status.captures);
     println!(
@@ -392,7 +392,7 @@ async fn run_key(args: &[String]) -> Result<(), String> {
                     fingerprint: value.clone(),
                 },
                 // A revoked key stops authorizing the *next* attach; it does
-                // not tear down a live connection (machine §3).
+                // not tear down a live connection (machine §4).
                 format!("revoked {value} (live connections are unaffected)"),
             ),
             other => return Err(format!("key: unknown flag `{other}`")),
@@ -450,7 +450,7 @@ async fn run_egress(args: &[String]) -> Result<(), String> {
     .await
     .map_err(|e| format!("egress {}: {e}", common.machine))?;
     match reply {
-        // Journaled now, realized when the machine next boots (machine §3).
+        // Journaled now, realized when the machine next boots (machine §4).
         AdminReply::Done => println!(
             "machine `{}` egress set to {shown}, effective from its next boot",
             common.machine
@@ -470,7 +470,7 @@ fn describe(reply: AdminReply) -> String {
 }
 
 /// Read an OpenSSH public key file into the `(fingerprint, key line)` pair the
-/// machine journals (machine §3). Parsed here so a malformed key fails at the
+/// machine journals (machine §4). Parsed here so a malformed key fails at the
 /// CLI rather than silently authorizing nobody.
 fn read_public_key(path: &str) -> Result<(String, String), String> {
     let line = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;

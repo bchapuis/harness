@@ -6,7 +6,7 @@
 //! `prompt`/`records`/`cancel`/`sessions` are request-response; `stream` (and a
 //! `prompt` with `Accept: text/event-stream`) ride a harness [`Follower`] as
 //! Server-Sent Events (event types: `records`, `truncated`, `outcome`,
-//! `error`, `end`). Both read forms surface snapshot compaction (§8.2):
+//! `error`, `end`). Both read forms surface snapshot compaction (§10.2):
 //! `records` returns the journal's `base` beside the page, and a stream whose
 //! cursor the compactor overtakes emits `truncated` before resuming.
 //!
@@ -127,7 +127,7 @@ async fn readyz<S: HarnessSystem>(State(gw): State<Arc<Gateway<S>>>) -> Response
 /// health probes so k8s liveness/readiness polling stays quiet. The path never
 /// carries the bearer token (it rides the `Authorization` header), so this cannot
 /// leak a secret. Latency is omitted: timing must route through the `Clock` seam
-/// (actor §2.12.2), never the wall clock.
+/// (actor §11), never the wall clock.
 async fn log_request(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -211,7 +211,7 @@ async fn prompt<S: HarnessSystem>(
     gw.record_ownership(&principal, &kind, &session).await;
     if wants_sse(&headers) {
         // A reconnect resumes at `Last-Event-ID` (the last seq the client saw);
-        // re-submitting the same turn id reattaches the run (idempotent, §5.3).
+        // re-submitting the same turn id reattaches the run (idempotent, §7.2).
         return Ok(prompt_stream(
             session_ref,
             body,
@@ -236,7 +236,7 @@ async fn records<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     let history = session_ref.tail(Seq::new(q.from), q.limit).await?;
-    // `base` is the compaction floor (§8.2): a `from` below it asked for
+    // `base` is the compaction floor (§10.2): a `from` below it asked for
     // records the session's snapshot has subsumed, so the page's history
     // starts truncated; the client's one way to tell that from the journal
     // slots the projection legally skips.
@@ -391,7 +391,7 @@ async fn next_event<S: HarnessSystem>(
             // A streaming prompt races the follower against its own task: the
             // turn's records may never arrive (a rejected submit runs nothing;
             // a turn that ended before the cursor is not replayed), and the
-            // caller's wait is bounded either way (edge §2.1). The follower is
+            // caller's wait is bounded either way (edge §4.6). The follower is
             // polled first, so a batch that is ready wins a tie.
             let Live {
                 session,
@@ -422,7 +422,7 @@ async fn next_event<S: HarnessSystem>(
                     }
                     event
                 }
-                // Compaction outran the stream's cursor (§8.2): the records up
+                // Compaction outran the stream's cursor (§10.2): the records up
                 // to `base` are subsumed by the session's snapshot and cannot be
                 // replayed. Tell the client rather than silently resuming past
                 // the gap; the event id is the base, so a `Last-Event-ID`

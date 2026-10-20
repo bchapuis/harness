@@ -1,4 +1,4 @@
-//! Catalogue drift test (sandbox spec §6): the machine-readable S1–S5
+//! Catalogue drift test (sandbox spec §7): the machine-readable S1–S5
 //! catalogue stays complete and accurate; the same pattern guarding the core,
 //! utilities, and agent catalogues.
 
@@ -74,7 +74,7 @@ fn the_catalogue_covers_s1_through_s5() {
 #[test]
 fn no_entry_claims_a_continuous_checker() {
     // S4 is a journal audit at quiescence, never a stream checker: tool
-    // execution carries no events for one to consume (agent spec §4.5
+    // execution carries no events for one to consume (agent spec §5.5
     // item 6). Anyone adding a `Verify::Checker` entry here must wire the
     // checker into a live invariant set first, and then this assertion,
     // like its agent sibling, becomes the drift test between the two.
@@ -87,7 +87,7 @@ fn no_entry_claims_a_continuous_checker() {
     }
 }
 
-/// The table above and the sandbox spec's §6 copy of it are the same
+/// The table above and the sandbox spec's §7 copy of it are the same
 /// table.
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds it
@@ -98,7 +98,7 @@ fn no_entry_claims_a_continuous_checker() {
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("sandbox");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
-    let documented = catalogue::documented(&root, site).expect("sandbox spec §6 parses");
+    let documented = catalogue::documented(&root, site).expect("sandbox spec §7 parses");
     let implemented: Vec<catalogue::Row> = s_catalogue()
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec))
@@ -107,7 +107,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "sandbox spec §6 and s_catalogue() disagree:\n  {}\n",
+        "sandbox spec §7 and s_catalogue() disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

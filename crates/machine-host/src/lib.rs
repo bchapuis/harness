@@ -1,4 +1,4 @@
-//! The host side of a machine (sandbox spec §4.4, §4; machine spec §2.3).
+//! The host side of a machine (sandbox spec §5.4, §5; machine spec §3.2).
 //!
 //! Three words, one job each, across this crate and its consumers:
 //!
@@ -18,10 +18,10 @@
 //! - [`MachineHost`]: the node's mechanism, one per node, chosen by an
 //!   operator's flag. Never probed: which mechanism a node runs is deployment
 //!   configuration, because the two [grades](MachineIsolation) of confinement
-//!   are not interchangeable (sandbox §4.4) and a host must not silently pick the
+//!   are not interchangeable (sandbox §5.4) and a host must not silently pick the
 //!   weaker one.
 //! - [`MachineGuest`], one live guest: a byte stream to an agent inside it, the
-//!   quiescent point a capture needs (machine §4), and a stop that cannot leak.
+//!   quiescent point a capture needs (machine §6), and a stop that cannot leak.
 //! - [`GuestError`], a mechanism failure, split by what the caller must do
 //!   next: re-provision ([`Gone`](GuestError::Gone)), or keep the guest and
 //!   report ([`Host`](GuestError::Host)).
@@ -75,15 +75,15 @@ pub mod ws_sync;
 /// `actor_core::BoxFuture`, which is the same alias.
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Which isolation a mechanism gives (sandbox §4.4's two grades of
+/// Which isolation a mechanism gives (sandbox §5.4's two grades of
 /// confinement). Reported so
 /// a node can log what it runs, and so a consumer can skip a capability the
-/// weaker grade cannot realize (the machine's egress tap, machine §2.6).
+/// weaker grade cannot realize (the machine's egress tap, machine §5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MachineIsolation {
     /// Hardware virtualization: the guest speaks to a VMM, not the host kernel.
     MicroVm,
-    /// Shared kernel: the guest is a container. Sandbox §4.4's SHOULD grade: a
+    /// Shared kernel: the guest is a container. Sandbox §5.4's SHOULD grade: a
     /// development mechanism, priced by kernel privilege-escalation bugs.
     Container,
 }
@@ -99,8 +99,8 @@ impl std::fmt::Display for MachineIsolation {
 
 /// A mechanism operation failed. Split by the caller's next move, not by the
 /// mechanism's internals: the same two arms serve a tier that must decide
-/// whether to re-provision (sandbox §5) and an entity that must decide whether
-/// its guest is gone (machine §4).
+/// whether to re-provision (sandbox §6) and an entity that must decide whether
+/// its guest is gone (machine §6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestError {
     /// The guest is gone, or was never started here. Retrying in place cannot
@@ -158,7 +158,7 @@ impl GuestKey {
 
 /// What a guest gets for a network. `None` is every sandbox guest (sandbox §1.1: no NIC
 /// by construction) and every containerized guest; a tap is the machine's
-/// egress seam (machine §2.6), realized by the consumer's policy and honored
+/// egress seam (machine §5.2), realized by the consumer's policy and honored
 /// only by [`MachineIsolation::MicroVm`].
 #[derive(Clone, Debug, Default)]
 pub enum Network {
@@ -181,7 +181,7 @@ pub struct GuestSpec {
     pub key: GuestKey,
     /// The guest's root block image, used **in place**: both mechanisms read
     /// and write this very file, which is what makes it the durable thing a
-    /// capture scans (facets §4.4). A consumer wanting a disposable root
+    /// capture scans (facets §5.4). A consumer wanting a disposable root
     /// copies it first and names the copy here.
     pub disk: PathBuf,
     pub vcpus: u8,
@@ -189,7 +189,7 @@ pub struct GuestSpec {
     pub network: Network,
 }
 
-/// A node's confinement mechanism: what it uses to hold guests (machine §2.3).
+/// A node's confinement mechanism: what it uses to hold guests (machine §3.2).
 ///
 /// One per node, built from the operator's flag. Implementations:
 /// [`microvm::MicroVmHost`] and [`container::ContainerHost`].
@@ -216,7 +216,7 @@ pub trait MachineHost: Send + Sync + 'static {
 
     /// Open a stream to a guest this node may be running, from its key alone:
     /// what a front door needs when it does not hold the guest object (machine
-    /// §2.5). [`GuestError::Gone`] when no such guest is here, which is the
+    /// §5.1). [`GuestError::Gone`] when no such guest is here, which is the
     /// ordinary case for a machine whose activation is on another node.
     fn connect_by_key<'a>(
         &'a self,
@@ -225,7 +225,7 @@ pub trait MachineHost: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Box<dyn Duplex>, GuestError>>;
 }
 
-/// One live guest (machine §2.3). Held by its consumer's activation and by nothing durable;
+/// One live guest (machine §3.2). Held by its consumer's activation and by nothing durable;
 /// dropped or stopped with it, and never leaking either way.
 pub trait MachineGuest: Send + Sync + 'static {
     /// Whether the guest is still there at all: a VMM that has not exited, a
@@ -244,13 +244,13 @@ pub trait MachineGuest: Send + Sync + 'static {
 
     /// Reach a quiescent point: once this resolves, the guest issues no further
     /// writes to its disk until [`resume`](MachineGuest::resume), so a capture scans a
-    /// stable image (machine §4, facets §4.4).
+    /// stable image (machine §6, facets §5.4).
     ///
     /// Each mechanism promises as much consistency as it can: freezing a
     /// container leaves its writes in the host kernel's cache, so that
     /// implementation flushes first and the capture reads a filesystem-clean
     /// image; a paused microVM is crash-consistent only, and the consumer's
-    /// agent-level `sync` is what upgrades it (machine §2.4).
+    /// agent-level `sync` is what upgrades it (machine §3.3).
     fn pause(&self) -> BoxFuture<'_, Result<(), GuestError>>;
 
     fn resume(&self) -> BoxFuture<'_, Result<(), GuestError>>;

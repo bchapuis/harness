@@ -1,7 +1,7 @@
-//! Conformance: group routers (utilities spec §2.2).
+//! Conformance: group routers (utilities spec §3.1).
 //!
 //! Routers are node-local functions over the in-rotation listing, so there is no
-//! numbered invariant, these tests pin the §2.1 requirements directly:
+//! numbered invariant, these tests pin the §3.1 requirements directly:
 //! deterministic round-robin in listing order, seeded (reproducible) random,
 //! cross-node agreement of rendezvous-hashed routing with minimal movement,
 //! fail-fast `DeadLetter` on an empty group, and the serving filter routing
@@ -55,7 +55,7 @@ fn greet() -> Greet {
 
 #[test]
 fn round_robin_cycles_the_listing_in_order() {
-    // §2.1 item 3: the cycle follows the listing's deterministic order, visiting
+    // §3.1 item 3: the cycle follows the listing's deterministic order, visiting
     // every routee once per revolution.
     let (sim, net) = support::cluster(21, None);
     let node = net.join(A);
@@ -84,7 +84,7 @@ fn round_robin_cycles_the_listing_in_order() {
 
 #[test]
 fn random_routing_is_seed_reproducible() {
-    // §2.1 item 3: random draws come from the seeded entropy (core §2.12.2), so an
+    // §3.1 item 3: random draws come from the seeded entropy (core §11), so an
     // identical seed yields an identical pick sequence.
     let picks = |seed: u64| {
         let (sim, net) = support::cluster(seed, None);
@@ -107,7 +107,7 @@ fn random_routing_is_seed_reproducible() {
 
 #[test]
 fn hashed_routing_agrees_across_nodes() {
-    // §2.1 item 3: the same key over the same listing selects the same routee on
+    // §3.1 item 3: the same key over the same listing selects the same routee on
     // every node; this is what makes `route_by` usable for affinity.
     let (sim, net) = support::cluster(23, Some(brisk_swim()));
     let node_a = net.join(A);
@@ -133,8 +133,8 @@ fn hashed_routing_agrees_across_nodes() {
 
 #[test]
 fn removing_an_unrelated_routee_leaves_other_keys_mapping_unchanged() {
-    // Minimal movement at routee granularity (utilities spec §2.1 item 5 through
-    // §2.1): stopping one routee only remaps the keys it owned.
+    // Minimal movement at routee granularity (utilities spec §4.1 item 5 through
+    // §3.1): stopping one routee only remaps the keys it owned.
     let (sim, net) = support::cluster(29, None);
     let node = net.join(A);
     sim.block_on(async move {
@@ -173,7 +173,7 @@ fn removing_an_unrelated_routee_leaves_other_keys_mapping_unchanged() {
 
 #[test]
 fn an_empty_group_fails_fast_with_dead_letter() {
-    // §2.1 item 4: no routee, no buffering; the call returns immediately.
+    // §3.1 item 4: no routee, no buffering; the call returns immediately.
     let (sim, net) = support::cluster(31, None);
     let node = net.join(A);
     let (ask, tell, keyed) = sim.block_on(async move {
@@ -192,7 +192,7 @@ fn an_empty_group_fails_fast_with_dead_letter() {
 
 #[test]
 fn a_drained_routee_is_routed_around_until_resumed() {
-    // §2.1 item 2: decisions draw from the in-rotation listing, so an operator drain
+    // §3.1 item 2: decisions draw from the in-rotation listing, so an operator drain
     // removes a routee from rotation and a resume restores it, without any
     // re-registration.
     let sim = Simulation::new(37);
@@ -238,7 +238,7 @@ fn a_drained_routee_is_routed_around_until_resumed() {
 
 #[test]
 fn remote_routees_are_callable_through_the_router() {
-    // §2.1 item 5: the router adds nothing to (and subtracts nothing from) the
+    // §3.1 item 5: the router adds nothing to (and subtracts nothing from) the
     // underlying remote ask path.
     let (sim, net) = support::cluster(41, Some(brisk_swim()));
     let node_a = net.join(A);

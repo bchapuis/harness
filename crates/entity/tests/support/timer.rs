@@ -5,7 +5,7 @@
 //! and stops. It makes a fire countable: `fired` is folded from committed events,
 //! so a caller asking [`ReadFired`] learns how many times the alarm's effect
 //! actually committed, not how many times the host invoked the handler, which
-//! under faults is a different and much larger number (facets §4.5).
+//! under faults is a different and much larger number (facets §5.5).
 //!
 //! Generic over the hosting system, like [`entity::cluster::AlarmIndex`] itself, so the
 //! same entity runs on the `Local` tier in `alarm_index.rs` and on the clustered

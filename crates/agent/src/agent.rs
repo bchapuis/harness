@@ -1,27 +1,27 @@
-//! The agent: an autonomous entity (agent spec §3).
+//! The agent: an autonomous entity (agent spec §4).
 //!
 //! A session *is* an entity ([`entity`]). What the agent runtime adds is **autonomy**:
 //! an agent's activation drives itself forward (model→tools→model) until a run
 //! reaches a terminal outcome. The entity model is decide/apply: [`Entity::apply`]
 //! folds records into [`SessionState`], and each [`EntityHandler`] is a *pure
-//! decision* returning the records to journal plus a reply (entity §3.2). The
+//! decision* returning the records to journal plus a reply (entity §4.2). The
 //! loop rides three entity seams:
 //!
-//! - **The output gate** (entity §5): a handler's records commit before its
-//!   reply releases, so "intent before effect" (§3.3) is free; a handler that
+//! - **The output gate** (entity §6): a handler's records commit before its
+//!   reply releases, so "intent before effect" (§4.3) is free; a handler that
 //!   journals an intent never launches the effect itself.
 //! - **Self-messaging** ([`EntityCtx::this`]) + **`ctx.system().launch`**: each
 //!   external operation (a model call, a sandboxed tool, a child submit) is a
 //!   background task that delivers its outcome back as an ordinary command, and
 //!   every commit nudges the loop forward. The activation therefore never awaits
-//!   I/O inside a handler (§3.2). Both messages are the workflow's now, [`Tick`]
+//!   I/O inside a handler (§4.2). Both messages are the workflow's now, [`Tick`]
 //!   and [`Settled`], and so is the cycle between them.
-//! - **`on_activate`/`on_deactivate`/`can_hibernate`** (entity §7): resume
+//! - **`on_activate`/`on_deactivate`/`can_hibernate`** (entity §8): resume
 //!   set-up, sandbox release on every deactivation (A7), and the veto that keeps
-//!   a live run from hibernating (§5.2).
+//!   a live run from hibernating (§7.1).
 //!
 //! Everything else (the journal, the single-writer fence, placement,
-//! activation, hibernation, lossless failover) is the entity's (§3.1), and the
+//! activation, hibernation, lossless failover) is the entity's (§4.1), and the
 //! **autonomy itself is the workflow's** ([`Workflow`], workflow spec): this
 //! module supplies [`pending`](Workflow::pending), [`perform`](Workflow::perform)
 //! and [`settle`](Workflow::settle), and the [`Engine`] runs the cycle over
@@ -32,7 +32,7 @@
 //!
 //! Ephemeral activation state (the sandbox handle, held tiers, the subscriber
 //! set) lives behind a [`Mutex`] on the entity behavior, rebuilt per activation
-//! and never journaled (§4.4, §4.5, §5.3); the engine keeps its own beside it.
+//! and never journaled (§5.4, §5.5, §7.2); the engine keeps its own beside it.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -99,17 +99,17 @@ use crate::tool::DelegateInput;
 use crate::tool::ToolError;
 
 // ===========================================================================
-// Wire contract (§2.6): commands addressed to the entity, and the outbound
+// Wire contract (§7.2): commands addressed to the entity, and the outbound
 // `RunCompleted` notification. A session is addressed as an entity (its `kind`
 // is the entity type and its `SessionId` the key), so the `EntityName` carries
-// both and the commands omit them (entity §2.2).
+// both and the commands omit them (entity §3.2).
 // ===========================================================================
 
-/// Submit a turn (§2.6). `kind` rides every call though it binds only on the
+/// Submit a turn (§7.2). `kind` rides every call though it binds only on the
 /// first (creation is implicit in the first turn); after that it is a checked
-/// redundancy against the entity's own type, rejected on mismatch (§5.3).
+/// redundancy against the entity's own type, rejected on mismatch (§7.2).
 /// `reply_to` is **transient routing, not part of the turn**: it is not
-/// journaled and is excluded from the content-equality check (§5.3).
+/// journaled and is excluded from the content-equality check (§7.2).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Submit<S: HarnessSystem> {
@@ -125,7 +125,7 @@ impl<S: HarnessSystem> Message for Submit<S> {
 }
 
 /// The `Submit` ack, released by the output gate the moment the `TurnSubmitted`
-/// record commits (§2.6): an ack, not the run's outcome; the outcome travels
+/// record commits (§7.2): an ack, not the run's outcome; the outcome travels
 /// later as a [`RunCompleted`] notification to the `reply_to`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
@@ -133,11 +133,11 @@ pub struct Accepted {
     pub status: SubmitStatus,
 }
 
-/// What a `Submit` did (§2.6).
+/// What a `Submit` did (§7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitStatus {
     /// A fresh turn was accepted and journaled; its run starts when it
-    /// reaches the head of the session's queue (§2.6).
+    /// reaches the head of the session's queue (§7.2).
     Started,
     /// The `TurnId` named a queued or live turn; the `reply_to` was registered
     /// on it (A6).
@@ -147,7 +147,7 @@ pub enum SubmitStatus {
     Ended,
 }
 
-/// Why a `Submit` was rejected (§5.3): a deterministic caller-contract
+/// Why a `Submit` was rejected (§7.2): a deterministic caller-contract
 /// violation, kept distinct from a transport `EntityError`. Both cases are
 /// **permanent** (the same submit always rejects the same way), so a caller
 /// must never retry one, unlike a transport failure, which a peer move could
@@ -155,12 +155,12 @@ pub enum SubmitStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitReject {
     /// The submitted `kind` is not this entity's type: the address and the
-    /// payload disagree (§5.3).
+    /// payload disagree (§7.2).
     KindMismatch {
         addressed: KindId,
         submitted: KindId,
     },
-    /// The `TurnId` was already used for a different turn (§5.3): the equality
+    /// The `TurnId` was already used for a different turn (§7.2): the equality
     /// check covers the content and the literal budget field (`None` ≠
     /// `Some(default)`), and turn ids are the dedup key, so reusing one for a
     /// changed turn is a bug, never a retry.
@@ -187,7 +187,7 @@ impl std::fmt::Display for SubmitReject {
     }
 }
 
-/// Cancel the run `turn` names (§2.6, §7.2). Idempotent.
+/// Cancel the run `turn` names (§7.2, §9.2). Idempotent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cancel {
     pub turn: TurnId,
@@ -198,7 +198,7 @@ impl Message for Cancel {
     const MANIFEST: Manifest = Manifest::new("agent.Cancel");
 }
 
-/// Read the recorded outcome of the turn `turn` names (§2.5): `None` while the
+/// Read the recorded outcome of the turn `turn` names (§3.4): `None` while the
 /// turn is queued or running, or when no such turn was ever accepted. Commits
 /// nothing. The outcome is fold state, so it survives compaction of the turn's
 /// `RunEnded` record.
@@ -213,7 +213,7 @@ impl Message for TurnOutcome {
 }
 
 /// The outbound notification carrying a run's outcome to a registered `reply_to`
-/// (§2.6): a `tell` delivered when `RunEnded` commits. Delivery, not the source
+/// (§7.2): a `tell` delivered when `RunEnded` commits. Delivery, not the source
 /// of truth (the `RunEnded` record is); a lost one is recovered by re-contact.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunCompleted {
@@ -228,33 +228,33 @@ impl Message for RunCompleted {
 }
 
 // ===========================================================================
-// Internal self-driving commands (§3.2): local-only self-tells, never in the
+// Internal self-driving commands (§4.2): local-only self-tells, never in the
 // network allowlist (`register`), so no peer can inject them. They carry the
 // outcomes of launched work back onto the entity's serial command path.
 // ===========================================================================
 
-/// What one launched effect returned (§3.2 steps 2 and 4): the agent runtime's
+/// What one launched effect returned (§4.2 steps 2 and 4): the agent runtime's
 /// [`Workflow::Outcome`], carried back onto the command path by the workflow's
-/// [`Settled`] (workflow §4.1).
+/// [`Settled`] (workflow §5.1).
 ///
 /// The turn, the step, and the `CallId` are not here: they are the [`StepKey`]
 /// the same `Settled` carries, which is what makes a superseded response
 /// (an old activation's straggler racing the reissue after a same-node resume)
 /// a key that has left the desired set rather than a field to compare (workflow
-/// §4.4; §7.1 item 4).
+/// §5.4; §9.1 item 4).
 ///
 /// A tool failure is an ordinary value in the `Ok` arm, because a failing tool
-/// never fails the run (§4.2). The workflow's own [`EffectError`] reaches this
+/// never fails the run (§5.2). The workflow's own [`EffectError`] reaches this
 /// entity as `Interrupted`, for an orphaned call the fold resolves without
-/// launching (§4.4), and as `Failed`, for a `perform` that panicked (workflow
-/// §4.2) or a cancel this entity's own `perform` could not send (§7.2).
+/// launching (§5.4), and as `Failed`, for a `perform` that panicked (workflow
+/// §5.2) or a cancel this entity's own `perform` could not send (§9.2).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StepOutcome {
-    /// A model call's result (§3.2 step 2).
+    /// A model call's result (§4.2 step 2).
     Model(Result<ModelResponse, ModelError>),
-    /// A tool call's or delegation's result (§4.2, §6.1).
+    /// A tool call's or delegation's result (§5.2, §8.1).
     Tool(Result<Value, ToolError>),
-    /// A propagated `Cancel` was acked by the child (§7.2): the ack itself is
+    /// A propagated `Cancel` was acked by the child (§9.2): the ack itself is
     /// not durable, only the `CancelDelivered` record the settle journals is.
     Cancelled,
 }
@@ -263,10 +263,10 @@ pub enum StepOutcome {
 // The entity
 // ===========================================================================
 
-/// What the environment pre-pass concluded about this round (§4.2, §4.4, §4.5).
+/// What the environment pre-pass concluded about this round (§5.2, §5.4, §5.5).
 enum Reconciled {
     /// Records to commit before anything launches; the tick their commit brings
-    /// re-enters the cycle (§3.3).
+    /// re-enters the cycle (§4.3).
     Records(Vec<Record>),
     /// The environment is not ready and an open is in flight. Nothing launches
     /// this round; the open's own tick re-enters.
@@ -275,54 +275,54 @@ enum Reconciled {
     Ready,
 }
 
-/// The sandbox binding and tier grants this activation holds (§4.2, §4.5):
+/// The sandbox binding and tier grants this activation holds (§5.2, §5.5):
 /// fold-external working state, rebuilt per activation and released on
 /// deactivation (A7).
 #[derive(Default)]
 struct SandboxState {
     /// The sandbox handle's lifecycle slot: at most one live sandbox per
     /// activation (invariant A7). This is the workflow's activation-scoped
-    /// binding (workflow §2.6): opened once on demand, vetoing hibernation while
+    /// binding (workflow §8): opened once on demand, vetoing hibernation while
     /// the open is in flight, released on every deactivation, and never
     /// journaled. The opened handle is not serializable, so the open task fills
     /// the binding directly under the [`Mutex`] (the one place a task touches
     /// activation state off the command path) rather than carrying it in a
     /// message; the task then re-enters the cycle with a [`Tick`].
     slot: Binding<Arc<dyn Sandbox>>,
-    /// Tiers this activation holds (§4.5): working state, never fold state.
-    /// Opening grants `Workspace` and nothing else (§4.5 item 1).
+    /// Tiers this activation holds (§5.5): working state, never fold state.
+    /// Opening grants `Workspace` and nothing else (§5.5 item 1).
     tiers_held: BTreeSet<Tier>,
     /// Whether this activation has reconciled with the journal's sandbox
-    /// activity (§4.4): false until a `WorkspaceReset` is journaled (or none is
+    /// activity (§5.4): false until a `WorkspaceReset` is journaled (or none is
     /// needed); flipped false again on environment loss.
     reconciled: bool,
     /// Whether the workspace was lost *during* this activation: the provider
-    /// returned `EnvironmentLost` (§4.2). The durable workspace survives
+    /// returned `EnvironmentLost` (§5.2). The durable workspace survives
     /// reactivation, so only a loss observed here resets. Set on
     /// `EnvironmentLost`, cleared per activation in `on_activate`.
     lost_this_activation: bool,
 }
 
-/// Ephemeral, per-activation working state (§4.4, §4.5, §5.3): never journaled,
+/// Ephemeral, per-activation working state (§5.4, §5.5, §7.2): never journaled,
 /// rebuilt on every activation, lost on deactivation. Held behind a [`Mutex`] so
 /// the `&self` handlers (entity's decide functions) can mutate it.
 struct Activation<S: HarnessSystem> {
-    /// The sandbox binding and held tiers (§4.2, §4.5).
+    /// The sandbox binding and held tiers (§5.2, §5.5).
     env: SandboxState,
-    /// Events owed once the records they announce commit (§2.8): built by the
+    /// Events owed once the records they announce commit (§10.1): built by the
     /// handler that decides the record, emitted by the tick that follows the
     /// commit, in push order. Filled only on the committing activation, so a
     /// resume re-emits none of them.
     events: Vec<AgentEvent>,
-    /// Callers registered for a run's outcome (§5.3): notified on `RunEnded`,
+    /// Callers registered for a run's outcome (§7.2): notified on `RunEnded`,
     /// rebuilt by callers re-contacting after a resume. The workflow's
-    /// component (workflow §2.7), which is where the discipline this follows
+    /// component (workflow §9), which is where the discipline this follows
     /// is written down.
     subscribers: Subscribers<TurnId, ActorRef<ReplyMailbox<S>>>,
 }
 
 impl<S: HarnessSystem> Activation<S> {
-    /// Register `reply_to` (if any) for `turn`'s outcome (§5.3). A no-op when the
+    /// Register `reply_to` (if any) for `turn`'s outcome (§7.2). A no-op when the
     /// submit carried no mailbox: the one place a subscriber is added to the list.
     fn subscribe(&mut self, turn: &TurnId, reply_to: Option<ActorRef<ReplyMailbox<S>>>) {
         if let Some(reply_to) = reply_to {
@@ -343,21 +343,21 @@ impl<S: HarnessSystem> Default for Activation<S> {
     }
 }
 
-/// The agent entity (agent spec §3): one `Agent` Rust type hosted under each
-/// kind's name (`entities_named`, §3.1). The behavior is built fresh per
+/// The agent entity (agent spec §4): one `Agent` Rust type hosted under each
+/// kind's name (`entities_named`, §4.1). The behavior is built fresh per
 /// activation by the agent runtime's factory, which injects the node's seams via
 /// [`Shared`]; the folded [`SessionState`] is the entity's `State`, rebuilt from
 /// the journal by entity.
 pub struct Agent<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
-    /// This entity's kind definition (§5.1). Captured by the factory, which hosts
-    /// one entity type per kind (§3.1), so an activation of entity-type `K` always
+    /// This entity's kind definition (§6.2). Captured by the factory, which hosts
+    /// one entity type per kind (§4.1), so an activation of entity-type `K` always
     /// has `K`'s definition: kind resolution is infallible, no lookup needed.
     kind: Arc<Kind>,
-    /// The model and sandbox seams for this hosted kind (§2.1, §2.3), captured by
+    /// The model and sandbox seams for this hosted kind (§3.1, §3.3), captured by
     /// the factory.
     seams: Seams,
-    /// The workflow's reconciliation engine (workflow §2.2): the claims, the
+    /// The workflow's reconciliation engine (workflow §3.2): the claims, the
     /// orphan classification, and the launch cycle. Internally synchronized, so
     /// it sits beside the activation mutex rather than inside it.
     engine: Engine<Agent<S>>,
@@ -366,7 +366,7 @@ pub struct Agent<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Agent<S> {
     /// Build a fresh activation's behavior, injecting this node's seams and this
-    /// entity type's kind (§5.3). Called by the agent runtime factory passed to
+    /// entity type's kind (§7.2). Called by the agent runtime factory passed to
     /// `entities_named`.
     pub(crate) fn new(shared: Arc<Shared<S>>, kind: Arc<Kind>, seams: Seams) -> Agent<S> {
         Agent {
@@ -386,7 +386,7 @@ impl<S: HarnessSystem> Agent<S> {
         SessionId::new(ctx.name().key())
     }
 
-    /// Stamp a record body with this node's clock reading (§8.1).
+    /// Stamp a record body with this node's clock reading (§10.1).
     fn rec(&self, ctx: &EntityCtx<Agent<S>>, body: RecordBody) -> Record {
         Record {
             at_nanos: ctx.system().now().as_nanos(),
@@ -395,7 +395,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Resolve `call` with a failure outcome the fold decided rather than an
-    /// effect produced (§4.2): the `ToolOutcome` record to journal.
+    /// effect produced (§5.2): the `ToolOutcome` record to journal.
     ///
     /// Committing it takes the call out of the desired set, which is what stops
     /// the relaunch; there is no second place to mark, and so no way for the two
@@ -417,7 +417,7 @@ impl<S: HarnessSystem> Agent<S> {
         )
     }
 
-    /// End the live run as one step: owe the §2.8 `RunEnded` event and return
+    /// End the live run as one step: owe the §10.1 `RunEnded` event and return
     /// the terminal record to journal. Paired like `fail_call`: the event
     /// without the record would announce a run the journal never ended; the
     /// record without the event breaks A2's start/end pairing. A turn cancelled
@@ -438,7 +438,7 @@ impl<S: HarnessSystem> Agent<S> {
         self.rec(ctx, RecordBody::RunEnded { turn, outcome })
     }
 
-    /// Fail every desired sandboxed call with one reason (§4.2): what a sandbox
+    /// Fail every desired sandboxed call with one reason (§5.2): what a sandbox
     /// the activation could not open owes the calls that needed it. One batch,
     /// so no commit lands between two of them and starts an open the rest
     /// would then wait on.
@@ -481,7 +481,7 @@ impl<S: HarnessSystem> Agent<S> {
         let digest = turn_digest(&msg.turn.content, msg.turn.budget);
         let mut act = self.lock();
 
-        // Dedup against the journal (§5.3): every accepted turn (queued, live,
+        // Dedup against the journal (§7.2): every accepted turn (queued, live,
         // or ended) has folded facts, so one check covers all three (A6). The
         // digest spans content and the literal budget, so a re-submission that
         // changes either is a conflict, never a silent attach.
@@ -509,7 +509,7 @@ impl<S: HarnessSystem> Agent<S> {
                 None => {
                     act.subscribe(&turn_id, msg.reply_to);
                     // A queued or live turn re-contacted after a resume may be
-                    // waiting on this very nudge (§5.4): drive the cycle, and
+                    // waiting on this very nudge (§7.3): drive the cycle, and
                     // wake any key the engine had backed off to rest.
                     drop(act);
                     self.engine.tick(self, state, ctx);
@@ -525,7 +525,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
 
         // A new turn: journal its acceptance; the committing append releases
-        // the ack, so an acked turn is durable (§2.6). The run itself starts
+        // the ack, so an acked turn is durable (§7.2). The run itself starts
         // in the dispatcher when the turn reaches the queue's head with no run
         // live (`start_next_turn`, the one run-start site); the post-commit
         // tick gets it there without a second caller contact.
@@ -542,7 +542,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// The records that accept a turn: `SessionCreated` on the very first turn,
-    /// then `TurnSubmitted` (§5.1, §2.6); the enqueue, not the run start.
+    /// then `TurnSubmitted` (§6.2, §7.2); the enqueue, not the run start.
     fn accept_records(
         &self,
         state: &SessionState,
@@ -587,10 +587,10 @@ impl<S: HarnessSystem> Agent<S> {
     ) -> Vec<Record> {
         // A cancel naming the live run ends it; one naming a queued turn ends
         // that turn before it ever starts; one naming an ended or unknown run
-        // is an idempotent no-op (§7.2 item 1). The live run's recorded
+        // is an idempotent no-op (§9.2 item 1). The live run's recorded
         // children are not captured here: the fold moves them into
         // `cancels_owed` when the `RunEnded { Cancelled }` commits, and the
-        // post-commit tick propagates from that (§7.2 item 2), so the
+        // post-commit tick propagates from that (§9.2 item 2), so the
         // debt survives a crash in between.
         if state.live.as_ref().is_some_and(|l| l.turn == turn) {
             let mut act = self.lock();
@@ -599,10 +599,10 @@ impl<S: HarnessSystem> Agent<S> {
             self.engine.tick(self, state, ctx);
             vec![ended]
         } else if state.queue.iter().any(|q| q.turn == turn) {
-            // Queued, never started (§7.2): the terminal record alone moves
+            // Queued, never started (§9.2): the terminal record alone moves
             // the fold; the queue entry drops, and the post-commit tick
             // notifies subscribers off the recorded outcome. No run began, so
-            // no `RunStarted`/`RunEnded` event pair is owed (§2.8).
+            // no `RunStarted`/`RunEnded` event pair is owed (§10.1).
             self.engine.tick(self, state, ctx);
             vec![self.rec(
                 ctx,
@@ -612,7 +612,7 @@ impl<S: HarnessSystem> Agent<S> {
                 },
             )]
         } else {
-            // A re-sent cancel is a documented resume trigger (§5.4): if this
+            // A re-sent cancel is a documented resume trigger (§7.3): if this
             // session still owes propagations (a crash lost the earlier send),
             // drive them now.
             if !state.cancels_owed.is_empty() {
@@ -622,13 +622,13 @@ impl<S: HarnessSystem> Agent<S> {
         }
     }
 
-    /// Fold a model call's outcome (§3.2 steps 2 and 3): the model half of
+    /// Fold a model call's outcome (§4.2 steps 2 and 3): the model half of
     /// [`Workflow::settle`].
     ///
     /// No straggler test of its own. A response for a step the journal has
     /// already answered, or for a run that ended while the call was in flight,
     /// arrives under a [`StepKey`] that has left the desired set, and the engine
-    /// discards it before this is reached (workflow §4.4).
+    /// discards it before this is reached (workflow §5.4).
     fn settle_model(
         &self,
         state: &SessionState,
@@ -641,8 +641,8 @@ impl<S: HarnessSystem> Agent<S> {
             Ok(StepOutcome::Model(result)) => result,
             // The workflow mints an `EffectError` for an orphaned effect it
             // resolved without launching, and for a `perform` that panicked
-            // (workflow §4.2, §4.3). Either way no response exists, and a model
-            // failure no retry policy absorbed ends the run (§2.1).
+            // (workflow §5.2, §5.3). Either way no response exists, and a model
+            // failure no retry policy absorbed ends the run (§3.1).
             Err(why) => Err(ModelError::Api(why.to_string())),
             // Unreachable: the effect under a `Model` key is a model call.
             Ok(StepOutcome::Tool(_) | StepOutcome::Cancelled) => Err(ModelError::Api(
@@ -656,25 +656,25 @@ impl<S: HarnessSystem> Agent<S> {
         };
         match result {
             Ok(mut response) => {
-                // Assign ids the provider omitted (§2.4): deterministic in the
+                // Assign ids the provider omitted (§6.1): deterministic in the
                 // step and position.
                 for (i, call) in response.calls.iter_mut().enumerate() {
                     if call.id.as_str().is_empty() {
                         call.id = CallId::new(format!("call-{}-{i}", step + 1));
                     }
                 }
-                // `ModelCompleted` is emitted after the response commits (§2.8),
-                // so it counts only journaled spend (§7.1 item 4).
+                // `ModelCompleted` is emitted after the response commits (§10.1),
+                // so it counts only journaled spend (§9.1 item 4).
                 act.events.push(AgentEvent::ModelCompleted {
                     session: Self::session(ctx),
                     turn: turn.clone(),
                     node: ctx.system().node(),
                 });
                 // No requested tool calls ⇒ this assistant message ends the run
-                // (§3.2 step 3).
+                // (§4.2 step 3).
                 if response.calls.is_empty() {
                     // Final message and terminal outcome in one atomic batch
-                    // (§3.3): no journal prefix ends between them.
+                    // (§4.3): no journal prefix ends between them.
                     let tokens = live.spend.tokens() + response.usage.total();
                     let completion = Completion::new(response.content.clone(), tokens);
                     let message = self.rec(
@@ -706,11 +706,11 @@ impl<S: HarnessSystem> Agent<S> {
         }
     }
 
-    /// Fold a tool call's or delegation's outcome (§4.2, §6.1): the call half of
+    /// Fold a tool call's or delegation's outcome (§5.2, §8.1): the call half of
     /// [`Workflow::settle`].
     ///
     /// Like the model half it needs no straggler test: a duplicate (a timeout
-    /// racing the real outcome, §7.2 item 4) and a late outcome of an ended run
+    /// racing the real outcome, §9.2 item 4) and a late outcome of an ended run
     /// both arrive under a key the desired set no longer holds.
     fn settle_tool(
         &self,
@@ -723,10 +723,10 @@ impl<S: HarnessSystem> Agent<S> {
         let outcome = match outcome {
             Ok(StepOutcome::Tool(outcome)) => outcome,
             // An orphaned call whose declaration said `Interrupt`, resolved by
-            // the workflow without a launch (§4.4, workflow §4.3). The model
+            // the workflow without a launch (§5.4, workflow §5.3). The model
             // decides whether to retry the side effect.
             Err(EffectError::Interrupted) => Err(ToolError::Interrupted),
-            // A `perform` that panicked, caught by the workflow (workflow §4.2).
+            // A `perform` that panicked, caught by the workflow (workflow §5.2).
             Err(EffectError::Failed(why)) => Err(ToolError::Sandbox(why)),
             // Never produced under a call key: a tool's own bound and a lost
             // environment come back as the `ToolError` the call returns. Mapped
@@ -747,13 +747,13 @@ impl<S: HarnessSystem> Agent<S> {
         let Some(pending) = pending else {
             return Vec::new();
         };
-        // Capture the workspace delta this tool left on disk (facets §4.1):
+        // Capture the workspace delta this tool left on disk (facets §5.1):
         // the staged records join this command's batch, so the tool outcome
         // and the files it wrote commit atomically (E19). Every sandboxed call
         // captures, success or failure (a failed shell can still have
         // written; a timed-out one may still be writing, so its capture can be
         // torn: the next capture diffs against the last committed index and
-        // folds in what the straggler finished, §4.3); a delegation
+        // folds in what the straggler finished, §5.3); a delegation
         // never touched the directory, and a reported environment loss must
         // not capture; the root may be gone, and a vanished root is never a
         // mass deletion.
@@ -770,7 +770,7 @@ impl<S: HarnessSystem> Agent<S> {
                      remove or exclude large files (this call's changes are not yet persisted)"
                 ))),
                 // The materialization root vanished: the environment is gone
-                // (§4.4); the durable content is safe in the journal and the
+                // (§5.4); the durable content is safe in the journal and the
                 // next activation rematerializes it.
                 Err(WsError::RootLost) => {
                     Err(ToolError::EnvironmentLost("workspace root lost".into()))
@@ -781,13 +781,13 @@ impl<S: HarnessSystem> Agent<S> {
             outcome
         };
         if let Err(ToolError::EnvironmentLost(_)) = &outcome {
-            // The environment is lost (§4.4): drop the binding, release it, and
+            // The environment is lost (§5.4): drop the binding, release it, and
             // require a `WorkspaceReset` before the next model call.
             self.release_sandbox(&mut act, ctx);
             act.env.reconciled = false;
             act.env.lost_this_activation = true;
         }
-        // `ToolCompleted` is owed once the outcome record below commits (§2.8).
+        // `ToolCompleted` is owed once the outcome record below commits (§10.1).
         act.events.push(AgentEvent::ToolCompleted {
             session: Self::session(ctx),
             turn: turn.clone(),
@@ -804,7 +804,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Hold the pre-pass to what the workflow's mechanism requires (workflow
-    /// §3.1, W1): once [`reconcile`](Self::reconcile) reports ready, **every**
+    /// §4.1, W1): once [`reconcile`](Self::reconcile) reports ready, **every**
     /// member of the desired set is launchable as it stands, with no gate left
     /// between it and its launch.
     ///
@@ -825,18 +825,18 @@ impl<S: HarnessSystem> Agent<S> {
                     assert!(
                         act.env.tiers_held.contains(tier),
                         "tool call {call} is desired at a tier this activation does not hold; \
-                         the acquisition gate is still inside the launch (§4.5)"
+                         the acquisition gate is still inside the launch (§5.5)"
                     );
                     assert!(
                         act.env.slot.get().is_some(),
                         "tool call {call} is desired with no sandbox bound ({:?}); \
-                         the environment gate is still inside the launch (§2.3, §4.2)",
+                         the environment gate is still inside the launch (§3.3, §5.2)",
                         act.env.slot.state()
                     );
                 }
                 // A delegation and a cancel run in the loop and a synthesized
-                // failure runs nowhere: none needs an environment (§2.4, §4.2,
-                // §6, §7.2).
+                // failure runs nowhere: none needs an environment (§6.1, §5.2,
+                // §8, §9.2).
                 Effect::Delegate { .. } | Effect::Cancel { .. } | Effect::Fail { .. } => {}
             }
         }
@@ -846,26 +846,26 @@ impl<S: HarnessSystem> Agent<S> {
     fn debug_assert_launchable(&self, _act: &Activation<S>, _desired: &[Pending<StepKey, Effect>]) {
     }
 
-    // -- the cycle (§3.2, workflow §3.2) -------------------------------------
+    // -- the cycle (§4.2, workflow §4.2) -------------------------------------
 
     /// The workflow cycle's entry point on this entity: the body of its
     /// [`EntityHandler<Tick>`], run after every committed batch.
     ///
     /// Two things happen before the engine sees the state, neither of them an
     /// effect and both the agent runtime's own: the events this activation owes
-    /// (§2.8) and the callers waiting on a run that has finished (§5.3). Then
+    /// (§10.1) and the callers waiting on a run that has finished (§7.2). Then
     /// the turn queue, then the environment pre-pass, and only then the engine,
     /// which launches what [`desired`](crate::desired::desired) holds and
-    /// nothing else; an owed cancel is a member of that set (§7.2).
+    /// nothing else; an owed cancel is a member of that set (§9.2).
     ///
     /// Returns the records to journal this round, which are the agent runtime's
     /// alone: the engine decides none, every outcome reaching the journal as a
-    /// [`Settled`] instead (workflow §3.2).
+    /// [`Settled`] instead (workflow §4.2).
     fn tick(&self, state: &SessionState, ctx: &EntityCtx<Agent<S>>) -> Vec<Record> {
         let kind = &self.kind;
         let mut act = self.lock();
 
-        // The events whose records the last commit carried (§2.8).
+        // The events whose records the last commit carried (§10.1).
         for event in std::mem::take(&mut act.events) {
             ctx.system().emit(event.into());
         }
@@ -881,7 +881,7 @@ impl<S: HarnessSystem> Agent<S> {
             }
             // Nothing to start, so the desired set is empty and this is the
             // round that says so: the engine releases the last claims and
-            // concludes quiescence here (workflow §3.2 step 4, §3). Returning
+            // concludes quiescence here (workflow §4.2 step 4, §4). Returning
             // ahead of it would leave `can_hibernate` answering from a cycle
             // that ran while work was still outstanding, and the session would
             // never come to rest.
@@ -890,17 +890,17 @@ impl<S: HarnessSystem> Agent<S> {
         let turn = live.turn.clone();
 
         // Reconcile the activation's environment against what the fold calls
-        // for (§4.2, §4.4, §4.5), before anything launches.
+        // for (§5.2, §5.4, §5.5), before anything launches.
         let desired = crate::desired::desired(kind, &self.shared.config, state);
         match self.reconcile(ctx, kind, &mut act, live, &turn, &desired) {
             // Records first: the commit brings the next tick, and nothing
-            // launches against a fold that is about to change (§3.3).
+            // launches against a fold that is about to change (§4.3).
             Reconciled::Records(records) => {
                 drop(act);
                 self.engine.tick(self, state, ctx);
                 return records;
             }
-            // An open is in flight; the open task's own tick re-enters (§2.3
+            // An open is in flight; the open task's own tick re-enters (§3.3
             // item 1).
             Reconciled::Waiting => return Vec::new(),
             Reconciled::Ready => {}
@@ -910,14 +910,14 @@ impl<S: HarnessSystem> Agent<S> {
         self.engine.advance(self, state, ctx)
     }
 
-    /// No live run: start the fold queue's head turn if one waits (§3.2); the
+    /// No live run: start the fold queue's head turn if one waits (§4.2); the
     /// **one** place a run starts. Committing the returned `TurnStarted` folds
     /// the head into `live` and is what makes `RunStarted` fire exactly once per
-    /// turn (§2.8); the tick that commit brings dispatches the new run's first
+    /// turn (§10.1); the tick that commit brings dispatches the new run's first
     /// model call.
     ///
     /// No sweep is needed first: the claims are the engine's, released as their
-    /// keys leave the desired set (workflow §3.2), and a key names its turn
+    /// keys leave the desired set (workflow §4.2), and a key names its turn
     /// ([`StepKey`]), so no leftover of the ended run can suppress a call of the
     /// next one.
     fn start_next_turn(
@@ -948,8 +948,8 @@ impl<S: HarnessSystem> Agent<S> {
         Vec::new()
     }
 
-    /// Reconcile the activation's environment against the desired set (§4.2,
-    /// §4.4, §4.5), ahead of every launch.
+    /// Reconcile the activation's environment against the desired set (§5.2,
+    /// §5.4, §5.5), ahead of every launch.
     ///
     /// The gates that cannot be folded live here: a workspace lost during this
     /// activation, a failed sandbox open, and a tier not yet held. Each is
@@ -959,8 +959,8 @@ impl<S: HarnessSystem> Agent<S> {
     /// the activation freely, and the engine that follows it reads none of it.
     ///
     /// Two fold-level decisions ride along because they too are records the
-    /// launch must not race: the run a budget has ended (§3.2 step 2) and a
-    /// delegation whose `ChildRun` is not yet journaled (§6.1 step 1), which is
+    /// launch must not race: the run a budget has ended (§4.2 step 2) and a
+    /// delegation whose `ChildRun` is not yet journaled (§8.1 step 1), which is
     /// why the desired set omits such a call until it is.
     fn reconcile(
         &self,
@@ -971,10 +971,10 @@ impl<S: HarnessSystem> Agent<S> {
         turn: &TurnId,
         desired: &[Pending<StepKey, Effect>],
     ) -> Reconciled {
-        // The budget gate (§3.2 step 2). `desired` already folds it: a live run
+        // The budget gate (§4.2 step 2). `desired` already folds it: a live run
         // with nothing pending whose state calls for no model call is a run
         // that cannot afford one, so the missing call *is* the exhaustion. An
-        // owed cancel of an earlier turn may share the set (§7.2) and says
+        // owed cancel of an earlier turn may share the set (§9.2) and says
         // nothing about this run's budget.
         let model_wanted = desired
             .iter()
@@ -989,8 +989,8 @@ impl<S: HarnessSystem> Agent<S> {
         }
 
         // Surface a lost workspace before the model acts on state that is gone
-        // (§4.4). The workspace itself is durable: the agent's facet
-        // rematerializes it on every activation (facets §4.1), so only a loss
+        // (§5.4). The workspace itself is durable: the agent's facet
+        // rematerializes it on every activation (facets §5.1), so only a loss
         // observed *this* activation (the provider returned `EnvironmentLost`)
         // resets. A fresh environment resets every held tier to `Workspace`;
         // later acquisitions re-journal, never silently inherited.
@@ -1002,7 +1002,7 @@ impl<S: HarnessSystem> Agent<S> {
             }
         }
 
-        // A failed sandbox open fails the calls that needed it (§4.2); taking
+        // A failed sandbox open fails the calls that needed it (§5.2); taking
         // the failure resets the slot to `Closed`, so a later call retries the
         // open.
         if let Some(error) = act.env.slot.take_failure() {
@@ -1012,7 +1012,7 @@ impl<S: HarnessSystem> Agent<S> {
             }
         }
 
-        // A delegation's `ChildRun` intent (§6.1 step 1), journaled before the
+        // A delegation's `ChildRun` intent (§8.1 step 1), journaled before the
         // child submit and before the call joins the desired set at all.
         let mut events = Vec::new();
         for (call, pending) in &live.pending {
@@ -1024,11 +1024,11 @@ impl<S: HarnessSystem> Agent<S> {
                 Err(tool_err) => events.push(self.fail_call(ctx, turn, call, tool_err)),
             }
         }
-        // The acquisition gate (§4.5): journal `TierAcquired` before the first
+        // The acquisition gate (§5.5): journal `TierAcquired` before the first
         // call at a tier not yet held, and mark it held optimistically so
         // neither a same-batch sibling nor the next tick re-journals it. A
         // failed commit forces step-down, which resets held tiers to
-        // `Workspace` on the next activation (§4.4), so the optimism is safe.
+        // `Workspace` on the next activation (§5.4), so the optimism is safe.
         for tier in desired
             .iter()
             .filter_map(|p| crate::desired::tier_of(&p.effect))
@@ -1047,10 +1047,10 @@ impl<S: HarnessSystem> Agent<S> {
             return Reconciled::Records(events);
         }
 
-        // The lazy open (§2.3): the first sandboxed call opens the
+        // The lazy open (§3.3): the first sandboxed call opens the
         // environment, and the round waits for it rather than launching against
         // a half-ready activation. The provider runs over the facet's
-        // materialized workspace directory (facets §4.1), which rehydration
+        // materialized workspace directory (facets §5.1), which rehydration
         // built before any command could reach here. A delegation waits with
         // it, which costs one open and buys a launch path with no environment
         // in it.
@@ -1085,7 +1085,7 @@ impl<S: HarnessSystem> Agent<S> {
         Reconciled::Ready
     }
 
-    /// Plan a fresh delegation (§6.1 step 1): validate the child kind against the
+    /// Plan a fresh delegation (§8.1 step 1): validate the child kind against the
     /// allowlist and the registry, then build the `ChildRun` intent.
     fn plan_delegation(
         &self,
@@ -1126,7 +1126,7 @@ impl<S: HarnessSystem> Agent<S> {
         ))
     }
 
-    /// Open the sandbox off the command path (§2.3): the task fills the
+    /// Open the sandbox off the command path (§3.3): the task fills the
     /// [`Binding`] under the mutex and re-enters the cycle with a [`Tick`];
     /// success emits `SandboxBound` (A7).
     fn launch_open(
@@ -1165,7 +1165,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     // -- notifications --------------------------------------------------------
 
-    /// Notify every caller registered for a run that has finished (§2.6), then
+    /// Notify every caller registered for a run that has finished (§7.2), then
     /// drop their registrations.
     fn notify_finished(
         &self,
@@ -1174,7 +1174,7 @@ impl<S: HarnessSystem> Agent<S> {
         ctx: &EntityCtx<Agent<S>>,
     ) {
         // Which registered turns finished is a question only the fold answers
-        // (workflow §2.7 item 4), so the candidates come out of the component
+        // (workflow §9 item 4), so the candidates come out of the component
         // and the outcomes come out of `state`. Collected first, because `take`
         // needs a mutable borrow and reading the keys holds a shared one.
         let finished: Vec<(TurnId, RunOutcome)> = act
@@ -1189,7 +1189,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
     }
 
-    /// Deliver a run's outcome to one registered reply-to (§2.6): a
+    /// Deliver a run's outcome to one registered reply-to (§7.2): a
     /// fire-and-forget `tell` of the `RunCompleted`, launched off the command
     /// path.
     fn notify(
@@ -1239,12 +1239,12 @@ impl<S: HarnessSystem> Entity for Agent<S> {
     type System = S;
     type State = SessionState;
     type Event = Record;
-    // The session's durable workspace (facets §4.1): a real directory the
+    // The session's durable workspace (facets §5.1): a real directory the
     // sandbox tiers run over, captured after each tool call so the delta
     // commits atomically with the `ToolOutcome` record (E19).
     type Facets = (Ws,);
     // The fallback type name; the agent runtime hosts each kind under its own name via
-    // `entities_named`, so a session's entity type is its `KindId` (§3.1).
+    // `entities_named`, so a session's entity type is its `KindId` (§4.1).
     const ENTITY_TYPE: &'static str = "agent.Agent";
 
     fn apply(state: &mut SessionState, event: &Record) {
@@ -1252,11 +1252,11 @@ impl<S: HarnessSystem> Entity for Agent<S> {
     }
 
     fn register(registry: &mut EntityRegistry<Self>) {
-        // The network allowlist: only the wire commands (§2.6). The internal
+        // The network allowlist: only the wire commands (§7.2). The internal
         // self-tells (the workflow's `Tick` and `Settled`) are local-only, so
         // no peer can inject them. Reading a run is not here:
-        // `tail` rides entity's gateway-level event read (entity §6), a
-        // framework built-in that never touches the activation (§8.2).
+        // `tail` rides entity's gateway-level event read (entity §7), a
+        // framework built-in that never touches the activation (§10.2).
         registry.accept::<Submit<S>>();
         registry.accept::<Cancel>();
         registry.accept::<TurnOutcome>();
@@ -1264,7 +1264,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
 
     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), BoxError> {
         let mut act = self.lock();
-        // Opening grants `Workspace` and nothing else (§4.5 item 1); every other
+        // Opening grants `Workspace` and nothing else (§5.5 item 1); every other
         // tier is re-acquired under a journaled record this activation.
         act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
         act.env.reconciled = false;
@@ -1272,12 +1272,12 @@ impl<S: HarnessSystem> Entity for Agent<S> {
         drop(act);
         // Forget every claim and count, and arm the first tick: a resumed run
         // with work still outstanding is driven by that tick alone, with no
-        // caller present (workflow §3.3, §4.3).
+        // caller present (workflow §4.3, §5.3).
         self.engine.on_activate(ctx);
         // Off the activation latency path: sweep checkpoint chunks a prior
         // activation orphaned (the blob handle unions the facet roots, so the
-        // restored manifest's chunks always survive, facets §3/F3) and
-        // re-fan the live ones to the current replicas (storage §9).
+        // restored manifest's chunks always survive, facets §4/F3) and
+        // re-fan the live ones to the current replicas (storage §10).
         let blobs = ctx.blobs();
         ctx.system().launch(Box::pin(async move {
             let _ = blobs.gc(&BTreeSet::new()).await;
@@ -1290,7 +1290,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
         // Release the sandbox on every deactivation: idle hibernation, migration,
         // or forced step-down (A7). The environment goes with it; the workspace
         // does not: its durable subtree is the session's facet, rematerialized
-        // by the next activation (§4.4, facets §4.1). Scope the lock so the
+        // by the next activation (§5.4, facets §5.1). Scope the lock so the
         // guard is dropped before the async release.
         let release = {
             let mut act = self.lock();
@@ -1304,12 +1304,12 @@ impl<S: HarnessSystem> Entity for Agent<S> {
 
     fn can_hibernate(&self, state: &SessionState) -> bool {
         // The workflow answers for anything an effect represents: nothing in
-        // flight and every member of the desired set at rest (workflow §6, W7).
+        // flight and every member of the desired set at rest (workflow §7, W7).
         // This runtime narrows it exactly twice, for the two things the desired
         // set cannot see. A turn accepted into the queue but not yet started is
         // work owed *now* that no effect represents, and hibernating on it would
-        // strand the turn until the next contact (§5.2). A sandbox mid-open is
-        // an outcome the activation owes itself (§2.3, workflow §6).
+        // strand the turn until the next contact (§7.1). A sandbox mid-open is
+        // an outcome the activation owes itself (§3.3, workflow §7).
         if !state.queue.is_empty() || !self.engine.quiescent() {
             return false;
         }
@@ -1356,7 +1356,7 @@ impl<S: HarnessSystem> EntityHandler<TurnOutcome> for Agent<S> {
 
 // The two the workflow requires. `Workflow`'s supertraits make their existence
 // a compile-time obligation; forwarding each to the engine is this crate's
-// (workflow §2.1, §2.2).
+// (workflow §3.1, §3.2).
 
 impl<S: HarnessSystem> EntityHandler<Tick> for Agent<S> {
     async fn handle(
@@ -1389,7 +1389,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
         crate::desired::desired(&self.kind, &self.shared.config, state)
     }
 
-    /// Perform one effect (§3.2 steps 2 and 4): the runtime's two seams and the
+    /// Perform one effect (§4.2 steps 2 and 4): the runtime's two seams and the
     /// one operation that runs in the loop.
     ///
     /// Everything the launch needs is cloned out of `&self` here, before the
@@ -1410,7 +1410,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
         async move {
             Ok(match effect {
                 Effect::Model { request, .. } => StepOutcome::Model(model.complete(request).await),
-                // Decided by the fold, performed by saying so (§4.2): an
+                // Decided by the fold, performed by saying so (§5.2): an
                 // unknown tool and a malformed input execute nothing.
                 Effect::Fail { error, .. } => StepOutcome::Tool(Err(error)),
                 Effect::Tool {
@@ -1422,7 +1422,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
                 } => {
                     let Some(sandbox) = sandbox else {
                         // Unreachable: the pre-pass binds the environment before
-                        // a tool call is dispatched (§2.3). Resolved as a
+                        // a tool call is dispatched (§3.3). Resolved as a
                         // tool failure rather than left unsettled, because an
                         // effect that returns nothing strands its key.
                         return Ok(StepOutcome::Tool(Err(ToolError::Sandbox(format!(
@@ -1437,10 +1437,10 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
                     })
                 }
                 // A delegation is control flow, not an effect on the world
-                // (§2.4, §6): an ordinary entity submit with a reply-to mailbox,
+                // (§6.1, §8): an ordinary entity submit with a reply-to mailbox,
                 // retried on transport failure (safe; the derived `TurnId`
                 // dedups, A6). The child's outcome becomes this call's tool
-                // outcome (§4.2).
+                // outcome (§5.2).
                 Effect::Delegate {
                     turn,
                     prompt,
@@ -1471,11 +1471,11 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
                         }
                     })
                 }
-                // An owed cancel (§7.2 item 2): one `Cancel` to the child, which
-                // is idempotent on its side (§7.2 item 1), so a repeat after a
+                // An owed cancel (§9.2 item 2): one `Cancel` to the child, which
+                // is idempotent on its side (§9.2 item 1), so a repeat after a
                 // lost ack is safe. A transport failure is the effect failing,
-                // and the engine's backoff paces the retry (workflow §3.4);
-                // the child's budget bounds the meantime (§7.2 item 3).
+                // and the engine's backoff paces the retry (workflow §4.4);
+                // the child's budget bounds the meantime (§9.2 item 3).
                 Effect::Cancel { child, .. } => match shared.hosts().get(&child.kind).cloned() {
                     // Unreachable on a node built through `HarnessBuilder`, as
                     // for a delegation; the debt stays in the fold for a
@@ -1510,9 +1510,9 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
             StepKey::Model(turn, step) => self.settle_model(state, turn, *step, outcome, ctx),
             StepKey::Call(turn, call) => self.settle_tool(state, turn, call, outcome, ctx),
             // The child acked: journal the `CancelDelivered` that clears the
-            // owed fact (§7.2). Nothing else commits here, and nothing else is
+            // owed fact (§9.2). Nothing else commits here, and nothing else is
             // needed: a failed send commits nothing, which is what tells the
-            // engine to back the key off and try again (workflow §3.2 item 3).
+            // engine to back the key off and try again (workflow §4.2 item 3).
             StepKey::Cancel(turn, call) => match outcome {
                 Ok(StepOutcome::Cancelled) => vec![self.rec(
                     ctx,

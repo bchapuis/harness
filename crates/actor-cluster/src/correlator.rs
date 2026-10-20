@@ -1,4 +1,4 @@
-//! Request/reply correlation on an association (spec §2.14, §7).
+//! Request/reply correlation on an association (spec cluster §9.1, §6).
 //!
 //! Outbound requests that expect a reply (an `ask` awaiting its `Reply`, a SWIM
 //! probe awaiting its `Ack`) register a waiter under a fresh id and park until
@@ -49,7 +49,7 @@ where
 
     /// Remove and return every waiter whose value matches `pred`. The node-down
     /// cascade uses this to fail all in-flight calls bound for a dead node
-    /// (spec §5.1 step 3).
+    /// (spec cluster §7 step 3).
     pub(crate) fn take_matching(&self, pred: impl Fn(&V) -> bool) -> Vec<V> {
         let mut waiting = self.lock();
         let ids: Vec<K> = waiting

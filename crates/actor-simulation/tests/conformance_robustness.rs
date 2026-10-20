@@ -1,4 +1,4 @@
-//! Conformance: robustness to hostile input (spec §2.11 rule 4, and §2.13 on framing). Decoding bad
+//! Conformance: robustness to hostile input (spec §3.4 rule 4, and cluster §4 on framing). Decoding bad
 //! bytes is reported as `Serialization`, never a panic; the receive loop
 //! survives hostile frames a well-behaved peer would never send and keeps
 //! serving legitimate traffic.
@@ -93,7 +93,7 @@ fn the_receive_loop_survives_hostile_frames() {
     );
 
     // A legitimate call after the hostile burst still succeeds (the node and its
-    // receive loop survived: spec §2.11 rule 4).
+    // receive loop survived: spec §3.4 rule 4).
     let reply = sim.block_on(async move {
         node_b
             .resolve::<Greeter<SimNode>>(id)

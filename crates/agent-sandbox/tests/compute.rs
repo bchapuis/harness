@@ -1,6 +1,6 @@
 //! Compute-tier conformance (feature `compute`): S2 (hermeticity and
 //! determinism; same call + workspace + seed → byte-identical results) of
-//! sandbox spec §6, plus the guest ABI and the lazy build/release
+//! sandbox spec §7, plus the guest ABI and the lazy build/release
 //! accounting.
 
 #![cfg(feature = "compute")]
@@ -248,7 +248,7 @@ fn a_runaway_guest_is_stopped_by_fuel_deterministically() {
     let b = observe();
     assert!(
         matches!(&a, Err(ToolError::Sandbox(e)) if e.contains("fuel")),
-        "fuel is the bound (§4.2), got {a:?}"
+        "fuel is the bound (§5.2), got {a:?}"
     );
     assert_eq!(a, b, "the trap reproduces: fuel metering is deterministic");
 }
@@ -260,12 +260,12 @@ fn a_module_importing_beyond_the_defined_surface_fails_to_instantiate() {
     let out = run(&bench, json!({"module": "ambient.wasm"}));
     assert!(
         matches!(&out, Err(ToolError::Sandbox(e)) if e.contains("instantiate")),
-        "the capability is absent, not filtered (§4.2), got {out:?}"
+        "the capability is absent, not filtered (§5.2), got {out:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Lazy build and per-tier release (sandbox spec §3.3 item 2, S5)
+// Lazy build and per-tier release (sandbox spec §4.3 item 2, S5)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -275,7 +275,7 @@ fn the_compute_engine_is_built_on_first_use_and_dropped_on_release() {
     assert_eq!(
         provider.stats().compute_built(),
         0,
-        "opening grants Workspace and nothing else (agent §4.5 item 1)"
+        "opening grants Workspace and nothing else (agent §5.5 item 1)"
     );
     run(&bench, json!({"module": "echo.wasm", "input": 1})).expect("run");
     run(&bench, json!({"module": "echo.wasm", "input": 2})).expect("run");
@@ -289,7 +289,7 @@ fn the_compute_engine_is_built_on_first_use_and_dropped_on_release() {
 }
 
 // ---------------------------------------------------------------------------
-// Guest-induced host costs are bounded (sandbox spec §4.2, second paragraph)
+// Guest-induced host costs are bounded (sandbox spec §5.2, second paragraph)
 // ---------------------------------------------------------------------------
 
 /// A guest claiming a 4 GiB output: the packed length must be capped before
@@ -320,7 +320,7 @@ fn an_oversized_output_claim_is_refused_before_allocation() {
     let out = run(&bench, json!({"module": "bomb.wasm"}));
     assert!(
         matches!(&out, Err(ToolError::Sandbox(e)) if e.contains("over the")),
-        "a guest-controlled output length must be capped (§4.2), got {out:?}"
+        "a guest-controlled output length must be capped (§5.2), got {out:?}"
     );
 }
 
@@ -331,7 +331,7 @@ fn a_table_bomb_fails_at_instantiation_within_limits() {
     let out = run(&bench, json!({"module": "bomb.wasm"}));
     assert!(
         matches!(&out, Err(ToolError::Sandbox(e)) if e.contains("instantiate")),
-        "instantiation-time host allocations are limited (§4.2), got {out:?}"
+        "instantiation-time host allocations are limited (§5.2), got {out:?}"
     );
 }
 
@@ -339,12 +339,12 @@ fn a_table_bomb_fails_at_instantiation_within_limits() {
 fn an_oversized_module_is_refused_before_compilation() {
     let (_provider, bench) = bench(7, &SandboxProfile::default());
     // 16 MiB + 1 of garbage: refused by size before the compiler sees it;
-    // compilation runs before fuel exists to meter it (§4.2).
+    // compilation runs before fuel exists to meter it (§5.2).
     std::fs::write(bench.dir.join("big.wasm"), vec![0u8; 16 * 1024 * 1024 + 1]).expect("plant");
     let out = run(&bench, json!({"module": "big.wasm"}));
     assert!(
         matches!(&out, Err(ToolError::Sandbox(e)) if e.contains("cap")),
-        "module bytes are bounded before compilation (§4.2), got {out:?}"
+        "module bytes are bounded before compilation (§5.2), got {out:?}"
     );
 }
 

@@ -1,14 +1,14 @@
-//! The single-node `Local` journal (spec storage §2.2).
+//! The single-node `Local` journal (spec storage §3.2).
 //!
 //! An entity's records live in this node's [`EntityStore`](crate::store::EntityStore) and
 //! each `append` commits immediately: one writer, one store, not fault-tolerant to
 //! node loss. It adds no network and no nondeterminism, so the deterministic
-//! simulator (§11) runs an entity's whole lifecycle under one seed.
+//! simulator (§10) runs an entity's whole lifecycle under one seed.
 //!
 //! It never returns `NotLeader`: with a single store there is always a leader
 //! (`NotLeader` arises on the clustered `Quorum` tier, `EntityJournal for
 //! Arc<QuorumReplicator>` in replicator.rs). `Unavailable` it answers only when the
-//! single store has failed (storage §10): a write it refused, or a read it can no longer
+//! single store has failed (storage §11): a write it refused, or a read it can no longer
 //! vouch for. Every method here writes and reads the [`EntityStore`](crate::store::EntityStore) seam this tier
 //! shares with the clustered one; there is no durability machinery under it.
 
@@ -25,11 +25,11 @@ use crate::store::BlobAck;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
 
-/// The single-node `Local` journal (spec storage §2.2). Cloning shares one underlying store,
+/// The single-node `Local` journal (spec storage §3.2). Cloning shares one underlying store,
 /// so every host spawned for the same shard writes to the same log.
 #[derive(Clone)]
 pub struct LocalEntityJournal {
-    /// This node's store, its writes on the node's blocking pool (storage §2.2). On this tier
+    /// This node's store, its writes on the node's blocking pool (storage §3.2). On this tier
     /// the local fsync is the commit, so it is the entire cost of an append and the
     /// worst thing to run on an async worker (see [`crate::blocking`]).
     store: NodeStore,
@@ -50,14 +50,14 @@ impl LocalEntityJournal {
     }
 
     /// A journal over `store`, keying its records under shard index `shard` (so a
-    /// single node can back several shards from one store, storage §6).
+    /// single node can back several shards from one store, storage §7).
     pub(crate) fn over(store: NodeStore, shard: u32) -> LocalEntityJournal {
         LocalEntityJournal { store, shard }
     }
 
-    /// The storage §10 gate on every read: a failed store answers its reads as an entity
+    /// The storage §11 gate on every read: a failed store answers its reads as an entity
     /// with no history, and the only store there is cannot be outvoted, so the read
-    /// is refused as `Unavailable` rather than served as an empty entity (§6:
+    /// is refused as `Unavailable` rather than served as an empty entity (§7:
     /// staleness is the budget, invention is not).
     fn usable(&self) -> Result<(), EntityJournalError> {
         if self.store.failed() {
@@ -72,8 +72,8 @@ impl LocalEntityJournal {
 impl EntityJournal for LocalEntityJournal {
     async fn append(&self, entity: &EntityName, after: Seq, events: Vec<Vec<u8>>) -> AppendOutcome {
         // A single writer at term 0 is never fenced or stale (its fence stays 0 and
-        // `after` always equals the head behind the input gate, §5). On this tier the
-        // local fsync IS the commit (storage §2.2), so the await is the durability the
+        // `after` always equals the head behind the input gate, §6). On this tier the
+        // local fsync IS the commit (storage §3.2), so the await is the durability the
         // `Committed` outcome asserts.
         let stored = self
             .store
@@ -110,7 +110,7 @@ impl EntityJournal for LocalEntityJournal {
     }
 
     fn term(&self) -> Option<Term> {
-        // The single node always leads and never elects (storage §2.2), so the gateway
+        // The single node always leads and never elects (storage §3.2), so the gateway
         // read's leadership token never expires here.
         Some(Term::ZERO)
     }
@@ -146,7 +146,7 @@ impl EntityJournal for LocalEntityJournal {
     ) -> Result<(), EntityJournalError> {
         match self.store.put_blob(self.shard, entity, id, bytes).await {
             BlobAck::Stored => Ok(()),
-            // The single store IS the durability on this tier (storage §2.2), so a store that
+            // The single store IS the durability on this tier (storage §3.2), so a store that
             // could not write means the blob is not durable anywhere.
             BlobAck::Failed => Err(EntityJournalError::Unavailable(
                 "local store could not persist the blob".into(),
@@ -275,9 +275,9 @@ mod tests {
         assert_eq!(run(j.load_snapshot(&b)), Ok(None));
     }
 
-    /// storage §10 on the single-store tier: once the store has failed, every read is
+    /// storage §11 on the single-store tier: once the store has failed, every read is
     /// `Unavailable` rather than the empty entity the store's reads describe, so an
-    /// activation over it refuses instead of rehydrating from nothing (§6).
+    /// activation over it refuses instead of rehydrating from nothing (§7).
     #[test]
     fn a_failed_store_makes_every_read_unavailable() {
         use crate::file_store::FileEntityStore;

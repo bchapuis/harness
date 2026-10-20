@@ -1,6 +1,6 @@
-//! The per-node replica-store actor and the [`ReplicaTransport`] seam (spec storage §4, §5).
+//! The per-node replica-store actor and the [`ReplicaTransport`] seam (spec storage §5, §6).
 //!
-//! Durability in the `Quorum` tier is a **per-entity quorum append** (storage §4): the
+//! Durability in the `Quorum` tier is a **per-entity quorum append** (storage §5): the
 //! shard leader's [`QuorumReplicator`](crate::replicator::QuorumReplicator) fans an
 //! entity's records out to the shard's replicas and reports them durable once a
 //! quorum has stored them. This module is the replicas' side of that protocol and
@@ -8,7 +8,7 @@
 //! no transport (spec §1.1): a per-node [`ReplicaStore`] actor, registered in the
 //! receptionist under one key per entity type, owns this node's [`NodeStore`], and
 //! [`ActorReplicaTransport`] reaches a replica's store by an ordinary `ask` to that
-//! node's actor (local on the leader's own replica, §4.2).
+//! node's actor (local on the leader's own replica, §5.2).
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -44,7 +44,7 @@ use crate::store::WriteKind;
 
 /// Per-entity-type interned key strings for the replica store. The receptionist keys
 /// purely by string, so the replica store MUST register under a string distinct from
-/// the gateway's (which is the bare `entity_type`, §4.3): otherwise a `lookup` would
+/// the gateway's (which is the bare `entity_type`, §5.3): otherwise a `lookup` would
 /// mix the two actor types. We derive `entity.replica/<entity_type>` and intern it
 /// (one bounded leak per distinct type, as a runtime type name already permits:
 /// `EntityNode::entities_named` takes a `&'static str`).
@@ -64,7 +64,7 @@ fn replica_store_key_id(entity_type: &'static str) -> &'static str {
 /// The receptionist key the replica store for an entity type registers under: one
 /// well-known key per type (distinct from the gateway's), one entry per node; the
 /// replicator looks a replica node's store up here, the way routing looks a gateway
-/// up (spec §4.3).
+/// up (spec §5.3).
 pub(crate) fn replica_store_key<S: ActorSystem>(
     entity_type: &'static str,
 ) -> Key<ReplicaStore<S>> {
@@ -72,7 +72,7 @@ pub(crate) fn replica_store_key<S: ActorSystem>(
 }
 
 /// Quorum-append an entity's records to one replica, fenced by the shard `term`
-/// (spec storage §4, §5): [`EntityStore::store_record`](crate::store::EntityStore::store_record)
+/// (spec storage §5, §6): [`EntityStore::store_record`](crate::store::EntityStore::store_record)
 /// on a peer. The reply is the replica's [`StoreAck`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoreRecord {
@@ -85,8 +85,8 @@ pub struct StoreRecord {
     /// element-at-a-time sequence path.
     #[serde(with = "byte_strings")]
     pub records: Vec<Vec<u8>>,
-    /// A normal append, a recovery write-back (read-repair, storage §5), or a split/merge
-    /// transfer copy (storage §7).
+    /// A normal append, a recovery write-back (read-repair, storage §6), or a split/merge
+    /// transfer copy (storage §8).
     pub kind: WriteKind,
 }
 
@@ -95,7 +95,7 @@ impl Message for StoreRecord {
     const MANIFEST: Manifest = Manifest::new("entity.StoreRecord");
 }
 
-/// The fenced recovery read of one replica's view of an entity (spec storage §5):
+/// The fenced recovery read of one replica's view of an entity (spec storage §6):
 /// [`EntityStore::prepare`](crate::store::EntityStore::prepare) on a peer. The replica
 /// promises not to accept a lower shard term, then returns every occupied slot with
 /// its term and the latest snapshot. The reply is a [`ReadOutcome`].
@@ -112,10 +112,10 @@ impl Message for Prepare {
 }
 
 /// Quorum-store an entity snapshot to one replica, fenced by the shard `term`
-/// (spec storage §8): [`EntityStore::store_snapshot`](crate::store::EntityStore::store_snapshot)
+/// (spec storage §9): [`EntityStore::store_snapshot`](crate::store::EntityStore::store_snapshot)
 /// on a peer. The reply is the replica's [`StoreAck`]. A [`WriteKind::Transfer`]
 /// skips the fence: the split/merge driver landing a moved entity's snapshot under
-/// the destination shard's keys (storage §7).
+/// the destination shard's keys (storage §8).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoreSnapshot {
     pub shard: u32,
@@ -132,7 +132,7 @@ impl Message for StoreSnapshot {
     const MANIFEST: Manifest = Manifest::new("entity.StoreSnapshot");
 }
 
-/// Tighten one replica's per-shard **append bound** (spec storage §7): durably refuse
+/// Tighten one replica's per-shard **append bound** (spec storage §8): durably refuse
 /// every future append whose entity hash is `>= from`, at any term. The split
 /// (or merge) driver fans this to the shard's replicas and proceeds only once a
 /// majority has acked, from then on no append to the moved range can assemble
@@ -149,7 +149,7 @@ impl Message for SealRange {
     const MANIFEST: Manifest = Manifest::new("entity.SealRange");
 }
 
-/// Store one immutable, content-addressed blob on a replica (storage §9):
+/// Store one immutable, content-addressed blob on a replica (storage §10):
 /// [`EntityStore::put_blob`](crate::store::EntityStore::put_blob) on a peer. No
 /// `after`, no `term`, no `kind`: a content hash names exactly one byte sequence, so
 /// there is nothing to fence or order and no `Fenced`/`Stale` outcome to report. The
@@ -205,7 +205,7 @@ impl Message for HasBlob {
     const MANIFEST: Manifest = Manifest::new("entity.HasBlob");
 }
 
-/// Reclaim an entity's blobs on a replica (storage §9): `retain = None` drops the whole
+/// Reclaim an entity's blobs on a replica (storage §10): `retain = None` drops the whole
 /// area ([`EntityStore::delete_blobs`](crate::store::EntityStore::delete_blobs), on
 /// destroy), `retain = Some(ids)` keeps only those
 /// ([`EntityStore::retain_blobs`](crate::store::EntityStore::retain_blobs), the
@@ -224,7 +224,7 @@ impl Message for SweepBlobs {
 
 /// Enumerate every entity a replica holds anything for under one shard:
 /// [`EntityStore::entities`](crate::store::EntityStore::entities) on a peer, the
-/// migration driver's entity discovery (storage §6). Read from a quorum of the shard's
+/// migration driver's entity discovery (storage §7). Read from a quorum of the shard's
 /// replicas so no committed entity is missed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListEntities {
@@ -238,7 +238,7 @@ impl Message for ListEntities {
 
 /// Enumerate one entity's blob ids on a replica:
 /// [`EntityStore::blob_ids`](crate::store::EntityStore::blob_ids) on a peer, the
-/// migration driver's source list when copying an entity's blob area (storage §6).
+/// migration driver's source list when copying an entity's blob area (storage §7).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListBlobs {
     pub shard: u32,
@@ -276,7 +276,7 @@ mod byte_strings {
     }
 }
 
-/// The node-local replica store for one entity type (spec storage §4): a thin actor over
+/// The node-local replica store for one entity type (spec storage §5): a thin actor over
 /// this node's [`NodeStore`], reachable across the cluster so the shard leader's
 /// replicator can quorum-append to it and read it back for recovery. One per node
 /// per entity type (like the gateway), registered under [`replica_store_key`].
@@ -420,7 +420,7 @@ impl<S: ActorSystem> Handler<ListBlobs> for ReplicaStore<S> {
     }
 }
 
-/// How the replicator reaches a shard's replica stores (spec storage §4): one method per
+/// How the replicator reaches a shard's replica stores (spec storage §3.3, §5): one method per
 /// replica-store message, each sending it to `node`'s store and resolving with its
 /// reply, or a [`CallError`] if no reply arrived `within` the deadline. The methods
 /// are named for the [`EntityStore`](crate::store::EntityStore) call each runs on the
@@ -502,18 +502,18 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>>;
 
-    /// Launch a detached background task (spec storage §4). The replicator uses it to drain
+    /// Launch a detached background task (spec storage §5). The replicator uses it to drain
     /// the straggler peer asks of an append that already committed on a quorum, so the
     /// commit returns at quorum latency while every issued ask still runs to
     /// completion: its `AskIssued`/`AskOutcome` bracket closes, preserving
-    /// no-silent-loss (§11). Backed by the system's `launch` (actor §2.12.1).
+    /// no-silent-loss (§10). Backed by the system's `launch` (actor §11.1).
     fn launch(&self, task: BoxFuture<'static, ()>);
 }
 
 /// The actor-messaging [`ReplicaTransport`] (spec §1.1: no new transport): it
 /// resolves a node's [`ReplicaStore`] in the receptionist and `ask`s it. A store on
 /// this node resolves to the local actor, so the leader's append to its own replica
-/// is a local call with no serialization (§4.2). Resolution is a local receptionist
+/// is a local call with no serialization (§5.2). Resolution is a local receptionist
 /// read each call, never stale across a peer restart (a restarted node re-registers a
 /// fresh ref).
 pub(crate) struct ActorReplicaTransport<S: ActorSystem> {
@@ -529,7 +529,7 @@ impl<S: ActorSystem> ActorReplicaTransport<S> {
         }
     }
 
-    /// The replica store registered on `node`, if discovered (spec §4.3).
+    /// The replica store registered on `node`, if discovered (spec §5.3).
     fn resolve(&self, node: NodeId) -> Option<ActorRef<ReplicaStore<S>>> {
         self.system
             .receptionist()
@@ -540,7 +540,7 @@ impl<S: ActorSystem> ActorReplicaTransport<S> {
     }
 
     /// Resolve `node`'s replica store and `ask` it, or `Unreachable` if it is not
-    /// discovered: every [`ReplicaTransport`] method is this (storage §4).
+    /// discovered: every [`ReplicaTransport`] method is this (storage §5).
     fn ask<M>(
         &self,
         node: NodeId,

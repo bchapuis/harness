@@ -1,4 +1,4 @@
-//! Conformance: cluster join and leave (spec §6.1, §6.2, §6.3). A joiner enters
+//! Conformance: cluster join and leave (spec cluster §5.1, §5.2, §5.3). A joiner enters
 //! `Joining` and is admitted to `Up` by the coordinator once the cluster learns of it
 //! via gossip; a graceful `leave` announces `Leaving` and the coordinator finalizes it
 //! to the terminal `Down`.
@@ -72,7 +72,7 @@ fn a_graceful_leave_reaches_the_terminal_down() {
     sim.run_for(Duration::from_millis(500)); // let the cluster settle
 
     // Node 2 announces a graceful leave; it is not the coordinator, so the coordinator
-    // (node 1) finalizes it to Down (spec §6.3).
+    // (node 1) finalizes it to Down (spec cluster §5.3).
     b.leave();
     sim.run_for(Duration::from_secs(2));
 
@@ -99,7 +99,7 @@ fn down_from_a_leave_is_terminal_and_does_not_resurrect() {
     assert!(a.membership().is_down(NodeId::new(2)));
 
     // Even though node 2's transport keeps answering pings, the coordinator must not
-    // resurrect a downed member (spec §6.1, invariant #15).
+    // resurrect a downed member (spec cluster §5.1, invariant #15).
     sim.run_for(Duration::from_secs(3));
     assert!(
         a.membership().is_down(NodeId::new(2)),
@@ -110,7 +110,7 @@ fn down_from_a_leave_is_terminal_and_does_not_resurrect() {
 #[test]
 fn the_coordinator_defers_admission_until_the_cluster_converges() {
     // The coordinator admits a joiner only once its view is stable and fully
-    // reachable (spec §6.4.4 item 3):
+    // reachable (spec cluster §5.4.4 item 3):
     // while a partition leaves a member unreachable, admission is deferred; after
     // the heal, the joiner is admitted.
     let (sim, net) = support::cluster(40, Some(brisk_swim()));
@@ -151,14 +151,14 @@ fn the_coordinator_defers_admission_until_the_cluster_converges() {
 fn a_long_dead_member_is_tombstoned_then_pruned() {
     // A member that stays down is eventually tombstoned `Removed` and then pruned
     // from the roster entirely, so the membership map does not grow without bound
-    // under churn (spec §6.1).
+    // under churn (spec cluster §5.1).
     let (sim, net) = support::cluster(23, Some(brisk_swim()));
     let a = net.join(NodeId::new(1)); // coordinator
     let b = net.join(NodeId::new(2));
     sim.run_for(Duration::from_millis(500));
 
     // Graceful leave, then the node actually departs (stops participating); its
-    // id will not be reused (spec §6.1).
+    // id will not be reused (spec cluster §5.1).
     b.leave();
     sim.run_for(Duration::from_secs(2));
     b.shutdown();
@@ -189,7 +189,7 @@ fn a_long_dead_member_is_tombstoned_then_pruned() {
 
 #[test]
 fn the_lowest_id_joiner_takes_the_coordinator_role_and_admits_itself() {
-    // The coordinator's candidate set includes `Joining` members (spec §6.4.4
+    // The coordinator's candidate set includes `Joining` members (spec cluster §5.4.4
     // item 3): a joiner whose id is lower than every founder's derives the role
     // for itself and admits itself, which is what lets a fresh cluster bootstrap
     // when no member is `Up` yet.

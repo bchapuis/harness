@@ -55,7 +55,7 @@ fn main() {
     divan::main();
 }
 
-/// The disk facet's block size (spec facets §4.4): the unit a machine create ships.
+/// The disk facet's block size (spec facets §5.4): the unit a machine create ships.
 const BLOCK: usize = 1 << 20;
 
 /// The workspace root, from this crate's manifest directory.

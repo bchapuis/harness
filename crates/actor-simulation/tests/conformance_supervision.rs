@@ -1,8 +1,8 @@
-//! Conformance: supervision (spec §2.4); backoff timing, custom decider
+//! Conformance: supervision (spec §9); backoff timing, custom decider
 //! integration, repeated startup failure, and sibling isolation, together with
 //! the restart/backoff cases from supervision.rs and the
 //! hierarchy/escalate cases from escalation.rs, plus the local panic-containment
-//! case from actor.rs (spec §2.4, invariant #18).
+//! case from actor.rs (spec §9, invariant #18).
 
 mod support;
 
@@ -45,7 +45,7 @@ impl Message for Ping {
     const MANIFEST: Manifest = Manifest::new("conf.SupPing");
 }
 
-// --- Backoff delays the restart (spec §2.4) ---------------------------------
+// --- Backoff delays the restart (spec §9) ---------------------------------
 
 struct Backed {
     clock: SimClock,
@@ -99,7 +99,7 @@ fn restart_waits_for_the_backoff_before_re_creating() {
     let times = starts.lock().unwrap();
     assert_eq!(times.len(), 2, "started once, then once more after restart");
     let waited = times[1].duration_since(times[0]);
-    // Backoff is jittered (equal-jitter, spec §2.4): the restart waits between
+    // Backoff is jittered (equal-jitter, spec §9): the restart waits between
     // half and all of the 100ms base, so it is delayed but desynchronized.
     assert!(
         waited >= Duration::from_millis(50) && waited <= Duration::from_millis(100),
@@ -107,7 +107,7 @@ fn restart_waits_for_the_backoff_before_re_creating() {
     );
 }
 
-// --- A custom decider drives the directive (spec §2.4) ----------------------
+// --- A custom decider drives the directive (spec §9) ----------------------
 
 struct DeciderActor {
     _p: PhantomData<()>,
@@ -147,7 +147,7 @@ fn a_custom_decider_resumes_on_a_message_fault() {
     assert_eq!(after, Ok(42));
 }
 
-// --- Repeated startup failure escalates to Stop (spec §2.4) -----------------
+// --- Repeated startup failure escalates to Stop (spec §9) -----------------
 
 struct NeverStarts {
     attempts: Arc<AtomicU32>,
@@ -187,11 +187,11 @@ fn repeated_startup_failure_escalates_to_stop() {
     assert_eq!(outcome, Err(CallError::DeadLetter));
 }
 
-// --- Resume on a failed `started` degrades to Stop (spec §2.1, §3.1) -------
+// --- Resume on a failed `started` degrades to Stop (spec §3.1, §4) -------
 //
 // `Resume` keeps state and drops the failed message. A failed `started` has no
 // message to drop, and running the actor anyway would dispatch to one that never
-// became ready (§3.1 step 3, `actor_ready` marks the point). So the directive
+// became ready (§4 step 3, `actor_ready` marks the point). So the directive
 // degrades to `Stop`, and the event stream reports that effective decision.
 
 struct ResumesAfterFailedStart;
@@ -241,11 +241,11 @@ fn resume_on_a_failed_start_degrades_to_stop() {
     );
     assert!(
         events.iter().any(|e| matches!(e, Event::ResignId { .. })),
-        "the actor resigns its id after the failed start (spec §3.1 step 5)"
+        "the actor resigns its id after the failed start (spec §4 step 5)"
     );
 }
 
-// --- A panic in `started` is a start failure, not a crash (spec §2.4) --------
+// --- A panic in `started` is a start failure, not a crash (spec §9) --------
 
 struct PanicsOnStart;
 impl Actor for PanicsOnStart {
@@ -266,7 +266,7 @@ impl Handler<Ping> for PanicsOnStart {
 #[test]
 fn a_panic_in_started_unwinds_into_a_supervision_decision() {
     // The executor boundary catches a panic in `started` just as it catches one
-    // in a handler (spec §2.4): the actor takes the `started`-failed path (the
+    // in a handler (spec §9): the actor takes the `started`-failed path (the
     // default directive stops it), and a queued ask dead-letters rather than
     // hanging or taking the node down.
     let (sim, system, recorder) = support::local_recorded(8);
@@ -289,17 +289,17 @@ fn a_panic_in_started_unwinds_into_a_supervision_decision() {
     );
     assert!(
         events.iter().any(|e| matches!(e, Event::ResignId { .. })),
-        "the actor resigns its id after the failed start (spec §3.1 step 5)"
+        "the actor resigns its id after the failed start (spec §4 step 5)"
     );
 }
 
-// --- A by-value Restart degrades to Stop, reported as Stop (spec §2.4, §2.7) --
+// --- A by-value Restart degrades to Stop, reported as Stop (spec §9, §3.6) --
 //
 // `Restart` rebuilds an actor from its factory; an actor spawned **by value**
 // (`spawn`, not `spawn_with`) has no factory, so the directive degrades to
-// `Stop` (spec §2.4). The safety property is unaffected (the fault is still
+// `Stop` (spec §9). The safety property is unaffected (the fault is still
 // contained), but the event stream MUST report the *effective* decision, `Stop`,
-// never the candidate `Restart` (§2.7): an observer or continuous checker that
+// never the candidate `Restart` (§3.6): an observer or continuous checker that
 // saw `Restart` would expect a `Restarted` that can never come.
 
 struct RestartByValue;
@@ -342,7 +342,7 @@ fn a_by_value_restart_degrades_to_stop_and_reports_stop() {
     assert_eq!(
         decisions,
         vec![SupervisionDecision::Stop],
-        "a by-value Restart degrades to Stop, and the event reports the effective decision (spec §2.4, §2.7)"
+        "a by-value Restart degrades to Stop, and the event reports the effective decision (spec §9, §3.6)"
     );
     assert!(
         !events.iter().any(|e| matches!(e, Event::Restarted { .. })),
@@ -350,11 +350,11 @@ fn a_by_value_restart_degrades_to_stop_and_reports_stop() {
     );
     assert!(
         events.iter().any(|e| matches!(e, Event::ResignId { .. })),
-        "the degraded actor stops and resigns its id (spec §3.1 step 5)"
+        "the degraded actor stops and resigns its id (spec §4 step 5)"
     );
 }
 
-// --- A sibling is unaffected by a child's escalation (spec §2.4, §2.4) ------
+// --- A sibling is unaffected by a child's escalation (spec §9, §9) ------
 
 struct Child;
 impl Actor for Child {
@@ -431,10 +431,10 @@ fn one_childs_escalation_leaves_a_sibling_alive() {
 }
 
 // =============================================================================
-// Merged from supervision.rs (spec §2.4): restart, resume, and backoff.
+// Merged from supervision.rs (spec §9): restart, resume, and backoff.
 // =============================================================================
 mod merged_supervision {
-    //! Supervision (spec §2.4): a faulting actor is restarted (re-running `started`
+    //! Supervision (spec §9): a faulting actor is restarted (re-running `started`
     //! on a fresh instance, keeping its mailbox), resumed, or stopped per its
     //! strategy; exceeding the restart window escalates to stop.
 
@@ -580,9 +580,9 @@ mod merged_supervision {
         }
     }
 
-    // --- A child spawned via Ctx::spawn_with is restartable (spec §2.4) ----------
+    // --- A child spawned via Ctx::spawn_with is restartable (spec §9) ----------
     //
-    // The canonical parent→child path is `Ctx::spawn` (§2.4), but a value-spawned
+    // The canonical parent→child path is `Ctx::spawn` (§9), but a value-spawned
     // child cannot be reconstructed, so its `Restart` directive degrades to `Stop`.
     // `Ctx::spawn_with` gives the child a factory, so `Restart` actually re-creates
     // it (keeping its id and mailbox) exactly like a factory-spawned root.
@@ -767,11 +767,11 @@ mod merged_supervision {
 }
 
 // =============================================================================
-// Merged from escalation.rs (spec §2.4): the supervision hierarchy and the
+// Merged from escalation.rs (spec §9): the supervision hierarchy and the
 // `Escalate` directive propagating up the tree.
 // =============================================================================
 mod merged_escalation {
-    //! Supervision hierarchy (spec §2.4): a child that faults with `Escalate` fails
+    //! Supervision hierarchy (spec §9): a child that faults with `Escalate` fails
     //! its parent, which then applies its own strategy; stop, restart, or escalate
     //! further up the tree.
 
@@ -985,7 +985,7 @@ mod merged_escalation {
 }
 
 // =============================================================================
-// Merged from actor.rs (spec §2.4, invariant #18): a handler panic is contained
+// Merged from actor.rs (spec §9, invariant #18): a handler panic is contained
 // to its actor; the caller observes DeadLetter, the faulted actor resigns, and
 // the node keeps serving other actors.
 // =============================================================================
@@ -1024,7 +1024,7 @@ mod local_containment {
     impl Actor for Greeter {
         type System = Sys;
 
-        // Macro-free remote registration, folded into the actor (spec §2.10).
+        // Macro-free remote registration, folded into the actor (spec §7).
         fn register(r: &mut HandlerRegistry<Self>) {
             r.accept::<Greet>();
         }
@@ -1047,7 +1047,7 @@ mod local_containment {
         }
     }
 
-    // --- Supervision containment (spec §2.4, invariant #18) ------------------------
+    // --- Supervision containment (spec §9, invariant #18) ------------------------
 
     struct Panicky;
 

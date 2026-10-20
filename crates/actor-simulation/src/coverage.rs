@@ -22,7 +22,7 @@ pub struct FaultStats {
     /// Frames dropped because their directed pair was partitioned or crashed.
     pub blocked: u64,
     /// Registry outage windows the nemesis opened (registry-based mode,
-    /// spec §6.4.2 item 6, §10).
+    /// spec cluster §5.4.2 item 6, §13).
     pub registry_outages: u64,
     /// Registry fetches served a stale snapshot by a seeded roll (docs/simulation-testing.md).
     pub registry_stale: u64,

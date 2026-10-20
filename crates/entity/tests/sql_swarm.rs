@@ -1,4 +1,4 @@
-//! The SQL facet under the cluster fault swarm (spec facets §4.3, entity §11; V&V checklist
+//! The SQL facet under the cluster fault swarm (spec facets §5.3, entity §10; V&V checklist
 //! #4, #5, #7).
 //!
 //! `tests/sql.rs` proves the facet's contract on the `Local` tier. This file
@@ -100,7 +100,7 @@ fn ensure_schema(ctx: &EntityCtx<SqlAccount>) {
 }
 
 /// Insert one deposit row; reply with the running total: a WAL-frame record
-/// committing through the quorum path (facets §4.3, E19).
+/// committing through the quorum path (facets §5.3, E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Deposit {
     cents: u64,
@@ -133,7 +133,7 @@ impl EntityHandler<Deposit> for SqlAccount {
     }
 }
 
-/// The running total, a pure read: no frames, no record (§6).
+/// The running total, a pure read: no frames, no record (§7).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadTotal;
 impl Message for ReadTotal {
@@ -256,7 +256,7 @@ impl ClusterWorkload for SqlAccountSwarm {
 
     fn mode(&self) -> ClusterModeSpec {
         // The entity layer requires the leader-based control plane to host the shard map
-        // (storage §6); every node is a control voter so the map group can form.
+        // (storage §7); every node is a control voter so the map group can form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -432,7 +432,7 @@ fn sql_cluster_swarm_is_reproducible() {
 ///
 /// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
 /// It is off for reproducibility sweeps: physical replication makes the value
-/// safe for durability (asserted elsewhere), but the actor §2.12.2 repro contract stays
+/// safe for durability (asserted elsewhere), but the actor §11 repro contract stays
 /// strict, no unseeded randomness in a replayed run.
 struct SqlSwarm {
     clients: usize,

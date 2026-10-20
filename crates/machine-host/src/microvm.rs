@@ -1,10 +1,10 @@
-//! The Firecracker mechanism (sandbox spec §4, machine spec §2.3): the microVM
+//! The Firecracker mechanism (sandbox spec §5, machine spec §3.2): the microVM
 //! half of this crate's two [`MachineHost`] implementations.
 //!
 //! Two consumers boot Firecracker VMs and share the process-hygiene code
 //! between them: the agent sandbox's `Native` tier (`agent-sandbox`,
 //! per-call tar sync over vsock) and the persistent machine
-//! (`crates/machine-entity`, whose drive is the disk facet's image, facets §4.4).
+//! (`crates/machine-entity`, whose drive is the disk facet's image, facets §5.4).
 //! This module owns the mechanics identical for both and nothing
 //! protocol-shaped:
 //!
@@ -22,7 +22,7 @@
 //!   sizes anything (a frame header's claim never becomes an allocation);
 //! - the **API-socket client** ([`MicroVm::pause`]/[`MicroVm::resume`]):
 //!   `PATCH /vm` over the `api.sock`, the quiescent-point mechanism the
-//!   machine's capture needs (machine §4); the only post-boot use of the API
+//!   machine's capture needs (machine §6); the only post-boot use of the API
 //!   socket;
 //! - the **workspace tar codec** ([`ws_sync`](crate::ws_sync), feature `ws`): the capped,
 //!   capability-confined pack/unpack both consumers move a workspace with.
@@ -81,7 +81,7 @@ pub struct Drive {
 }
 
 /// One virtio-net device in the boot document (the machine's egress seam,
-/// machine §2.6): a host tap the provider created, optionally with a fixed
+/// machine §5.2): a host tap the provider created, optionally with a fixed
 /// guest MAC.
 #[derive(Clone, Debug)]
 pub struct NetIf {
@@ -308,7 +308,7 @@ impl MicroVm {
 
     /// Pause the guest's vCPUs (`PATCH /vm {"state":"Paused"}` over the API
     /// socket): after this resolves the guest issues no further writes to its
-    /// drives; the machine capture's quiescent point (machine §4). Pause is
+    /// drives; the machine capture's quiescent point (machine §6). Pause is
     /// crash-consistency, not filesystem cleanliness: the guest's page cache
     /// is not flushed (a guest-side `sync` first is the consumer's upgrade).
     pub async fn pause(&self) -> Result<(), MicroVmError> {
@@ -432,7 +432,7 @@ pub struct MicroVmHost {
 impl MicroVmHost {
     /// `boot_args` is the consumer's: the sandbox boots its agent as init over a
     /// host-owned image, a machine boots the user rootfs's own init (machine
-    /// §2.4), and only the consumer knows which it is handing over.
+    /// §3.3), and only the consumer knows which it is handing over.
     pub fn new(
         binary: impl Into<PathBuf>,
         kernel: impl Into<PathBuf>,

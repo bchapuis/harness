@@ -2,7 +2,7 @@
 //! network seam (M4).
 //!
 //! A front door is a cluster member, the ingress analogue of the agent runtime
-//! gateway (agent §2.6), that **terminates SSH in-process** (`russh`) and
+//! gateway (agent §7.2), that **terminates SSH in-process** (`russh`) and
 //! bridges each authenticated channel to the machine's guest agent. It
 //! authenticates the client by public key against the machine's journaled
 //! authorized-key set, presents the machine's own journaled host key so one SSH
@@ -33,7 +33,7 @@
 //!
 //! A backend assumes the guest is reachable from this node. The cross-node
 //! relay that would carry a channel's bytes from any door to the leader that
-//! holds the guest is deferred (machine §7); it would also need credit-based
+//! holds the guest is deferred (status §11); it would also need credit-based
 //! flow control across the actor transport.
 //!
 //! Specified by `docs/machine-spec.md`.
@@ -64,7 +64,7 @@ impl std::fmt::Display for FrontDoorError {
 impl std::error::Error for FrontDoorError {}
 
 /// Expand the machine's journaled host-key material into the SSH host key
-/// presented at KEX (machine §3, §2.5). The material is the raw 32-byte ed25519
+/// presented at KEX (machine §4, §5.1). The material is the raw 32-byte ed25519
 /// seed the machine drew from system entropy at provisioning, read through its
 /// `DoorPolicy` command ([`MachineAuthority::host_key`]); expanding it here
 /// keeps russh out of the machine crate. Pure: the same seed always yields the
@@ -90,12 +90,12 @@ pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
 /// stream twice to cross the seam.
 pub use machine_host::Duplex;
 
-/// The entity-cluster half of the front door (machine §2.5). Production wires
+/// The entity-cluster half of the front door (machine §3.4, §5.1). Production wires
 /// this over an `EntityRef<Machine>` to the machine's leader; tests supply a
 /// fake. Every method is per-connection or per-channel: nothing here holds
 /// cluster state.
 pub trait MachineAuthority: Send + Sync + 'static {
-    /// The machine's journaled host key (machine §3), presented at KEX (see
+    /// The machine's journaled host key (machine §4), presented at KEX (see
     /// [`host_key_from_seed`]).
     fn host_key(
         &self,
@@ -116,7 +116,7 @@ pub trait MachineAuthority: Send + Sync + 'static {
     /// parentheses. An implementation journals it as given.
     ///
     /// An implementation MAY refuse before journaling anything: the bridge is
-    /// node-local (machine §2.5), so the production authority checks that this
+    /// node-local (machine §5.1), so the production authority checks that this
     /// node leads the machine and fails the attach when it does not, rather
     /// than booting a guest the first channel open could never reach. The
     /// refusal's message reaches the client as the SSH disconnect reason, so it
@@ -127,12 +127,12 @@ pub trait MachineAuthority: Send + Sync + 'static {
         principal: &str,
     ) -> impl Future<Output = Result<u64, FrontDoorError>> + Send;
 
-    /// Journal the detachment (machine §2.5). Best-effort: a lost detach is
+    /// Journal the detachment (machine §5.1). Best-effort: a lost detach is
     /// reconciled by the machine's death watch on this front door.
     fn detach(&self, machine: &EntityName, attachment: u64) -> impl Future<Output = ()> + Send;
 }
 
-/// The transport half of the front door (machine §2.5): open one byte stream
+/// The transport half of the front door (machine §3.4): open one byte stream
 /// per channel to the machine's guest agent, having already performed the
 /// vsock handshake and sent the channel [`ChannelKind`] header, so the caller
 /// exchanges [`machine_proto`] frames directly.

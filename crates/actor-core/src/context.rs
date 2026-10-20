@@ -1,8 +1,8 @@
-//! The handler/lifecycle context (spec §2.3).
+//! The handler/lifecycle context (spec §3.2).
 //!
 //! A `Ctx<A>` grants an actor controlled capabilities (its identity, a
 //! self-reference, the system handle, child spawning, and self-stop) without
-//! ever exposing actor state, preserving isolation (spec §2.1).
+//! ever exposing actor state, preserving isolation (spec §3.1).
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -18,7 +18,7 @@ use crate::id::ActorId;
 use crate::refs::ActorRef;
 use crate::system::ActorSystem;
 
-/// Context passed to handlers and lifecycle hooks (spec §2.3).
+/// Context passed to handlers and lifecycle hooks (spec §3.2).
 pub struct Ctx<A: Actor> {
     id: ActorId,
     system: A::System,
@@ -39,7 +39,7 @@ impl<A: Actor> Ctx<A> {
         &self.id
     }
 
-    /// A shareable self-reference (spec §2.3).
+    /// A shareable self-reference (spec §3.2).
     pub fn this(&self) -> ActorRef<A> {
         ActorRef::from_parts(self.id.clone(), self.system.clone())
     }
@@ -49,7 +49,7 @@ impl<A: Actor> Ctx<A> {
         &self.system
     }
 
-    /// Spawn a child actor on the same system (spec §2.3, §2.4). The child is
+    /// Spawn a child actor on the same system (spec §3.2, §9). The child is
     /// parented to this actor, so a fault the child escalates fails this actor,
     /// applying its supervision strategy.
     ///
@@ -61,10 +61,10 @@ impl<A: Actor> Ctx<A> {
             .spawn_factory(once(child), Some(self.id.clone()))
     }
 
-    /// Spawn a child actor from a `factory` (spec §2.3, §2.4), parented to this
+    /// Spawn a child actor from a `factory` (spec §3.2, §9), parented to this
     /// actor. Like [`spawn`](Self::spawn) but restartable: a `Restart`
     /// supervision directive re-creates the child by calling `factory` again,
-    /// keeping its `ActorId` and mailbox (spec §2.4).
+    /// keeping its `ActorId` and mailbox (spec §9).
     pub fn spawn_with<C, F>(&self, factory: F) -> ActorRef<C>
     where
         C: Actor<System = A::System>,
@@ -75,12 +75,12 @@ impl<A: Actor> Ctx<A> {
     }
 
     /// Request that this actor stop after the current message completes (spec
-    /// §2.3).
+    /// §3.2).
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
     }
 
-    /// Begin watching `target` (spec §2.5): when it terminates for any reason
+    /// Begin watching `target` (spec §10): when it terminates for any reason
     /// (including its node going `down`) this actor receives exactly one
     /// [`Terminated`] in its mailbox. Requires `Self: Handler<Terminated>`, the
     /// way a watcher observes the signal. Watching an already-terminated target
@@ -92,7 +92,7 @@ impl<A: Actor> Ctx<A> {
         self.watch_id(target.id().clone());
     }
 
-    /// Begin watching the actor identified by `target` (spec §2.5), when only
+    /// Begin watching the actor identified by `target` (spec §10), when only
     /// its id is known: an identity carried in a message or folded from
     /// durable state rather than held as a typed ref. Identical to
     /// [`watch`](Ctx::watch) otherwise.
@@ -112,7 +112,7 @@ impl<A: Actor> Ctx<A> {
         self.system.watch(target, self.id.clone(), deliver);
     }
 
-    /// Stop watching `target` (spec §2.5).
+    /// Stop watching `target` (spec §10).
     pub fn unwatch<B: Actor>(&self, target: &ActorRef<B>) {
         self.system.unwatch(target.id(), &self.id);
     }

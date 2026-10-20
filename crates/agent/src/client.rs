@@ -1,11 +1,11 @@
-//! The client view (agent spec §2.5): [`Harness`], [`SessionRef`], and the
+//! The client view (agent spec §3.4): [`Harness`], [`SessionRef`], and the
 //! ephemeral reply-to actor behind the blocking `prompt` convenience.
 //!
 //! A session is an entity, so addressing is entity's: [`SessionRef`] wraps a
-//! [`EntityRef<Agent>`](entity::EntityRef) and `ask`s it the §2.6 commands,
-//! location-transparently (entity §2.2). [`Harness::cluster`] hosts one `Agent`
+//! [`EntityRef<Agent>`](entity::EntityRef) and `ask`s it the §7.2 commands,
+//! location-transparently (entity §3.2). [`Harness::cluster`] hosts one `Agent`
 //! entity per kind via `entities_named` (each `KindId` is its own entity type,
-//! §3.1), injecting the node's model and sandbox seams into every activation
+//! §4.1), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 
 use std::collections::BTreeMap;
@@ -60,12 +60,12 @@ use crate::session::TurnId;
 use crate::tool::ToolError;
 
 /// Interned entity-type names, keyed by kind name (entity keys purely by string,
-/// §4.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
+/// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
 /// the leaked name instead of leaking a fresh copy each attempt.
 static ENTITY_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// An entity type name must be `&'static` (the `EntityName` tag, §4.1); kinds are a
+/// An entity type name must be `&'static` (the `EntityName` tag, §5.1); kinds are a
 /// bounded deployment-time set, so interning one leaked `&'static str` per
 /// distinct kind name is sound.
 fn leak_entity_type(kind_id: &KindId) -> &'static str {
@@ -81,7 +81,7 @@ fn leak_entity_type(kind_id: &KindId) -> &'static str {
 }
 
 /// The system a harness runs on: exactly an [`EntitySystem`] (the agent is an
-/// entity, §3.1; its events ride [`ActorSystem::emit`]). The name is the
+/// entity, §4.1; its events ride [`ActorSystem::emit`]). The name is the
 /// harness's own vocabulary for the requirement, so a consumer writes
 /// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
 /// every entity-hosting system one.
@@ -92,15 +92,15 @@ pub trait HarnessSystem: EntitySystem {}
 impl<S: EntitySystem> HarnessSystem for S {}
 
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
-/// activation it hosts (§5.1): the per-kind entity directory (for routing and
+/// activation it hosts (§6.2): the per-kind entity directory (for routing and
 /// delegation), the cluster-wide kind registry, and the agent runtime tuning. It holds
 /// **no** activation seams: those live on the hosted kind's [`Seams`].
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
     pub(crate) config: HarnessConfig,
     /// One `Entities` handle per kind, set once after every kind is built, so an
-    /// entity can address children of any kind for delegation (§6.1) and cancel
-    /// propagation (§7.2). Filled after construction: the factories that produce
+    /// entity can address children of any kind for delegation (§8.1) and cancel
+    /// propagation (§9.2). Filled after construction: the factories that produce
     /// activations are captured before the handles exist.
     pub(crate) hosts: OnceLock<BTreeMap<KindId, Entities<Agent<S>>>>,
 }
@@ -114,7 +114,7 @@ impl<S: HarnessSystem> Shared<S> {
     }
 }
 
-/// A hosted kind's activation seams (§2.1, §2.3): the node's model and sandbox,
+/// A hosted kind's activation seams (§3.1, §3.3): the node's model and sandbox,
 /// injected into each activation of that kind. An `Agent` exists only for a
 /// **hosted** kind, so the seams are always present, no `Option`. A
 /// routing-only kind has no `Seams`: it never activates.
@@ -124,9 +124,9 @@ pub(crate) struct Seams {
     pub(crate) sandbox: Arc<dyn SandboxProvider>,
 }
 
-/// One node's view of the session-entity namespace (agent spec §2.5): it
+/// One node's view of the session-entity namespace (agent spec §3.4): it
 /// addresses every kind's sessions, and for the kinds this node **hosts** it runs
-/// their entity type with the node's model and sandbox seams (§2.1, §2.3). Built with
+/// their entity type with the node's model and sandbox seams (§3.1, §3.3). Built with
 /// [`Harness::builder`]; cheap to clone, every clone shares the node's directory.
 pub struct Harness<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
@@ -144,7 +144,7 @@ impl<S: HarnessSystem> Clone for Harness<S> {
 
 impl<S: HarnessSystem> Harness<S> {
     /// Start building a harness on this node over the cluster-wide `kinds`
-    /// registry (§5.1, identical on every node). Select which kinds this node
+    /// registry (§6.2, identical on every node). Select which kinds this node
     /// hosts with [`host`](HarnessBuilder::host) / [`host_all`](HarnessBuilder::host_all)
     /// and which it only routes with
     /// [`route_kind`](HarnessBuilder::route_kind), then `build`. The common
@@ -198,7 +198,7 @@ impl<S: HarnessSystem> Harness<S> {
         builder.build()
     }
 
-    /// A client view of `session` under `kind` (agent spec §2.5). Pure:
+    /// A client view of `session` under `kind` (agent spec §3.4). Pure:
     /// name→shard is a local hash, no I/O; the one failure is a directory
     /// miss, a kind this node neither hosts nor routes ([`UnknownKind`]).
     /// Kind names reach clients from outside (a URL path at the gateway), so
@@ -245,7 +245,7 @@ impl std::error::Error for UnknownKind {}
 /// apart: a retry can clear an `Entity` failure, never a `Rejected` one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptError {
-    /// The session refused the turn (§5.3): a reused `TurnId` with different
+    /// The session refused the turn (§7.2): a reused `TurnId` with different
     /// content, or a kind that is not the entity's type. A caller bug, and
     /// permanent: the same submit always rejects the same way.
     Rejected(SubmitReject),
@@ -289,7 +289,7 @@ pub struct HasRoutes;
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
     /// The node-scoped entity capabilities every hosted kind's entity type
-    /// shares (storage §2.2, entity §10): one per node, not per kind.
+    /// shares (storage §3.2, entity §11): one per node, not per kind.
     entity_node: EntityNode<S>,
     kinds: Kinds,
     config: HarnessConfig,
@@ -299,8 +299,8 @@ pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
 }
 
 impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
-    /// The node-scoped entity capabilities every hosted kind shares (storage §2.2,
-    /// entity §10): the blocking-I/O pool and the metrics registry. Defaults to the system's
+    /// The node-scoped entity capabilities every hosted kind shares (storage §3.2,
+    /// entity §3.4): the blocking-I/O pool and the metrics registry. Defaults to the system's
     /// own (inline I/O and discarded metrics) which is what the simulation wants.
     ///
     /// A deployment on real storage sets it once here rather than per kind, since a
@@ -312,7 +312,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         self
     }
 
-    /// Override the agent runtime tuning (§5.2); defaults to [`HarnessConfig::default`].
+    /// Override the agent runtime tuning (§7.1); defaults to [`HarnessConfig::default`].
     pub fn config(mut self, config: HarnessConfig) -> Self {
         self.config = config;
         self
@@ -320,7 +320,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 
     /// Host the registered kind named `kind` on this node, injecting `model` and
     /// `sandbox` into each of its activations. Panics if `kind` is not in the
-    /// registry this builder was seeded with (§5.1: a node hosts only kinds it
+    /// registry this builder was seeded with (§6.2: a node hosts only kinds it
     /// knows). The panic is raised here rather than at `build`, so it points
     /// at the line that names the kind.
     pub fn host(
@@ -381,12 +381,12 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// starts no hosting, so a poll loop never double-hosts.
     ///
     /// Panics unless every hosted kind's delegation allowlist is contained in
-    /// this node's directory (hosted ∪ routed, §5.1): the parent's node launches
-    /// the child `Submit` (§6.1) and delivers owed cancels (§7.2) through its
+    /// this node's directory (hosted ∪ routed, §6.2): the parent's node launches
+    /// the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its
     /// own entity for the child's kind, so an uncovered allowlist would fail
     /// every delegation per-call and leave a cancel owed until a
     /// better-configured node leads the shard. A deployment configuration
-    /// error, surfaced as loudly as a duplicate tool name (§2.4).
+    /// error, surfaced as loudly as a duplicate tool name (§6.1).
     fn assemble(self) -> Option<Harness<S>> {
         let directory: BTreeSet<&KindId> = self
             .hosted
@@ -417,7 +417,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         // directory (via `shared`), this kind's definition, and its seams, and
         // builds a fresh activation per (re)activation, so the entity needs no
         // `Default` and no process-global; multi-node-in-one-process simulations
-        // each get their own (§2.2).
+        // each get their own (§3.2).
         for (id, def, seams) in &self.hosted {
             let entity_type = leak_entity_type(id);
             let factory_shared = Arc::clone(&shared);
@@ -450,7 +450,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
     /// Build the agent runtime. Infallible: there is nothing to discover. Panics if a
     /// hosted kind's delegation allowlist names a kind this node neither hosts
-    /// nor routes (§5.1): a deployment configuration error.
+    /// nor routes (§6.2): a deployment configuration error.
     pub fn build(self) -> Harness<S> {
         self.assemble()
             .expect("a host-only build has no routed kinds to discover")
@@ -461,14 +461,14 @@ impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
     /// Build the agent runtime, or `None` until every routed kind's host gateway has
     /// gossiped into this node's receptionist (poll). Hosting side effects run
     /// only once all routed kinds resolve. Panics if a hosted kind's delegation
-    /// allowlist names a kind this node neither hosts nor routes (§5.1): a
+    /// allowlist names a kind this node neither hosts nor routes (§6.2): a
     /// deployment configuration error.
     pub fn build(self) -> Option<Harness<S>> {
         self.assemble()
     }
 }
 
-/// A typed client handle to one session (agent spec §2.5): a thin agent-facing
+/// A typed client handle to one session (agent spec §3.4): a thin agent-facing
 /// surface over [`EntityRef<Agent>`](entity::EntityRef).
 pub struct SessionRef<S: HarnessSystem> {
     entity: EntityRef<Agent<S>>,
@@ -489,8 +489,8 @@ impl<S: HarnessSystem> Clone for SessionRef<S> {
 }
 
 impl<S: HarnessSystem> SessionRef<S> {
-    /// Submit a turn and await its run's terminal outcome (agent spec §2.6,
-    /// §5.3): `Submit` (ack) plus awaiting the one `RunCompleted` notification,
+    /// Submit a turn and await its run's terminal outcome (agent spec §7.2,
+    /// §7.2): `Submit` (ack) plus awaiting the one `RunCompleted` notification,
     /// within the runtime's `submit_deadline`. The deadline bounds this
     /// caller's **wait**, never the run: a lapse returns
     /// `PromptError::Entity(EntityError::Call(CallError::Timeout))` and the run
@@ -535,22 +535,22 @@ impl<S: HarnessSystem> SessionRef<S> {
         }
     }
 
-    /// Cancel the run `turn` names (agent spec §2.6, §7.2): idempotent.
+    /// Cancel the run `turn` names (agent spec §7.2, §9.2): idempotent.
     pub async fn cancel(&self, turn: &TurnId) -> Result<(), EntityError> {
         self.entity.ask(Cancel { turn: turn.clone() }).await
     }
 
-    /// The recorded outcome of the turn `turn` names (agent spec §2.5): `None`
+    /// The recorded outcome of the turn `turn` names (agent spec §3.4): `None`
     /// while it is queued or running, or when no such turn was accepted.
     /// Activates the session, unlike [`tail`](Self::tail).
     pub async fn outcome(&self, turn: &TurnId) -> Result<Option<RunOutcome>, EntityError> {
         self.entity.ask(TurnOutcome { turn: turn.clone() }).await
     }
 
-    /// Read committed records (agent spec §8.2): at most `limit` records
+    /// Read committed records (agent spec §10.2): at most `limit` records
     /// after `from` (`limit` clamped to [`TAIL_PAGE`]); an
     /// idempotent, replication-free read of the leader's journal, riding
-    /// entity's gateway-level event read (entity §6). It never
+    /// entity's gateway-level event read (entity §7). It never
     /// get-or-activates the session, so **polling a hibernated session leaves
     /// it asleep**: observation costs a journal read, not a rehydration. The
     /// returned `Seq`s are the journal's real slots (facet records occupy
@@ -560,7 +560,7 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// always safe to retry, since a read commits nothing.
     ///
     /// The returned [`EventHistory`]'s `base` reports how far snapshot
-    /// compaction has truncated the journal (storage §8): a `from` below it
+    /// compaction has truncated the journal (storage §9): a `from` below it
     /// asked for records the session's snapshot has subsumed, and the records
     /// in `(from, base]` are not (and can no longer be) served. `base <=
     /// from` means the page is complete history from `from`; without the base,
@@ -572,22 +572,22 @@ impl<S: HarnessSystem> SessionRef<S> {
             .await
     }
 
-    /// Follow the session's records after `from` live (§8.2): the entity's
-    /// follower over the session (entity §6.3). Caller-driven: pull batches
+    /// Follow the session's records after `from` live (§10.2): the entity's
+    /// follower over the session (entity §7.3). Caller-driven: pull batches
     /// with its `next`.
     pub fn follow(&self, from: Seq) -> Follower<S> {
         self.entity.follow(from)
     }
 }
 
-/// One page bound for a caller's tail reads (§8.2): [`SessionRef::tail`]
+/// One page bound for a caller's tail reads (§10.2): [`SessionRef::tail`]
 /// clamps `limit` to it, so no single call asks the journal for an unbounded
 /// reply. A caller wanting more pages advances `from` past the last `Seq`
-/// returned. (The gateway also bounds each wire page server-side, entity §6,
+/// returned. (The gateway also bounds each wire page server-side, entity §7,
 /// so the clamp here is the API contract, not the safety.)
 pub const TAIL_PAGE: u32 = 1024;
 
-/// A live follower over a session's records (§8.2): entity's **E16**
+/// A live follower over a session's records (§10.2): entity's **E16**
 /// reconciler, yielding the exact committed record sequence, or
 /// `Followed::Truncated` where compaction outran the cursor.
 pub type Follower<S> = entity::Follower<Agent<S>>;
@@ -596,7 +596,7 @@ pub type Follower<S> = entity::Follower<Agent<S>>;
 /// compaction base the cursor jumped to.
 pub type Followed = entity::Followed<Record>;
 
-/// The ephemeral reply-to actor behind `prompt` and delegation (§5.3): it parks
+/// The ephemeral reply-to actor behind `prompt` and delegation (§7.2): it parks
 /// on one [`RunCompleted`] notification, hands its outcome to a one-shot channel,
 /// and stops. Its `ActorRef` is what rides in `Submit { reply_to }`; the run's
 /// outcome is delivered to it whether the run is still live or already ended.
@@ -621,7 +621,7 @@ impl<S: HarnessSystem> Actor for ReplyMailbox<S> {
     type System = S;
 
     fn register(registry: &mut HandlerRegistry<Self>) {
-        // `RunCompleted` only: `Discard` stays local-only (§5.3); the caller's
+        // `RunCompleted` only: `Discard` stays local-only (§7.2); the caller's
         // own guard stops the mailbox, never a peer.
         registry.accept::<RunCompleted>();
     }
@@ -636,7 +636,7 @@ impl<S: HarnessSystem> Handler<RunCompleted> for ReplyMailbox<S> {
     }
 }
 
-/// Stop an ephemeral reply mailbox whose caller's wait has ended (§5.3).
+/// Stop an ephemeral reply mailbox whose caller's wait has ended (§7.2).
 /// Local-only: never in `register`'s allowlist, so no peer can stop another
 /// caller's mailbox; only [`MailboxGuard`] sends it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -653,13 +653,13 @@ impl<S: HarnessSystem> Handler<Discard> for ReplyMailbox<S> {
     }
 }
 
-/// Ties a [`ReplyMailbox`] to its caller's wait (§5.3): dropping the guard
+/// Ties a [`ReplyMailbox`] to its caller's wait (§7.2): dropping the guard
 /// (every exit from a submit-and-attach attempt, including the caller dropping
 /// the future mid-await) launches a [`Discard`] at the mailbox. Disarmed on
 /// the one path where the mailbox has already delivered and stopped itself; a
 /// discard racing a late delivery is harmless either way (a `tell` to a
 /// stopped actor fails quietly, and a lost notification is recovered by
-/// re-contact, §2.6).
+/// re-contact, §7.2).
 pub(crate) struct MailboxGuard<S: HarnessSystem> {
     system: S,
     mailbox: ActorRef<ReplyMailbox<S>>,
@@ -694,41 +694,41 @@ impl<S: HarnessSystem> Drop for MailboxGuard<S> {
 }
 
 // ===========================================================================
-// The attach protocol (§5.3, §6.1): one submit-and-await attempt, and the two
+// The attach protocol (§7.2, §8.1): one submit-and-await attempt, and the two
 // loops over it.
 // ===========================================================================
 
 /// How many *consecutive* times an unreachable child is retried before a
-/// delegation gives up (§6.1): past it the child surfaces as a tool failure
-/// (§4.2), with the child's budget as the backstop (§7.2 item 3). A transport
+/// delegation gives up (§8.1): past it the child surfaces as a tool failure
+/// (§5.2), with the child's budget as the backstop (§9.2 item 3). A transport
 /// bound, backed off between tries; any successful contact resets it. Distinct
 /// from the wait on a reachable-but-slow child, which is budget-scaled config
-/// ([`HarnessConfig::child_wait`], §6.1).
+/// ([`HarnessConfig::child_wait`], §8.1).
 const TRANSPORT_RETRIES: u32 = 32;
 
 /// The outcome of one [`submit_and_attach`] attempt. The *policy* (when to give
 /// up, when to retry) is the caller's loop: the two callers bound it differently
-/// (§5.3, §6.1).
+/// (§7.2, §8.1).
 pub(crate) enum AttachOutcome {
     /// The run finished and delivered its outcome.
     Completed(RunOutcome),
     /// The submit was accepted but the wait lapsed (or the mailbox dropped):
     /// re-submitting the same `TurnId` re-attaches (A6).
     Lapsed,
-    /// The submit was permanently rejected (§5.3): never worth retrying.
+    /// The submit was permanently rejected (§7.2): never worth retrying.
     Rejected(SubmitReject),
     /// The entity was unreachable: a transport failure a retry might clear.
     Unreachable(EntityError),
 }
 
-/// One submit-and-await-outcome attempt against an entity (§5.3): spawn an
+/// One submit-and-await-outcome attempt against an entity (§7.2): spawn an
 /// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
 /// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
 /// because re-submitting the same `TurnId` is idempotent (A6). The mailbox
 /// lives exactly as long as the attempt: a [`MailboxGuard`] stops it on every
 /// path that ends without an outcome (including this future being dropped),
 /// so a re-attach replaces the mailbox rather than accumulating one per
-/// attempt (§5.3).
+/// attempt (§7.2).
 pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     system: &S,
     entity: &entity::EntityRef<Agent<S>>,
@@ -763,14 +763,14 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     }
 }
 
-/// Submit to a child and await its outcome (§6.1 step 2), with the derived
+/// Submit to a child and await its outcome (§8.1 step 2), with the derived
 /// `TurnId` keeping every re-attempt safe (A6). Re-attaches on the `cadence`
-/// (each lapse re-registers on whatever activation now hosts the child, §5.4)
+/// (each lapse re-registers on whatever activation now hosts the child, §7.3)
 /// until the budget-scaled `wait` lapses; retries a consecutively unreachable
 /// child up to [`TRANSPORT_RETRIES`] with backoff. Maps the child's
-/// `RunOutcome` onto this delegation's tool outcome (§4.2). A give-up resolves
+/// `RunOutcome` onto this delegation's tool outcome (§5.2). A give-up resolves
 /// the call only for the parent: the child run continues, its budget the
-/// backstop (§7.2 item 3).
+/// backstop (§9.2 item 3).
 pub(crate) async fn run_child<S: HarnessSystem>(
     system: S,
     child_ref: entity::EntityRef<Agent<S>>,
@@ -832,7 +832,7 @@ pub(crate) async fn run_child<S: HarnessSystem>(
 }
 
 /// Exponential backoff between transport retries of a child submit, capped
-/// (core §2.4).
+/// (core §9).
 fn child_backoff(attempt: u32) -> Duration {
     Backoff::Exponential {
         base: Duration::from_millis(200),

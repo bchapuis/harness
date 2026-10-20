@@ -13,7 +13,7 @@
 //! Instead each node offers a loopback admin socket, and the node (already a
 //! member, already routing) issues the entity command. One JSON request per
 //! line, one JSON reply. Every operation is an ordinary journaled entity
-//! command (machine §3); this socket adds no state, no authority, and no
+//! command (machine §4); this socket adds no state, no authority, and no
 //! durability of its own, so it stays a transport detail rather than a second
 //! control plane. It binds loopback because it carries no authentication: the
 //! machine's *own* boundary is the front door and its journaled key set (M4).
@@ -39,7 +39,7 @@ use tokio::io::BufReader;
 use crate::authority::NodeMachine;
 
 /// How long an admin-issued entity command waits. Provisioning imports the base
-/// image whole (facets §4.4), so it gets the long end.
+/// image whole (facets §5.4), so it gets the long end.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -76,7 +76,7 @@ pub enum AdminRequest {
 pub enum AdminReply {
     Done,
     Status(Box<StatusReply>),
-    /// The machine answered and said no (machine §3): not provisioned, already
+    /// The machine answered and said no (machine §4): not provisioned, already
     /// provisioned, a base image that would not import. Final: every node
     /// reaches the same journal, so asking again gets the same answer.
     Refused(MachineError),

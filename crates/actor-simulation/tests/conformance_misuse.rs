@@ -32,7 +32,7 @@ use support::Stop;
 
 type Log = Arc<Mutex<Vec<i64>>>;
 
-// --- §2.5 #11: watching the same target twice still yields exactly one signal --
+// --- §10 #11: watching the same target twice still yields exactly one signal --
 
 struct DoubleWatcher<S: ActorSystem> {
     target: ActorRef<Greeter<S>>,
@@ -73,7 +73,7 @@ fn watching_twice_still_yields_one_terminated() {
     assert_eq!(*log.lock().unwrap(), vec![-1]);
 }
 
-// --- §2.5: unwatch of a target never watched is a harmless no-op --------------
+// --- §10: unwatch of a target never watched is a harmless no-op --------------
 
 #[derive(Serialize, Deserialize)]
 struct Ping;
@@ -116,7 +116,7 @@ fn unwatch_of_a_never_watched_target_is_a_noop() {
     assert_eq!(alive, Ok(1), "the actor started cleanly and serves");
 }
 
-// --- §2.3: calling stop() repeatedly stops the actor exactly once ------------
+// --- §3.2: calling stop() repeatedly stops the actor exactly once ------------
 
 #[derive(Serialize, Deserialize)]
 struct StopNow;
@@ -162,7 +162,7 @@ fn repeated_stop_resigns_exactly_once() {
     assert_eq!(resigns, 1);
 }
 
-// --- §3.3: a zero-capacity mailbox is rejected ---------------------------------
+// --- §6: a zero-capacity mailbox is rejected ---------------------------------
 
 #[test]
 #[should_panic(expected = "positive")]

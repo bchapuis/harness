@@ -1,21 +1,21 @@
-//! Group routers over receptionist listings (utilities spec §2.2).
+//! Group routers over receptionist listings (utilities spec §3.1).
 //!
 //! A [`Router`] is a node-local, typed view over a receptionist [`Key`]: every
 //! routing decision draws from the **current in-rotation listing** (core spec
-//! §2.6 req 4) and picks one routee by strategy. It replicates nothing, introduces
+//! §3.7 req 4) and picks one routee by strategy. It replicates nothing, introduces
 //! no frames, and adds no delivery guarantee beyond the underlying `ask`/`tell`
-//! (core spec §4).
+//! (core spec §8.1).
 //!
 //! Each decision reads a fresh [`lookup`](actor_core::Receptionist::lookup)
 //! snapshot; the listing is replicated local state, so the read is synchronous
 //! and needs no background pump. The listing's order is deterministic (the
 //! registry is an ordered set), so round-robin is seed-reproducible, and the
-//! random strategy draws from the system's seeded entropy (core spec §2.12.2),
+//! random strategy draws from the system's seeded entropy (core spec §11),
 //! never a host RNG.
 //!
 //! Keyed (rendezvous-hashed) routing is the `*_by` family, available regardless
 //! of the keyless [`RouteStrategy`]: the caller supplies the routing key as
-//! bytes, and routees are ranked by their placement weight (utilities spec §2.1)
+//! bytes, and routees are ranked by their placement weight (utilities spec §4.1)
 //! over the routee's actor tag. The key is an explicit per-call parameter,
 //! because a typed router serves many message types and so cannot express a
 //! stored extractor.
@@ -39,17 +39,17 @@ use actor_core::Message;
 
 use crate::placement;
 
-/// The keyless selection strategies (utilities spec §2.2); keyed selection is the
+/// The keyless selection strategies (utilities spec §3.1); keyed selection is the
 /// [`route_by`](Router::route_by) family, available on every router.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteStrategy {
     /// Cycle through the listing in its deterministic order.
     RoundRobin,
-    /// Pick uniformly via the system's seeded entropy (core spec §2.12.2).
+    /// Pick uniformly via the system's seeded entropy (core spec §11).
     Random,
 }
 
-/// A group router over a receptionist [`Key`] (utilities spec §2.2).
+/// A group router over a receptionist [`Key`] (utilities spec §3.1).
 ///
 /// Cloning is cheap and clones share the round-robin cursor, so two handles to
 /// one logical router keep cycling as one.
@@ -82,7 +82,7 @@ impl<A: Actor> Router<A> {
         }
     }
 
-    /// The current in-rotation listing (a snapshot; core spec §2.6 req 4 filter
+    /// The current in-rotation listing (a snapshot; core spec §3.7 req 4 filter
     /// applies, so drained and down nodes' routees are omitted).
     pub fn routees(&self) -> Listing<A> {
         self.system.receptionist().lookup(self.key)
@@ -110,7 +110,7 @@ impl<A: Actor> Router<A> {
     }
 
     /// Pick a routee by rendezvous weight of `route_key` over the routees'
-    /// actor tags (utilities spec §2.1, §2.2): the same key over the same listing
+    /// actor tags (utilities spec §4.1, §3.1): the same key over the same listing
     /// selects the same routee on every node; ties resolve to the lower
     /// [`ActorId`](actor_core::ActorId). `None` when the listing is empty.
     pub fn route_by(&self, route_key: &[u8]) -> Option<ActorRef<A>> {

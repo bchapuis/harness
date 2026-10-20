@@ -1,10 +1,10 @@
-//! Cluster conformance (agent spec §5; invariants A2, A5, A6): the Agent
+//! Cluster conformance (agent spec §7; invariants A2, A5, A6): the Agent
 //! entity hosted on a real 3-node `ClusterSystem`, sessions placed by entity's
 //! shard map and driven from several nodes. A session activates on its shard's
-//! leader (§5.2); a re-submitted `TurnId` never starts a second run (A6); the
+//! leader (§7.1); a re-submitted `TurnId` never starts a second run (A6); the
 //! entity's single-writer fence (E1) keeps each transcript one total order: the
-//! harness builds no fence of its own (§3.1). Failover after a leader crash is
-//! the entity's rehydration (§5.4), exercised here by crashing a node and
+//! harness builds no fence of its own (§4.1). Failover after a leader crash is
+//! the entity's rehydration (§7.3), exercised here by crashing a node and
 //! re-submitting until the run completes on the new leader.
 //!
 //! This is the converged-cluster check. Pushing entity's `Quorum`-tier consensus
@@ -136,8 +136,8 @@ fn sessions_run_once_across_a_converged_cluster() {
     let (_net, harnesses) = cluster(&sim, Arc::new(sink.clone()));
 
     // Drive each session from a different node: the shard map, not the entry
-    // point, decides who hosts it (§5.2). Re-submit the same TurnId until the
-    // recorded outcome comes back (caller-driven resumption, §5.4).
+    // point, decides who hosts it (§7.1). Re-submit the same TurnId until the
+    // recorded outcome comes back (caller-driven resumption, §7.3).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
         let session = harness
@@ -189,7 +189,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
 
     // Run a session to completion, then crash the node that led its shard. A
     // re-submission of the same TurnId reactivates the session on the new leader
-    // (rehydrate + fold, §5.4) and returns the recorded outcome (A6): the run
+    // (rehydrate + fold, §7.3) and returns the recorded outcome (A6): the run
     // is not re-executed.
     let first = drive(&sim, Duration::from_secs(30), {
         let session = harnesses[0]
@@ -251,7 +251,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
     assert_invariants(&sink.events());
 }
 
-// -- crash-window orphaned calls (§4.2, §4.4) --------------------------------
+// -- crash-window orphaned calls (§5.2, §5.4) --------------------------------
 
 /// One step calling two tools at once, one the kind never declared and one it
 /// did; after their results, a final message. A pure function of the request,
@@ -281,15 +281,15 @@ fn mixed_call_model() -> ScriptedModel {
     })
 }
 
-/// The orphaned-call window (§4.4): the leader crashes after a `ModelResponse`
+/// The orphaned-call window (§5.4): the leader crashes after a `ModelResponse`
 /// commits and before either call's outcome does. The successor's first sight
 /// of the journal classifies both calls as orphaned. The declared tool
 /// resolves by its policy (`Kind::tool` declares `Interrupt`, so `Interrupted`);
 /// the unknown one, which nothing ever ran, is re-synthesized as `UnknownTool`
-/// (§4.2), never `Interrupted`.
+/// (§5.2), never `Interrupted`.
 ///
 /// The window is held open by the sandbox open: while it is in flight the
-/// activation launches nothing, the synthesized failure included (§2.3 item
+/// activation launches nothing, the synthesized failure included (§3.3 item
 /// 1), so the crash lands between the two commits by construction.
 #[test]
 fn an_orphaned_unknown_tool_call_is_resynthesized_on_resume() {
@@ -403,18 +403,18 @@ fn an_orphaned_unknown_tool_call_is_resynthesized_on_resume() {
         Some(&Err(ToolError::UnknownTool {
             name: "nope".to_string()
         })),
-        "nothing ran, so the successor re-synthesizes the outcome (§4.2)"
+        "nothing ran, so the successor re-synthesizes the outcome (§5.2)"
     );
     assert_eq!(
         outcomes.get("c-shell"),
         Some(&Err(ToolError::Interrupted)),
-        "the declared tool follows its policy (§4.4)"
+        "the declared tool follows its policy (§5.4)"
     );
 
     assert_invariants(&sink.events());
 }
 
-// -- crash-window cancel propagation (§7.2, A4) ------------------------------
+// -- crash-window cancel propagation (§9.2, A4) ------------------------------
 
 fn delegation_kinds() -> Kinds {
     let entity = || EntityConfig {
@@ -469,7 +469,7 @@ fn delegation_model(sim: &Simulation) -> Arc<dyn agent::Model> {
     })
 }
 
-/// The node of `key`'s most recent entity activation (entity §10).
+/// The node of `key`'s most recent entity activation (entity §11).
 fn last_activation(sink: &CollectingSink, key: &str) -> Option<NodeId> {
     sink.events()
         .iter()
@@ -511,10 +511,10 @@ fn await_journal(
     })
 }
 
-/// The R1 crash window (§7.2, A4): `RunEnded { Cancelled }` commits, and the
+/// The R1 crash window (§9.2, A4): `RunEnded { Cancelled }` commits, and the
 /// leader crashes before the propagating send reaches the recorded child. The
 /// owed propagation is a fold fact (`cancels_owed`), so the next contact (a
-/// re-sent `Cancel`, the §5.4 resume trigger) re-derives it on the new leader
+/// re-sent `Cancel`, the §7.3 resume trigger) re-derives it on the new leader
 /// and drives it to the child, which ends `Cancelled`; the delivery then
 /// journals `CancelDelivered`, retiring the debt.
 #[test]
@@ -562,7 +562,7 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     }
     sim.run_for(Duration::from_secs(3_700));
 
-    // The journaled delegation names the child (§6.1).
+    // The journaled delegation names the child (§8.1).
     let parent_bodies = await_journal(
         &sim,
         &harnesses[0],
@@ -653,7 +653,7 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
         "crash-window: the child is still live before the parent is re-contacted"
     );
 
-    // Re-contact the cancelled session (a re-sent Cancel, §5.4): the new
+    // Re-contact the cancelled session (a re-sent Cancel, §7.3): the new
     // leader's fold still owes the propagation, and drives it to the child.
     drive(&sim, Duration::from_secs(30), {
         let session = surviving
@@ -704,14 +704,14 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     assert_invariants(&sink.events());
 }
 
-// -- crash-window queued turn (§2.6, §5.4) -----------------------------------
+// -- crash-window queued turn (§7.2, §7.3) -----------------------------------
 
 /// The R2 crash window: a turn acked *behind* a live run is fold state
-/// (`TurnSubmitted` enqueues, §2.6), so a leader crash between the ack and the
+/// (`TurnSubmitted` enqueues, §7.2), so a leader crash between the ack and the
 /// run start loses nothing. The sharpest form is asserted here: after the
 /// crash, only the *first* turn's caller ever re-contacts the session, yet the
 /// queued second turn still runs to completion; any contact drives the
-/// dispatcher, which starts the queue head once no run is live (§5.4).
+/// dispatcher, which starts the queue head once no run is live (§7.3).
 #[test]
 fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     let sim = Simulation::new(31);
@@ -793,7 +793,7 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     let spare = *[A, B, C].iter().find(|n| **n != leader).expect("survivor");
     let surviving = harnesses[[A, B, C].iter().position(|n| *n == spare).unwrap()].clone();
 
-    // Only t-1's caller re-contacts (§5.4): the attach resumes the run on the
+    // Only t-1's caller re-contacts (§7.3): the attach resumes the run on the
     // new leader; its re-issued 600s call completes it.
     let first = drive(&sim, Duration::from_secs(700), {
         let session = surviving

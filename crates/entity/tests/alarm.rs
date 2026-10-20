@@ -1,4 +1,4 @@
-//! Durable-alarm tests under deterministic simulation (entity §13).
+//! Durable-alarm tests under deterministic simulation (facets §5.5).
 //!
 //! Drives the [`Alarm`] facet and the [`on_alarm`](Entity::on_alarm) seam through
 //! the public API on the single-node `Local` tier: an armed deadline fires exactly
@@ -63,14 +63,14 @@ impl Entity for AlarmEntity {
     }
 
     // Fire once; return no re-arm, so the consume-on-fire cancel stands and the
-    // alarm does not repeat (spec facets §4.5).
+    // alarm does not repeat (spec facets §5.5).
     async fn on_alarm(&self, _state: &AlarmState, _ctx: &EntityCtx<Self>) -> Vec<AlarmEvent> {
         vec![AlarmEvent::Fired]
     }
 
     // Regression net: activation has no command stage armed, so this read must
     // answer from the committed form rather than panic about command scope
-    // (facets §4.5).
+    // (facets §5.5).
     fn on_activate(
         &mut self,
         ctx: &EntityCtx<Self>,
@@ -211,7 +211,7 @@ fn alarm_fires_once_past_due() {
         fired, 1,
         "the alarm fires exactly once with no caller present"
     );
-    assert!(!pending, "firing consumes the alarm (spec facets §4.5)");
+    assert!(!pending, "firing consumes the alarm (spec facets §5.5)");
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn pending_alarm_vetoes_hibernation() {
 
     // Aggressive idle window, far-future alarm, and NO alarm index wired: with
     // nothing to wake it, the entity must stay resident so the in-activation timer
-    // survives to fire it (the unconditional half of the veto, spec facets §4.5). Drive
+    // survives to fire it (the unconditional half of the veto, spec facets §5.5). Drive
     // with `launch` + `run_for`, not `block_on`: a vetoing entity never quiesces,
     // so `block_on` would run to the deadline instead of stopping at the bound.
     let (sim, recorder, entities) = rig(4, Duration::from_millis(10));

@@ -1,4 +1,4 @@
-//! The disk facet under the cluster fault swarm (spec facets §4.4, entity §11; V&V
+//! The disk facet under the cluster fault swarm (spec facets §5.4, entity §10; V&V
 //! checklist #4, #5, #7).
 //!
 //! `tests/disk_local.rs` proves the facet's contract on the `Local` tier; this
@@ -60,7 +60,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use support::Exercised;
 
-/// 1 MiB: the facet's fixed block size (spec facets §4.4).
+/// 1 MiB: the facet's fixed block size (spec facets §5.4).
 const BLOCK: u64 = 1 << 20;
 /// The base image: two blocks, the second partial.
 const IMAGE_BYTES: u64 = BLOCK + BLOCK / 2;
@@ -88,7 +88,7 @@ impl Entity for DiskBox {
 }
 
 /// Provision on first touch, then write a deterministic stamp into the live
-/// image and run the capture command (facets §4.4): one command, one manifest
+/// image and run the capture command (facets §5.4): one command, one manifest
 /// record, committing through the quorum path (E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Stamp {
@@ -112,7 +112,7 @@ impl EntityHandler<Stamp> for DiskBox {
         use std::io::Seek;
         use std::io::Write;
         let disk = ctx.disk();
-        // Provision lazily (the machine's first-activation import, facets §4.4): the
+        // Provision lazily (the machine's first-activation import, facets §5.4): the
         // import stages this command's one manifest, so the stamp itself waits
         // for the next command on a fresh entity.
         if disk.image_bytes().expect("size") == 0 {
@@ -131,7 +131,7 @@ impl EntityHandler<Stamp> for DiskBox {
     }
 }
 
-/// Read eight bytes at `offset` from the live image: a pure read (§6).
+/// Read eight bytes at `offset` from the live image: a pure read (§7).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadStamp {
     offset: u64,

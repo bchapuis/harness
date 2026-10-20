@@ -181,7 +181,7 @@
 //! `sync_all`). [`Wal`] keeps each record's frame offset, which makes `truncate` a
 //! single `set_len`. A refusal from [`compat`] becomes an `InvalidData` error carrying
 //! the [`compat::Incompatible`] itself, whose message names the format and the
-//! version found (compatibility §2.1), so a caller that logs it says which file and
+//! version found (compatibility §3), so a caller that logs it says which file and
 //! which build disagree.
 
 use std::fs;
