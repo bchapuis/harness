@@ -1,49 +1,48 @@
 # Edge: Specification
 
-The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** carry the meanings defined in RFC 2119. Sections of this document are cited as plain **§N**; other documents carry a prefix: **agent §N**, **entity §N**, **actor §N**.
+The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** carry the meanings defined in RFC 2119.
 
 ## 1. Scope
 
-The edge is the public HTTP/SSE front of an agent cluster, and its trust boundary. It is a cluster client: it joins the actor transport (cluster §4) as a non-voting member that hosts no entity, holds a routing-only client view of the session namespace (agent §3.4), and drives each caller's session by addressing the session's entity directly, with no control protocol in between. A request proves a principal with a bearer token; the edge scopes every session the request names under that principal, and records ownership in the tenancy directory, an entity (entity §3) this document specifies by its observable behavior. Front ends build on the edge's HTTP surface.
+The edge is the public HTTP/SSE front of an agent cluster, and its trust boundary. A cluster client, it joins the actor transport (cluster §4) as a non-voting member hosting no entity, and drives each caller's session by addressing the session's entity directly (§4.1), with no control protocol between. It scopes every session a request names under the principal its bearer token proves, and records ownership in the tenancy directory, an entity (entity §3) specified here by its observable behavior. Front ends build on the edge's HTTP surface.
 
-Tenancy lives entirely at the edge and in the directory: the entity layer stays tenant-blind. The edge holds no durable state, so any number of replicas MAY run, each joined under its own node id.
+Tenancy lives only at the edge and in the directory; the entity layer is tenant-blind. The edge holds no durable state, so any number of replicas MAY run, each joined under its own node id.
 
 ### 1.1 Non-goals
 
 - **Per-tenant budgets and quotas:** a run's budget (agent §9.1) bounds a run, not a tenant.
 - **Session deletion:** nothing retires a session or forgets its directory entry on a front end's behalf.
-- **Token formats and introspection:** a token means what the deployment's verifier says it means (§3.2).
+- **Token formats and introspection:** a token means what the verifier says (§3.2).
 - **A WebSocket transport:** the edge speaks HTTP and Server-Sent Events only.
 
 ### 1.2 Conformance classes
 
-- An **edge** conforms by meeting §3.1, §4, and §6, and by calling the directory as §3.3 states.
-- A **token verifier** conforms by meeting §3.2.
-- A **directory** conforms by meeting §3.3 and §5.5.
-- A **deployment** conforms by meeting §4.1 and §6.
+- An **edge**: §3.1, §4, §6, and the caller's side of §3.3.
+- A **token verifier**: §3.2.
+- A **directory**: §3.3, §5.5.
+- A **deployment**: §4.1, §6.
 
 ## 2. Model
 
 - **Front end**: an HTTP client of the edge.
 - **Principal**: the tenant identity a request acts as, named by a **principal id** (§4.3).
-- **Token verifier**: the deployment's mapping from a bearer token to a principal id, or to nothing (§3.2). A **development verifier** takes the token itself as the principal id, verifying nothing.
-- **Kind**: an agent kind (agent §6.1), named in a request path. A **routed kind** is one the edge serves.
+- **Kind**: an agent kind (agent §6.1), named in a request path.
 - **Client session id**: the session id a front end names in a request path. The **scoped session key** is the key the edge addresses for it (§4.3).
 - **Root session**: a session a front end names. A **child session** is one a delegation derived (agent §8.1).
 - **Cursor**: a journal sequence number (agent §10.2). A read or a stream yields only records strictly after it.
-- **Compaction base**: the journal's compaction floor (agent §10.2): records up to it are subsumed by a snapshot and not served.
+- **Compaction base**: the journal's compaction floor (agent §10.2): records up to it are not served.
 - **Wait**: how long a prompt holds its caller for the run's outcome.
-- **Tenancy directory**: one entity per principal, keyed by the principal id, that indexes the entity names the principal owns (§3.3). Each **entry** is a name with its **metadata**: a display label, a creation time, and free-form string attributes, every field supplied by the caller.
+- **Tenancy directory**: one entity per principal, keyed by the principal id, that indexes the entity names the principal owns (§3.3). Each **entry** is a name with its **metadata**: a display label, a creation time, and free-form string attributes.
 
 ## 3. Seams
 
 ### 3.1 The HTTP/SSE surface
 
-The client-facing boundary: the edge implements it, front ends consume it. Its operations are the routes of §5.1, and its headers, events, and codes are registered beside them (§5). Every route under `/v1` MUST authenticate (§4.2).
+The client-facing boundary: the edge implements it, front ends consume it. Its operations are the routes of §5.1, with headers, events, and codes registered beside them. Every route under `/v1` MUST authenticate (§4.2).
 
 ### 3.2 Token verification (`TokenVerifier`)
 
-A plug point: a deployment supplies the verifier, and the edge consults it on every authenticated request.
+A plug point: a deployment supplies the **token verifier**, and the edge consults it on every authenticated request.
 
 ```rust
 pub trait TokenVerifier: Send + Sync {
@@ -59,7 +58,7 @@ pub trait TokenVerifier: Send + Sync {
 
 ### 3.3 The tenancy directory
 
-A boundary between the edge and the directory (§2), whose journal records the principal's entries. Its entity type and command manifests are registered in §5.5.
+A boundary between the edge and the directory (§2), whose journal records the principal's entries; its manifests are registered in §5.5.
 
 | Command | Reply | Commits |
 |---|---|---|
@@ -70,18 +69,17 @@ A boundary between the edge and the directory (§2), whose journal records the p
 | list | every entry | nothing |
 | list by type (an entity type) | every entry of that type | nothing |
 
-- The directory is an index, not an authority: it never reaches into the entities it names, and it is not an authorization boundary (§6).
-- The directory reads no clock: every metadata field, the creation time included, is the caller's.
+- The directory is an index, neither an authority nor an authorization boundary: it never reaches into the entities it names, reads no clock (every metadata field, the creation time included, is the caller's), and a reference to it is an in-cluster capability, never a tenant credential.
 - A caller MUST NOT record metadata that mirrors the named entity's live state.
 
 ## 4. Semantics
 
 ### 4.1 Cluster membership
 
-The edge reaches the cluster through a routing-only client view (agent §3.4) and a client of the directory's entity type, both resolved through discovery (actor §3.7) before it serves.
+The edge reaches the cluster through a routing-only client view of the session namespace (agent §3.4) and a client of the directory's entity type, both resolved through discovery (actor §3.7).
 
 - The edge's node id MUST lie outside the voter roster, and each node MUST admit it explicitly, so it never votes or hosts.
-- The edge MUST route only kinds the nodes host: it serves only once every routed kind and the directory have resolved, and a request naming a kind it does not route fails with `404` (§4.8).
+- The edge MUST route only kinds the nodes host: it serves only once every kind it routes and the directory have resolved, and a request naming a kind it does not route fails with `404` (§4.8).
 
 ### 4.2 Identity
 
@@ -93,13 +91,13 @@ A request names its principal by a bearer token (§5.2), and the edge alone deci
 
 Isolation comes from key prefixing, not from the directory. For a request authenticated as principal `P` naming client session id `s`, the edge MUST address the session `(kind, P/s)`. The front end never supplies the prefix, so it can name only entities in its own namespace.
 
-- A principal id MUST be non-empty and consist of ASCII alphanumerics, `_`, `-`, and `.` only; in particular it excludes `/` and `:`.
+- A principal id MUST be non-empty and consist of ASCII alphanumerics, `_`, `-`, and `.` only.
 - A client session id MUST be non-empty and free of `/`, or the request fails with `400`. A scoped key therefore splits at its first `/` into exactly the principal id and the client session id.
 - The edge MUST validate the session id and resolve the kind before any side effect: a malformed or unknown request records nothing in the directory.
 
 ### 4.4 Children are unaddressable
 
-A child session is reached only by the agent that derived it (agent §8.1), never by a front end. A derived child session id MUST differ from every root key an edge can admit. This holds by construction: every derived id begins with a decimal length and a `:` (agent §8.1), so its first `/`-separated segment is not a principal id, while every admitted root key is `P/s` for a principal `P`. No front end can therefore name a child, and no listing returns one. Child ids are also distinct across tenants, since the parent's scoped key is one of the derivation's framed components.
+A child session is reached only by the agent that derived it, never by a front end. A derived child session id MUST differ from every root key an edge can admit, and does: every derived id begins with a decimal length and a `:` (agent §8.1), so its first `/`-separated segment is no principal id (§4.3). No front end can therefore name a child, and no listing returns one. Child ids are also distinct across tenants, since the parent's scoped key is a framed component of the derivation.
 
 ### 4.5 Prompts
 
@@ -110,20 +108,20 @@ A child session is reached only by the agent that derived it (agent §8.1), neve
 
 A stream carries committed records as Server-Sent Events (§5.3).
 
-- A stream MUST resume strictly after the cursor a reconnect presents (the last event id, else the `from` parameter), so no record is delivered twice.
-- A stream MUST emit `truncated` before resuming past a compaction gap, never skip the gap silently.
-- A follow stream MUST end once its turn has ended: after the batch holding the turn's `RunEnded`, or at once with `end` when the turn's recorded outcome (agent §3.4) shows it ended behind the cursor. A turn not yet accepted keeps the stream open.
-- A streamed prompt MUST end: with `outcome` once its run has ended, and with `error` once its submit is refused (a `409`) or the caller's wait ends. It MUST NOT wait for a `RunEnded` behind the cursor, which the stream never replays: a re-prompt of a turn that ended behind the cursor answers with the recorded outcome alone.
+- A stream MUST resume strictly after the cursor a reconnect presents (the last event id, else the `from` parameter).
+- A stream MUST emit `truncated` before resuming past a compaction gap, never skipping it silently.
+- A follow stream MUST end once its turn has ended: after the batch holding the turn's `RunEnded`, or at once with `end` when the turn's recorded outcome (agent §3.4) shows it ended behind the cursor; a turn not yet accepted keeps it open.
+- A streamed prompt MUST end: with `outcome` once its run has ended, and with `error` once its submit is refused (a `409`) or the caller's wait ends. It MUST NOT wait for a `RunEnded` behind the cursor: a re-prompt of a turn that ended there answers with the recorded outcome alone.
 
 ### 4.7 The ownership index
 
-- Before submitting a prompt, the edge MUST record the root session in its principal's directory, as the entity name of kind and scoped session key, labelled with the client session id. The record is best-effort: a failure does not fail the prompt, the run proceeds, and the next prompt records the session again. Only root sessions are recorded.
+- Before submitting a prompt, the edge MUST record the root session in its principal's directory, as the entity name of kind and scoped session key, labelled with the client session id. The record is best-effort: a failure does not fail the prompt, and the next prompt records the session again. Only root sessions are recorded.
 - A listing MUST read the principal's own directory (list by type, for the requested kind) and return each entry's client session id, dropping any entry that does not unscope under the principal.
-- Reads (read records, follow) and cancel are not gated on the directory: the prefix already isolates them.
+- Reads (read records, follow) and cancel are not gated on the directory (§4.3).
 
 ### 4.8 Error model
 
-Every failure a front end sees is the error envelope (§5.1) carrying a stable code (§5.4), and the same envelope rides a stream's `error` event. Failure layers stay distinct (agent §7.2): a run that ran and failed is a `200` whose outcome carries the run's error, never an error status.
+Every failure a front end sees is the error envelope (§5.1) carrying a stable code (§5.4), on a stream as the `error` event. Failure layers stay distinct (agent §7.2): a run that ran and failed is a `200` whose outcome carries the run's error, never an error status.
 
 ## 5. Registries
 
@@ -189,8 +187,8 @@ The directory's entity type is `tenancy.Directory`. Its commands (§3.3):
 
 ## 6. Security considerations
 
-- **Trust boundary:** the edge holds references to session entities and presents the cluster secret on the transport, so it sits inside the cluster's trust boundary; untrusted callers reach it only over HTTP.
-- **Identity and isolation:** the edge alone decides identity (§4.2). Key prefixing isolates principals (§4.3), and children are unaddressable (§4.4). The directory is not an authorization boundary: a reference to it is an in-cluster capability, never a tenant credential.
-- **Tokens:** the edge MUST NOT log tokens. A deployment SHOULD supply tokens by file or secret store, not on a command line. The edge MUST refuse to serve with a development verifier on a non-loopback bind.
-- **Transport:** public TLS terminates in front of the edge (an ingress or a load balancer): a bearer token over plaintext is readable on the path. The cluster transport is plaintext on a trusted network, guarded by the cluster secret; a deployment whose transport crosses untrusted links MUST provision mutual TLS on it.
+- **Trust boundary:** holding session references and the cluster secret, the edge sits inside the cluster's trust boundary; untrusted callers reach it only over HTTP.
+- **Identity and isolation:** the edge alone decides identity (§4.2), key prefixing isolates principals (§4.3), children are unaddressable (§4.4), and the directory is no authorization boundary (§3.3).
+- **Tokens:** the edge MUST NOT log tokens, and MUST refuse to serve on a non-loopback bind with a development verifier (one taking the token itself as the principal id). A deployment SHOULD supply tokens by file or secret store, not on a command line.
+- **Transport:** public TLS terminates in front of the edge (an ingress or a load balancer), since a bearer token is readable over plaintext. The cluster transport is plaintext on a trusted network, guarded by the cluster secret; a deployment whose transport crosses untrusted links MUST provision mutual TLS on it.
 - **Exhaustion:** the wait ceiling and the body bound (§4.5) cap what one request holds; a tenant's total spend is not bounded (§1.1).

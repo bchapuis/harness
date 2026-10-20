@@ -101,7 +101,7 @@ impl EntityMetrics for () {
 /// Chosen around what the numbers mean rather than as a round decade ladder: a local
 /// fsync lands in the low hundreds of microseconds, a healthy same-zone quorum in the
 /// low milliseconds, a cross-zone one in the tens, and anything past a second is
-/// heading for the append timeout (storage §11). The buckets are dense where the decisions
+/// heading for the quorum deadline (storage §11). The buckets are dense where the decisions
 /// are.
 const BUCKETS_US: [u64; 11] = [
     100,       // in-memory / page cache

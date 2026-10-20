@@ -65,7 +65,7 @@ const M_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 5,
         spec: "machine §6, §7",
-        property: "A deposed activation self-fences within the lease: while attached it commits a fenced append once per lease interval, and failing that stops the microVM and severs its attachments",
+        property: "A deposed activation self-fences within the lease: while attached it commits a fenced append at least once per lease interval, and failing that stops the microVM and severs its attachments",
         verify: &[Verify::TestFn(
             "the_machine_survives_the_attach_crash_partition_failover_reconnect_story, \
              machine_invariants_hold_under_the_cluster_swarm",

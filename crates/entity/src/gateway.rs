@@ -248,7 +248,7 @@ pub(crate) struct Gateway<G: Entity> {
     /// How many shards the type's namespace is partitioned into (storage §4.1).
     shards: usize,
     config: EntityConfig,
-    /// What this **node** provides to every type it hosts (storage §3.2, entity §11), as opposed to
+    /// What this **node** provides to every type it hosts (storage §3.2, entity §3.4), as opposed to
     /// the per-type `config` above. Carried here so each activation gets the node's
     /// handles rather than rebuilding a default pair per host.
     capabilities: crate::node::NodeCapabilities,

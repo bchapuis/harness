@@ -80,8 +80,8 @@
 //!
 //! and every handler of the consumer's own whose records call for work calls
 //! [`Engine::tick`] with the state it was given; the cycle's entry point after a
-//! commit (§4.2 item 1), and, on the activation's first handler, what classifies
-//! the orphan set (§5.3). The workflow re-enters after its own settles by itself,
+//! commit (§4.2 item 1), and, when it is the activation's first entry into the
+//! engine, what classifies the orphan set (§5.3). The workflow re-enters after its own settles by itself,
 //! and arms the backoff timer after one that committed nothing (§4.2 item 3). The
 //! crate's conformance suites run this shape as a fan-out fixture under
 //! `tests/support`.

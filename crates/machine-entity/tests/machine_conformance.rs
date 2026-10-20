@@ -276,7 +276,7 @@ impl ClusterWorkload for Narrative {
             assert!(
                 !watch.lock().expect("story watch").live.contains(&holder),
                 "the partitioned holder {holder} must deactivate within the lease \
-                 plus the append timeout (M5)",
+                 plus the quorum deadline (M5)",
             );
 
             // 3. Failover: heal; the majority side leads, the doomed session is

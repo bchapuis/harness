@@ -179,8 +179,8 @@ impl<D: Workflow> Engine<D> {
     /// launching effects from the resulting cycle honor the write-ahead discipline
     /// (§6) rather than race it.
     ///
-    /// The state is what lets the activation's **first** handler classify the
-    /// orphan set (§5.3): a handler sees the committed state *before* its own
+    /// The state is what lets this call classify the orphan set when it is the
+    /// activation's **first** entry into the engine (§5.3): a handler sees the committed state *before* its own
     /// records, so on a fresh activation that is the rehydrated state exactly, and
     /// the work this command creates is never mistaken for work a previous
     /// activation left in flight.

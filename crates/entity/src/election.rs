@@ -1,8 +1,8 @@
 //! The per-shard leader-election group (spec storage §4.1, §6).
 //!
 //! A shard's placement is a small Raft group of its *R* replicas (the
-//! **leader-election group**) that elects one leader per term and records the
-//! replica set. It holds **no entity data** (storage §4.1). Its only role is to answer "who
+//! **leader-election group**) that elects one leader per term; its voters follow
+//! the replica set the shard map records. It holds **no entity data** (storage §4.1). Its only role is to answer "who
 //! may write this shard's entities, and under which term," and that term is the
 //! single-writer fencing token every per-entity append carries (storage §6).
 //!
